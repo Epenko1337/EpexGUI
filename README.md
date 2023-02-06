@@ -1,5 +1,5 @@
 # EpexGUI
-GUI to use wiresock in application mode
+GUI to use [wiresock](https://www.wiresock.net) in application mode
 
 Code is kinda retarded because my point was to make it fast as possible.
 
