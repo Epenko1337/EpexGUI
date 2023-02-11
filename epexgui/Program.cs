@@ -16,7 +16,7 @@ namespace epexgui
         public static string ConfigsFolder = MainFolder + "\\Configs";
         public static string SettingsFile = MainFolder + "\\Settings.txt";
         public static string WireSock = string.Empty;
-        public static SettingsManager setMan = new SettingsManager();
+        public static SettingsManager setMan;
     }
     internal static class Program
     {
@@ -26,6 +26,10 @@ namespace epexgui
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
+            if (!Directory.Exists(Global.MainFolder)) Directory.CreateDirectory(Global.MainFolder);
+            if (!Directory.Exists(Global.ConfigsFolder)) Directory.CreateDirectory(Global.ConfigsFolder);
+            Global.setMan = new SettingsManager();
+            
             if (!IsWiresockInstalled())
             {
                 MessageBox.Show("Wiresock will be installed now", "Wiresock not found", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -37,8 +41,6 @@ namespace epexgui
                 }
                 MessageBox.Show("Wiresock successfully installed", "Installation complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
-            if (!Directory.Exists(Global.MainFolder)) Directory.CreateDirectory(Global.MainFolder);
-            if (!Directory.Exists(Global.ConfigsFolder)) Directory.CreateDirectory(Global.ConfigsFolder);
 
             if (Global.setMan.settings.Autorun) Global.setMan.CheckTask();
             Application.Run(new Main());

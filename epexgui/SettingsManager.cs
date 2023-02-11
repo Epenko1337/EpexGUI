@@ -26,6 +26,7 @@ namespace epexgui
         private IniData data;
         public SettingsManager() 
         {
+            if (!File.Exists(Global.SettingsFile)) CreateSettings();
             InitSettings();
             parser = new FileIniDataParser();
             data = parser.ReadFile(Global.SettingsFile);
