@@ -105,6 +105,7 @@
       <DependentUpon>Taskmgr.cs</DependentUpon>
     </Compile>
     <Compile Include="SettingsManager.cs" />
+    <Compile Include="WireGuardBoosterImports.cs" />
     <Compile Include="WiresockManager.cs" />
     <EmbeddedResource Include="Forms\EditForm.resx">
       <DependentUpon>EditForm.cs</DependentUpon>
