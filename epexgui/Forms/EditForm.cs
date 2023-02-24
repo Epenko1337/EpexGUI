@@ -1,15 +1,9 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Windows.Forms;
 using System.IO;
+using System.Linq;
+using System.Windows.Forms;
 
-namespace epexgui
+namespace epexgui.Forms
 {
     public partial class EditForm : Form
     {
@@ -29,7 +23,7 @@ namespace epexgui
             PublicKey.Text = configManager.Config.PublicKey;
             InterfaceAddress.Text = configManager.Config.InterfaceAddress;
             Endpoint.Text = configManager.Config.Endpoint;
-            Dns.Text = configManager.Config.DNS;
+            Dns.Text = configManager.Config.Dns;
             TextToListbox(ExcludedAppsList, configManager.Config.DisallowedApps);
             TextToListbox(ExcludedIPList, configManager.Config.DisallowedIPs);
             TextToListbox(IncludedAppsList, configManager.Config.AllowedApps);
@@ -69,7 +63,7 @@ namespace epexgui
             {
                 if (ConfigPathToName(file).ToLower() == ConfigName.Text.ToLower() && ConfigName.Text.ToLower() != firstname.ToLower())
                 {
-                    MessageBox.Show("Configuration with this name already exists", "Save error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(@"Configuration with this name already exists", @"Save error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
             }
@@ -78,7 +72,7 @@ namespace epexgui
             configManager.Config.ConfigName = ConfigName.Text;
             configManager.Config.PrivateKey = PrivateKey.Text;
             configManager.Config.PublicKey = PublicKey.Text;
-            configManager.Config.DNS = Dns.Text;
+            configManager.Config.Dns = Dns.Text;
             configManager.Config.InterfaceAddress = InterfaceAddress.Text;
             configManager.Config.Endpoint = Endpoint.Text;
             configManager.Config.AllowedApps = ListboxToText(IncludedAppsList);
@@ -177,7 +171,11 @@ namespace epexgui
 
         private void InfoBtn_Click(object sender, EventArgs e)
         {
-            MessageBox.Show("IncludedApps – specifies comma separated list of application names (or partial names) to forward over VPN tunnel. This parameter narrows IncludedIPs, so the traffic to be tunneled should match both IncludedIPs and IncludedApps. For example, ‘IncludedApps = chrome’ and ‘IncludedIPs = 0.0.0.0/0’ will result in forwarding only Chrome browser over the VPN connection, everything else will bypass the tunnel.\n\nExcludedApps – specifies comma separated list of application names (or partial names) to be excluded from the tunneling. This parameter is the opposite of IncludedApps. Please note that IncludedApps takes precedence, and if both are specified, then IncludedApps is matched first.\n\nExcludedIPs – specifies comma separated list of IP subnets to be excluded from the tunneling. For example, IncludedIPs = 0.0.0.0/0 and ExcludedIPs = 192.168.0.1/24 will exclude 192.168.0.1/24 from the tunneling.", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(@"IncludedApps – specifies comma separated list of application names (or partial names) to forward over VPN tunnel. This parameter narrows IncludedIPs, so the traffic to be tunneled should match both IncludedIPs and IncludedApps. For example, ‘IncludedApps = chrome’ and ‘IncludedIPs = 0.0.0.0/0’ will result in forwarding only Chrome browser over the VPN connection, everything else will bypass the tunnel.
+
+ExcludedApps – specifies comma separated list of application names (or partial names) to be excluded from the tunneling. This parameter is the opposite of IncludedApps. Please note that IncludedApps takes precedence, and if both are specified, then IncludedApps is matched first.
+
+ExcludedIPs – specifies comma separated list of IP subnets to be excluded from the tunneling. For example, IncludedIPs = 0.0.0.0/0 and ExcludedIPs = 192.168.0.1/24 will exclude 192.168.0.1/24 from the tunneling.", @"Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }
 }

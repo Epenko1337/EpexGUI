@@ -1,12 +1,7 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.IO;
 using IniParser;
 using IniParser.Model;
-using epexgui.Properties;
 using System.Diagnostics;
 
 namespace epexgui
@@ -15,21 +10,23 @@ namespace epexgui
     {
         public struct Settings
         {
-            public bool Autorun;
+            public bool AutoRun;
             public bool MinimizeOnStart;
             public bool ConnectOnStart;
+            public bool EnableDebugLog;
+            public bool VirtualAdapterMode;
             public string LastConfig;
         }
 
-        public Settings settings;
-        private FileIniDataParser parser;
-        private IniData data;
+        public Settings AppSettings;
+        private readonly FileIniDataParser _parser;
+        private readonly IniData _data;
         public SettingsManager() 
         {
             if (!File.Exists(Global.SettingsFile)) CreateSettings();
             InitSettings();
-            parser = new FileIniDataParser();
-            data = parser.ReadFile(Global.SettingsFile);
+            _parser = new FileIniDataParser();
+            _data = _parser.ReadFile(Global.SettingsFile);
             Update();
         }
 
@@ -37,10 +34,12 @@ namespace epexgui
         {
             try
             {
-                settings.Autorun = bool.Parse(data["Settings"]["autorun"]);
-                settings.MinimizeOnStart = bool.Parse(data["Settings"]["minimize"]);
-                settings.ConnectOnStart = bool.Parse(data["Settings"]["connect"]);
-                settings.LastConfig = data["Settings"]["last"];
+                AppSettings.AutoRun = bool.Parse(_data["Settings"]["autorun"]);
+                AppSettings.MinimizeOnStart = bool.Parse(_data["Settings"]["minimize"]);
+                AppSettings.ConnectOnStart = bool.Parse(_data["Settings"]["connect"]);
+                AppSettings.EnableDebugLog = bool.Parse(_data["Settings"]["log"]);
+                AppSettings.VirtualAdapterMode = bool.Parse(_data["Settings"]["mode"]);
+                AppSettings.LastConfig = _data["Settings"]["last"];
             }
             catch
             {
@@ -49,26 +48,28 @@ namespace epexgui
         }
         public void Write()
         {
-            if (settings.Autorun == true) CheckTask();
+            if (AppSettings.AutoRun) CheckTask();
             else DeleteTask();
-            data["Settings"]["autorun"] = settings.Autorun.ToString();
-            data["Settings"]["minimize"] = settings.MinimizeOnStart.ToString();
-            data["Settings"]["connect"] = settings.ConnectOnStart.ToString();
-            data["Settings"]["last"] = settings.LastConfig;
-            parser.WriteFile(Global.SettingsFile, data);
+            _data["Settings"]["autorun"] = AppSettings.AutoRun.ToString();
+            _data["Settings"]["minimize"] = AppSettings.MinimizeOnStart.ToString();
+            _data["Settings"]["connect"] = AppSettings.ConnectOnStart.ToString();
+            _data["Settings"]["log"] = AppSettings.EnableDebugLog.ToString();
+            _data["Settings"]["mode"] = AppSettings.VirtualAdapterMode.ToString();
+            _data["Settings"]["last"] = AppSettings.LastConfig;
+            _parser.WriteFile(Global.SettingsFile, _data);
         }
         private void AddToStartup()
         {
             DeleteTask();
-            string Task = Properties.Resources.Task.Replace("PathToExecutable", CurrentPath());
-            string tempTaskPath = Path.Combine(Path.GetTempPath(), "epexguitask.xml");
-            File.WriteAllText(tempTaskPath, Task);
+            var task = Properties.Resources.Task.Replace("PathToExecutable", CurrentPath());
+            var tempTaskPath = Path.Combine(Path.GetTempPath(), "epexguitask.xml");
+            File.WriteAllText(tempTaskPath, task);
             Shell($@"schtasks /Create /xml ""{tempTaskPath}"" /tn ""\EpexGUI""");
             File.Delete(tempTaskPath);
         }
         public void CheckTask()
         {
-            string output = Shell($@"schtasks /Query /xml /tn ""\EpexGUI""");
+            var output = Shell(@"schtasks /Query /xml /tn ""\EpexGUI""");
             if (!output.Contains(CurrentPath()))
             {
                 AddToStartup();
@@ -76,44 +77,52 @@ namespace epexgui
         }
         private void DeleteTask()
         {
-            Shell($@"schtasks /Delete /tn ""\EpexGUI"" /F");
+            Shell(@"schtasks /Delete /tn ""\EpexGUI"" /F");
         }
-        private string CurrentPath()
+        private static string CurrentPath()
         {
-            return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, System.AppDomain.CurrentDomain.FriendlyName);
+            return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, AppDomain.CurrentDomain.FriendlyName);
         }
         private void InitSettings()
         {
-            settings.Autorun = false;
-            settings.MinimizeOnStart = false;
-            settings.ConnectOnStart = false;
-            settings.LastConfig = string.Empty;
+            AppSettings.AutoRun = false;
+            AppSettings.MinimizeOnStart = false;
+            AppSettings.ConnectOnStart = false;
+            AppSettings.EnableDebugLog = false;
+            AppSettings.VirtualAdapterMode = false;
+            AppSettings.LastConfig = string.Empty;
         }
-        private string Shell(string command)
+        private static string Shell(string command)
         {
-            Process shell = new Process();
-            ProcessStartInfo startInfo = new ProcessStartInfo();
-            startInfo.Arguments = $@"/c {command}";
-            startInfo.FileName = "cmd.exe";
-            startInfo.Verb = "runas";
-            startInfo.UseShellExecute = false;
-            startInfo.RedirectStandardOutput = true;
-            startInfo.CreateNoWindow = true;
+            var shell = new Process();
+            var startInfo = new ProcessStartInfo
+            {
+                Arguments = $@"/c {command}",
+                FileName = "cmd.exe",
+                Verb = "runas",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
             shell.StartInfo = startInfo;
             shell.Start();
-            string output = shell.StandardOutput.ReadToEnd();
+            var output = shell.StandardOutput.ReadToEnd();
             shell.WaitForExit();
             return output;
         }
-        private void CreateSettings()
+        private static void CreateSettings()
         {
             try
             {
                 File.Delete(Global.SettingsFile);
                 File.Create(Global.SettingsFile).Close();
             }
-            catch { }
-            File.WriteAllLines(Global.SettingsFile, new string[]{ "[Settings]", "autorun = false", "minimize = false", "connect = false", "last = none"});
+            catch
+            {
+                // ignored
+            }
+
+            File.WriteAllLines(Global.SettingsFile, new[]{ @"[Settings]", @"autorun = false", @"minimize = false", @"connect = false", @"last = none"});
         }
 
     }

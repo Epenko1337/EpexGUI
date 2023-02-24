@@ -1,4 +1,4 @@
-﻿namespace epexgui
+﻿namespace epexgui.Forms
 {
     partial class Taskmgr
     {

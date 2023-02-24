@@ -1,12 +1,5 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
 using System.Diagnostics;
-using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace epexgui.Forms
@@ -16,9 +9,11 @@ namespace epexgui.Forms
         public SettingsForm()
         {
             InitializeComponent();
-            autorun.Checked = Global.setMan.settings.Autorun;
-            MinimizeOnStart.Checked = Global.setMan.settings.MinimizeOnStart;
-            ConnectOnStart.Checked = Global.setMan.settings.ConnectOnStart;
+            autorun.Checked = Global.SetMan.AppSettings.AutoRun;
+            MinimizeOnStart.Checked = Global.SetMan.AppSettings.MinimizeOnStart;
+            ConnectOnStart.Checked = Global.SetMan.AppSettings.ConnectOnStart;
+            EnableDebugLog.Checked = Global.SetMan.AppSettings.EnableDebugLog;
+            VirtualAdapterMode.Checked = Global.SetMan.AppSettings.VirtualAdapterMode;
         }
 
         private void OpenFolder_Click(object sender, EventArgs e)
@@ -28,10 +23,17 @@ namespace epexgui.Forms
 
         private void SaveBtn_Click(object sender, EventArgs e)
         {
-            Global.setMan.settings.Autorun = autorun.Checked;
-            Global.setMan.settings.MinimizeOnStart = MinimizeOnStart.Checked;
-            Global.setMan.settings.ConnectOnStart = ConnectOnStart.Checked;
-            Global.setMan.Write();
+            Global.SetMan.AppSettings.AutoRun = autorun.Checked;
+            Global.SetMan.AppSettings.MinimizeOnStart = MinimizeOnStart.Checked;
+            Global.SetMan.AppSettings.ConnectOnStart = ConnectOnStart.Checked;
+            Global.SetMan.AppSettings.EnableDebugLog = EnableDebugLog.Checked;
+            Global.SetMan.AppSettings.VirtualAdapterMode = VirtualAdapterMode.Checked;
+
+            // call methods in the main form
+            ((Main)Owner).EnableDebugLog(EnableDebugLog.Checked);
+            ((Main)Owner).SetAdapterMode(VirtualAdapterMode.Checked);
+
+            Global.SetMan.Write();
             Close();
         }
     }

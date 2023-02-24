@@ -1,73 +1,81 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Windows.Forms;
 using System.IO;
-using static System.Windows.Forms.VisualStyles.VisualStyleElement;
+using System.Linq;
+using System.Windows.Forms;
 
-namespace epexgui
+namespace epexgui.Forms
 {
+    /**
+     * @brief The main form of the application.
+     */
     public partial class Main : Form
     {
+        /**
+     * @brief The configuration file that is currently in use.
+     */
         public string ConfigInUse = string.Empty;
-        private WiresockManager wiresock;
+
+        /**
+         * @brief The manager that handles the Wireguard connections.
+         */
+        private readonly WiresockManager _wiresock;
+
+        /**
+         * @brief Initializes a new instance of the Main class.
+         */
         public Main()
         {
             InitializeComponent();
-            this.components = new System.ComponentModel.Container();
-            this.contextMenu1 = new System.Windows.Forms.ContextMenu();
-            this.menuItem1 = new System.Windows.Forms.MenuItem();
-            this.contextMenu1.MenuItems.AddRange(
-            new System.Windows.Forms.MenuItem[] { this.menuItem1 });
-            this.menuItem1.Index = 0;
-            this.menuItem1.Text = "Exit";
-            this.menuItem1.Click += new System.EventHandler(this.menuItem1_Click);
+
+            // Create the context menu.
+            components = new System.ComponentModel.Container();
+            contextMenu1 = new ContextMenu();
+            menuItem1 = new MenuItem();
+            contextMenu1.MenuItems.AddRange(new[] { menuItem1 });
+            menuItem1.Index = 0;
+            menuItem1.Text = @"Exit";
+            menuItem1.Click += MenuItem1_Click;
+
+            // Configure the system tray icon.
             tray.ContextMenu = contextMenu1;
             tray.Icon = Properties.Resources.ico;
-            UpdateConfigList();
-            wiresock = new WiresockManager(LogBox);
-            if (Global.setMan.settings.ConnectOnStart)
-            {
-                if (File.Exists(ConfigNameToPath(Global.setMan.settings.LastConfig)))
-                {
-                    Connect(Global.setMan.settings.LastConfig);
-                }
-                else
-                {
-                    MessageBox.Show("Last saved config not found", "Connect on start", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-        }
 
-        public void TrayIco()
-        {
-            if (wiresock.Connected)
+            // Update the list of available configurations.
+            UpdateConfigList();
+
+            // Create a new WiresockManager instance.
+            _wiresock = new WiresockManager(LogBox, Global.SetMan.AppSettings.VirtualAdapterMode);
+
+            // Connect to the last used configuration, if required.
+            if (!Global.SetMan.AppSettings.ConnectOnStart) return;
+            if (File.Exists(ConfigNameToPath(Global.SetMan.AppSettings.LastConfig)))
             {
-                tray.Icon = Properties.Resources.icoconnected;
+                Connect(Global.SetMan.AppSettings.LastConfig);
             }
             else
             {
-                tray.Icon = Properties.Resources.ico;
+                MessageBox.Show(@"Last saved config not found", @"Connect on start", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
-        private void menuItem1_Click(object Sender, EventArgs e)
+        /**
+         * @brief Updates the system tray icon to reflect the current connection status.
+         */
+        public void TrayIco()
+        {
+            tray.Icon = _wiresock.Connected ? Properties.Resources.icoconnected : Properties.Resources.ico;
+        }
+
+        private static void MenuItem1_Click(object sender, EventArgs e)
         {
             Application.Exit();
         }
 
         private void Main_FormClosing(object sender, FormClosingEventArgs e)
         {
-            if (e.CloseReason == CloseReason.UserClosing)
-            {
-                e.Cancel = true;
-                Hide();
-            }
+            if (e.CloseReason != CloseReason.UserClosing) return;
+            e.Cancel = true;
+            Hide();
         }
 
         private void EpexGUI_Click(object sender, EventArgs e)
@@ -75,7 +83,7 @@ namespace epexgui
             Visible = true;
             ShowInTaskbar = true;
             Opacity = 100;
-            this.Show();
+            Show();
         }
 
         public bool ConfigUsed(string name)
@@ -86,17 +94,13 @@ namespace epexgui
         public void UpdateConfigList()
         {
             ConfigList.Items.Clear();
-            string[] files = Directory.GetFiles(Global.ConfigsFolder);
-            foreach (string file in files)
+            var files = Directory.GetFiles(Global.ConfigsFolder);
+            foreach (var file in files)
             {
-                if (file.EndsWith(".conf"))
-                {
-                    if (ConfigUsed(ConfigPathToName(file)))
-                    {
-                        ConfigList.Items.Add(AddPrefix(ConfigPathToName(file), true));
-                    }
-                    else ConfigList.Items.Add(AddPrefix(ConfigPathToName(file), false));
-                }
+                if (!file.EndsWith(".conf")) continue;
+                ConfigList.Items.Add(ConfigUsed(ConfigPathToName(file))
+                    ? AddPrefix(ConfigPathToName(file), true)
+                    : AddPrefix(ConfigPathToName(file), false));
             }
         }
 
@@ -107,7 +111,7 @@ namespace epexgui
 
         protected override void OnLoad(EventArgs e)
         {
-            if (Global.setMan.settings.MinimizeOnStart)
+            if (Global.SetMan.AppSettings.MinimizeOnStart)
             {
                 Visible = false;
                 ShowInTaskbar = false;
@@ -119,106 +123,87 @@ namespace epexgui
 
         private void RemoveConfig_Click(object sender, EventArgs e)
         {
-            if (ConfigList.SelectedItem != null) 
+            if (ConfigList.SelectedItem == null) return;
+            var selectedConf = Prefix(ConfigList.SelectedItem.ToString(), true);
+            if (MessageBox.Show($@"Do you really want to remove configuration {selectedConf}?", @"Confirmation",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Exclamation) != DialogResult.Yes) return;
+            if (_wiresock.Connected && ConfigUsed(selectedConf))
             {
-                string SelectedConf = Prefix(ConfigList.SelectedItem.ToString(), true);
-                if (MessageBox.Show($"Do you really want to remove configuration {SelectedConf}?", "Confirmation", MessageBoxButtons.YesNo, MessageBoxIcon.Exclamation) == DialogResult.Yes)
-                {
-                    if (wiresock.Connected && ConfigUsed(SelectedConf))
-                    {
-                        Disconnect();
-                    }
-                    File.Delete(ConfigNameToPath(SelectedConf));
-                    UpdateConfigList();
-                }
+                Disconnect();
             }
+            File.Delete(ConfigNameToPath(selectedConf));
+            UpdateConfigList();
         }
 
         private void AddConfig_Click(object sender, EventArgs e)
         {
-            var filePath = string.Empty;
-            using (OpenFileDialog openFileDialog = new OpenFileDialog())
+            using (var openFileDialog = new OpenFileDialog())
             {
-                openFileDialog.Title = "Select configuration file";
+                openFileDialog.Title = @"Select configuration file";
                 openFileDialog.InitialDirectory = "c:\\";
-                openFileDialog.Filter = "Wireguard configuration files (*.conf)|*.conf";
+                openFileDialog.Filter = @"Wireguard configuration files (*.conf)|*.conf";
                 openFileDialog.RestoreDirectory = true;
 
-                if (openFileDialog.ShowDialog() == DialogResult.OK)
+                if (openFileDialog.ShowDialog() != DialogResult.OK) return;
+                var filePath = openFileDialog.FileName;
+                if (Directory.GetFiles(Global.ConfigsFolder).Any(file =>
+                        string.Equals(ConfigPathToName(file), ConfigPathToName(filePath), StringComparison.CurrentCultureIgnoreCase)))
                 {
-                    filePath = openFileDialog.FileName;
-                    foreach (string file in Directory.GetFiles(Global.ConfigsFolder))
-                    {
-                        if (ConfigPathToName(file).ToLower() == ConfigPathToName(filePath).ToLower())
-                        {
-                            MessageBox.Show("Configuration with this name already exists", "Import error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            return;
-                        }
-                    }
-                    File.Copy(filePath, Path.Combine(Global.ConfigsFolder, filePath.Substring(filePath.LastIndexOf('\\') + 1)));
-                    UpdateConfigList();
+                    MessageBox.Show(@"Configuration with this name already exists", @"Import error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
                 }
+                File.Copy(filePath, Path.Combine(Global.ConfigsFolder,
+                    filePath.Substring(filePath.LastIndexOf('\\') + 1)));
+                UpdateConfigList();
             }
         }
 
-        public bool IsConfigExists(string ConfigName)
+        public bool IsConfigExists(string configName)
         {
-            if (ConfigList.Items.Contains(AddPrefix(ConfigName, true)) || ConfigList.Items.Contains(AddPrefix(ConfigName, true)))
-            {
-                return true;
-            }
-            return false;
+            return ConfigList.Items.Contains(AddPrefix(configName, true)) ||
+                   ConfigList.Items.Contains(AddPrefix(configName, true));
         }
 
         private void EditConfig_Click(object sender, EventArgs e)
         {
-            if (ConfigList.SelectedItem != null)
+            if (ConfigList.SelectedItem == null) return;
+            var temp = ConfigList.SelectedItem.ToString().Substring(2);
+            var edit = new EditForm(temp);
+            edit.ShowDialog();
+            if (!edit.successfull) return;
+            if (ConfigUsed(temp))
             {
-                string temp = ConfigList.SelectedItem.ToString().Substring(2);
-                EditForm edit = new EditForm(temp);
-                edit.ShowDialog();
-                if (edit.successfull)
-                {
-                    if (ConfigUsed(temp))
-                    {
-                        Disconnect();
-                        UpdateConfigList();
-                        Connect(edit.lastname);
-                    }
-                    else
-                    {
-                        UpdateConfigList();
-                    }
-                }
+                Disconnect();
+                UpdateConfigList();
+                Connect(edit.lastname);
+            }
+            else
+            {
+                UpdateConfigList();
             }
         }
 
         private void SettingsBtn_Click(object sender, EventArgs e)
         {
-            Forms.SettingsForm settingsForm = new Forms.SettingsForm();
+            var settingsForm = new SettingsForm();
+
+            // set the owner of the child form to the main form instance
+            settingsForm.Owner = this;
+
             settingsForm.ShowDialog();
         }
 
         public string Prefix(string config, bool remove = false)
         {
             if (config == null) return null;
-            if (remove)
+            if (!remove) return config[0] == '⚫' ? config.Replace('⚫', '⚪') : config.Replace('⚪', '⚫');
+            if (config[0] == '⚫' || config[0] == '⚪')
             {
-                if (config[0] == '⚫' || config[0] == '⚪')
-                {
-                    return config.Substring(2);
-                }
-                return config;
+                return config.Substring(2);
             }
-            string result = config;
-            if (config[0] == '⚫')
-            {
-                return config.Replace('⚫', '⚪');
-            }
-            else
-            {
-                return config.Replace('⚪', '⚫');
-            }
+            return config;
+
         }
         public string AddPrefix(string config, bool connected)
         {
@@ -239,53 +224,79 @@ namespace epexgui
             {
                 case ConnectionState.NotConnected:
                     ConnectButton.Enabled = true;
-                    ConnectedToLabel.Text = "Not connected";
-                    tray.Text = $"EpexGUI\nNot Connected";
+                    ConnectedToLabel.Text = @"Not connected";
+                    tray.Text = @"EpexGUI" + Environment.NewLine + @"Not Connected";
                     TrayIco();
                     break;
                 case ConnectionState.Connecting:
                     ConnectButton.Enabled = false;
-                    ConnectedToLabel.Text = "Connecting...";
-                    tray.Text = "EpexGUI\nConnecting...";
+                    ConnectedToLabel.Text = @"Connecting...";
+                    tray.Text = @"EpexGUI" + Environment.NewLine + @"Connecting...";
                     TrayIco();
                     break;
                 case ConnectionState.Connected:
                     ConnectButton.Enabled = true;
-                    ConfigManager cm = new ConfigManager(ConfigNameToPath(ConfigInUse));
-                    ConnectedToLabel.Text = $"Connected to {cm.Config.Endpoint} ({cm.Config.ConfigName})";
-                    tray.Text = $"EpexGUI\nConnected to {cm.Config.Endpoint} ({cm.Config.ConfigName})";
+                    var cm = new ConfigManager(ConfigNameToPath(ConfigInUse));
+                    ConnectedToLabel.Text = $@"Connected to {cm.Config.Endpoint} ({cm.Config.ConfigName})";
+                    tray.Text = @"EpexGUI" + Environment.NewLine + $@"Connected to {cm.Config.Endpoint} ({cm.Config.ConfigName})";
                     TrayIco();
                     break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(state), state, null);
             }
         }
 
+        /**
+         * @brief Connects to the specified configuration.
+         * @param config The name of the configuration to connect to.
+         */
         public void Connect(string config)
         {
-            if (wiresock.Connected)
+            // Disconnect from the current configuration, if necessary.
+            if (_wiresock.Connected)
             {
                 Disconnect();
             }
+
+            // Clear the log box and update the configuration in use.
             LogBox.Clear();
             config = Prefix(config, true);
-            if (Global.setMan.settings.ConnectOnStart)
+
+            // Save the last used configuration, if required.
+            if (Global.SetMan.AppSettings.ConnectOnStart)
             {
-                Global.setMan.settings.LastConfig = config;
-                Global.setMan.Write();
+                Global.SetMan.AppSettings.LastConfig = config;
+                Global.SetMan.Write();
             }
             ConfigInUse = config;
+
+            // Update the list of configurations and set the connection state to "Connecting".
             ConfigList.Items[ConfigList.Items.IndexOf(AddPrefix(config, false))] = AddPrefix(config, true);
             UpdateState(ConnectionState.Connecting);
-            wiresock.Connect(ConfigNameToPath(config), this);
+
+            // Connect to the specified configuration using the WiresockManager instance.
+            _wiresock.Connect(ConfigNameToPath(config));
+
+            // Start the label updater.
             LabelUpdater.Start();
         }
 
-        public void Disconnect()
+        /**
+         * @brief Disconnects from the current configuration.
+         */
+        public async void Disconnect()
         {
-            if (ConfigList.SelectedItem!= null)
+            // If the currently selected configuration is in use, update the Connect button text.
+            if (ConfigList.SelectedItem != null)
             {
-                if (Prefix(ConfigList.SelectedItem.ToString(), true) == ConfigInUse) ConnectButton.Text = "Connect";
+                if (Prefix(ConfigList.SelectedItem.ToString(), true) == ConfigInUse)
+                {
+                    ConnectButton.Text = @"Connect";
+                }
             }
-            wiresock.Kill();
+
+            // Disconnect from the current configuration using the WiresockManager instance and update the connection state.
+            await _wiresock.DisconnectAsync();
             UpdateState(ConnectionState.NotConnected);
             ConfigList.Items[ConfigList.Items.IndexOf(AddPrefix(ConfigInUse, true))] = AddPrefix(ConfigInUse, false);
             ConfigInUse = null;
@@ -293,40 +304,44 @@ namespace epexgui
 
         private void ConnectButton_Click(object sender, EventArgs e)
         {
-            if (ConnectButton.Text == "Disconnect")
+            if (ConnectButton.Text == @"Disconnect")
             {
                 Disconnect();
-                ConnectButton.Text = "Connect";
+                ConnectButton.Text = @"Connect";
             }
             else
             {
-                if (ConfigList.SelectedItem != null)
-                {
-                    ConnectButton.Text = "Disconnect";
-                    Connect(ConfigList.SelectedItem.ToString());
-                }
+                if (ConfigList.SelectedItem == null) return;
+                ConnectButton.Text = @"Disconnect";
+                Connect(ConfigList.SelectedItem.ToString());
             }
         }
 
         private void LabelUpdater_Tick(object sender, EventArgs e)
         {
-            if (wiresock.Connected)
-            {
-                UpdateState(ConnectionState.Connected);
-                LabelUpdater.Stop();
-            }
+            if (!_wiresock.Connected) return;
+            UpdateState(ConnectionState.Connected);
+            LabelUpdater.Stop();
         }
 
         private void ConfigList_SelectedIndexChanged(object sender, EventArgs e)
         {
-            if (ConfigList.SelectedItem != null)
+            if (ConfigList.SelectedItem == null) return;
+            if (Prefix(ConfigList.SelectedItem.ToString(), true) == ConfigInUse)
             {
-                if (Prefix(ConfigList.SelectedItem.ToString(), true) == ConfigInUse)
-                {
-                    if (wiresock.Connected) ConnectButton.Text = "Disconnect";
-                }
-                else ConnectButton.Text = "Connect";
+                if (_wiresock.Connected) ConnectButton.Text = @"Disconnect";
             }
+            else ConnectButton.Text = @"Connect";
+        }
+
+        public void EnableDebugLog(bool enableLogChecked)
+        {
+            _wiresock.EnableDebugLog(enableLogChecked);
+        }
+
+        public void SetAdapterMode(bool enableAdapterMode)
+        {
+            _wiresock.SetAdapterMode(enableAdapterMode);
         }
     }
 }

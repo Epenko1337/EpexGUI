@@ -1,126 +1,168 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Text;
+using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using static epexgui.WireguardBoosterExports;
 
 namespace epexgui
 {
+    /// <summary>
+    /// Manages the Wireguard tunnel using the Wireguard Booster library.
+    /// </summary>
     internal class WiresockManager
     {
-        private TextBox OutBox;
-        public bool Connected = false;
-        private Process wiresock;
-        Main main;
-        bool ForceKill = false;
-        public WiresockManager(TextBox output) 
+        private readonly TextBox _outBox;
+        public bool Connected;
+        private IntPtr _wgboosterNatHandle = IntPtr.Zero;
+        private IntPtr _wgboosterNicHandle = IntPtr.Zero;
+        private volatile bool _adapterMode;
+
+        private LogPrinter _logPrinter;
+
+        // Create a GCHandle to keep the delegate alive
+        private GCHandle _logPrinterHandle;
+
+        /// <summary>
+        /// Initializes a new instance of the WiresockManager class with the specified TextBox control.
+        /// </summary>
+        /// <param name="output">The TextBox control to use for logging messages.</param>
+        /// <param name="adapterMode">Indicates if Wireguard tunnel should spawn the virtual Wiresock network interface</param>
+        public WiresockManager(TextBox output, bool adapterMode)
         {
-            OutBox = output;
+            _outBox = output;
+            _adapterMode = adapterMode;
         }
 
-        public void Connect(string configPath, Main mainform)
+        /// <summary>
+        /// Disposes the GCHandle for the log printer delegate.
+        /// </summary>
+        public void Dispose()
         {
-            main = mainform;
-            wiresock = new Process();
-            ProcessStartInfo startInfo = new ProcessStartInfo();
-            startInfo.Arguments = $@"run -config ""{configPath}"" -log-level debug -lac";
-            startInfo.FileName = Global.WireSock;
-            startInfo.Verb = "runas";
-            startInfo.UseShellExecute = false;
-            startInfo.RedirectStandardOutput = true;
-            startInfo.RedirectStandardError = true;
-            startInfo.CreateNoWindow = true;
-            wiresock.EnableRaisingEvents = true;
-            AppDomain.CurrentDomain.DomainUnload += (s, e) => { Kill(); };
-            AppDomain.CurrentDomain.ProcessExit += (s, e) => { Kill(); };
-            AppDomain.CurrentDomain.UnhandledException += (s, e) => { Kill(); };
-            wiresock.Exited += delegate (object sender, EventArgs args)
+            if (_logPrinterHandle.IsAllocated)
             {
-                if (ForceKill)
+                _logPrinterHandle.Free();
+            }
+        }
+
+        /// <summary>
+        /// Appends the specified message to the _outBox control on the UI thread.
+        /// </summary>
+        /// <param name="message">The message to append to the _outBox control.</param>
+        internal void PrintLog(string message)
+        {
+            if (_outBox.IsHandleCreated)
+            {
+                // Invoke the specified delegate on the UI thread, which appends the message to the _outBox control.
+                _outBox.Invoke((MethodInvoker)delegate
                 {
-                    ForceKill = false;
+                    _outBox.AppendText(message);
+                    _outBox.AppendText(Environment.NewLine);
+                });
+            }
+        }
+
+        /// <summary>
+        /// Connects to the Wireguard tunnel using the specified configuration file.
+        /// </summary>
+        /// <param name="configPath">The path to the Wireguard configuration file.</param>
+        public void Connect(string configPath)
+        {
+            // Create a new instance of the LogPrinter delegate
+            _logPrinter = PrintLog;
+
+            // Create a GCHandle to keep the delegate alive
+            _logPrinterHandle = GCHandle.Alloc(_logPrinter);
+
+            if (_wgboosterNatHandle == IntPtr.Zero)
+            {
+                _wgboosterNatHandle = wgb_get_handle(_logPrinter,
+                    Global.SetMan.AppSettings.EnableDebugLog ? WgbLogLevel.All : WgbLogLevel.Error,
+                    false);
+            }
+
+            if (_wgboosterNicHandle == IntPtr.Zero)
+            {
+                _wgboosterNicHandle = wgbp_get_handle(_logPrinter,
+                    Global.SetMan.AppSettings.EnableDebugLog ? WgbLogLevel.All : WgbLogLevel.Error,
+                    false);
+            }
+
+            if (_wgboosterNatHandle == IntPtr.Zero || _wgboosterNicHandle == IntPtr.Zero)
+            {
+                MessageBox.Show(@"Failed to connect to tunnel manager. Please check log", @"Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (!_adapterMode)
+            {
+                if (!wgb_create_tunnel_from_file_w(_wgboosterNatHandle, configPath))
+                {
+                    MessageBox.Show(@"Failed to create the tunnel from the provided configuration. Please check log",
+                        @"Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
-                MessageBox.Show("Wiresock process exited!", "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                main.Invoke((MethodInvoker)delegate
-                {
-                    main.Disconnect();
-                });
-            };
-            wiresock.StartInfo = startInfo;
-            wiresock.OutputDataReceived += new DataReceivedEventHandler((sender, e) =>
+            }
+            else
             {
-                if (!String.IsNullOrEmpty(e.Data))
+                if (!wgbp_create_tunnel_from_file_w(_wgboosterNicHandle, configPath))
                 {
-                    if (e.Data.Contains("Wireguard tunnel has been started"))
-                    {
-                        Connected = true;
-                    }
-                    if (e.Data.Contains("WireSock WireGuard VPN Client is running already"))
-                    {
-                        KillOther();
-                        Kill();
-                        Connect(configPath, mainform);
-                    }
-                    if (e.Data.Contains("Endpoint is either invalid of failed to resolve"))
-                    {
-                        MessageBox.Show("Endpoint is either invalid of failed to resolve", "Invalid configuration", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        wiresock.CancelOutputRead();
-                        main.Invoke((MethodInvoker)delegate
-                        {
-                            main.Disconnect();
-                        });
-                    }
-                    if (e.Data.Contains("Tunnel has failed to start"))
-                    {
-                        MessageBox.Show("Tunnel has failed to start. Please check log", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        wiresock.CancelOutputRead();
-                        main.Invoke((MethodInvoker)delegate
-                        {
-                            main.Disconnect();
-                        });
-                    }
-                    if (e.Data.Contains("Failed to initialize Wireguard tunnel"))
-                    {
-                        MessageBox.Show("Failed to initialize Wireguard tunnel. Please check log", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        wiresock.CancelOutputRead();
-                        main.Invoke((MethodInvoker)delegate
-                        {
-                            main.Disconnect();
-                        });
-                    }
-                    OutBox.Invoke((MethodInvoker)delegate
-                    {
-                        if (OutBox.Text.Length + e.Data.Length >= OutBox.MaxLength) OutBox.Clear();
-                        OutBox.AppendText(e.Data);
-                        OutBox.AppendText(Environment.NewLine);
-                    });
+                    MessageBox.Show(@"Failed to create the tunnel from the provided configuration. Please check log",
+                        @"Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
                 }
+            }
+
+            if (!_adapterMode)
+            {
+                if (!wgb_start_tunnel(_wgboosterNatHandle))
+                {
+                    MessageBox.Show(@"Tunnel has failed to start. Please check log", @"Error", MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                    wgb_drop_tunnel(_wgboosterNatHandle);
+                    return;
+                }
+            }
+            else
+            {
+                if (!wgbp_start_tunnel(_wgboosterNicHandle))
+                {
+                    MessageBox.Show(@"Tunnel has failed to start. Please check log", @"Error", MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                    wgbp_drop_tunnel(_wgboosterNicHandle);
+                    return;
+                }
+            }
+
+            Connected = true;
+        }
+
+        public void EnableDebugLog(bool bEnable)
+        {
+            wgb_set_log_level(_wgboosterNatHandle, bEnable ? WgbLogLevel.All : WgbLogLevel.Error);
+            wgbp_set_log_level(_wgboosterNicHandle, bEnable ? WgbLogLevel.All : WgbLogLevel.Error);
+        }
+
+        /// <summary>
+        /// Stops and disconnects from the Wireguard tunnel asynchronously.
+        /// </summary>
+        public async Task DisconnectAsync()
+        {
+            await Task.Run(() =>
+            {
+                wgb_stop_tunnel(_wgboosterNatHandle);
+                wgb_drop_tunnel(_wgboosterNatHandle);
+                wgbp_stop_tunnel(_wgboosterNicHandle);
+                wgbp_drop_tunnel(_wgboosterNicHandle);
+
+                Connected = false;
             });
-            wiresock.Start();
-            wiresock.BeginOutputReadLine();
         }
 
-        public void Kill()
+        public void SetAdapterMode(bool adapterMode)
         {
-            Connected = false;
-            try
-            {
-                ForceKill = true;
-                wiresock.Kill();
-            }
-            catch { }
-        }
-
-        private void KillOther()
-        {
-            ForceKill = true;
-            foreach (var process in Process.GetProcessesByName("wiresock-client"))
-            {
-                process.Kill();
-            }
+            _adapterMode = adapterMode;
         }
     }
 }

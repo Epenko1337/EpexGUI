@@ -63,8 +63,10 @@ namespace epexgui
         public delegate void LogPrinter(string message);
 
         [DllImport("wgbooster.dll", CallingConvention = CallingConvention.StdCall)]
-        public static extern IntPtr
-            wgb_get_handle(LogPrinter logPrinter, WgbLogLevel level, bool enableTrafficCapture);
+        public static extern IntPtr wgb_get_handle(LogPrinter logPrinter, WgbLogLevel level, bool enableTrafficCapture);
+
+        [DllImport("wgbooster.dll", CallingConvention = CallingConvention.StdCall)]
+        public static extern void wgb_set_log_level(IntPtr wgboosterHandle, WgbLogLevel level);
 
         [DllImport("wgbooster.dll", CallingConvention = CallingConvention.StdCall)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -99,8 +101,10 @@ namespace epexgui
         public static extern bool wgb_get_tunnel_active(IntPtr wgboosterHandle);
 
         [DllImport("wgbooster.dll", CallingConvention = CallingConvention.StdCall)]
-        public static extern IntPtr wgbp_get_handle(LogPrinter logPrinter, WgbLogLevel level,
-            bool enableTrafficCapture);
+        public static extern IntPtr wgbp_get_handle(LogPrinter logPrinter, WgbLogLevel level, bool enableTrafficCapture);
+
+        [DllImport("wgbooster.dll", CallingConvention = CallingConvention.StdCall)]
+        public static extern void wgbp_set_log_level(IntPtr wgboosterHandle, WgbLogLevel level);
 
         [DllImport("wgbooster.dll", CallingConvention = CallingConvention.StdCall)]
         [return: MarshalAs(UnmanagedType.Bool)]
