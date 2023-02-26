@@ -284,7 +284,7 @@ namespace epexgui.Forms
         /**
          * @brief Disconnects from the current configuration.
          */
-        public async void Disconnect()
+        public void Disconnect()
         {
             // If the currently selected configuration is in use, update the Connect button text.
             if (ConfigList.SelectedItem != null)
@@ -296,7 +296,7 @@ namespace epexgui.Forms
             }
 
             // Disconnect from the current configuration using the WiresockManager instance and update the connection state.
-            await _wiresock.DisconnectAsync();
+            _wiresock.Disconnect();
             UpdateState(ConnectionState.NotConnected);
             ConfigList.Items[ConfigList.Items.IndexOf(AddPrefix(ConfigInUse, true))] = AddPrefix(ConfigInUse, false);
             ConfigInUse = null;

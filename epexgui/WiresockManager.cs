@@ -1,7 +1,5 @@
 ﻿using System;
 using System.Runtime.InteropServices;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 using static epexgui.WireguardBoosterExports;
 
@@ -17,8 +15,8 @@ namespace epexgui
         private IntPtr _wgboosterNatHandle = IntPtr.Zero;
         private IntPtr _wgboosterNicHandle = IntPtr.Zero;
         private volatile bool _adapterMode;
-
-        private LogPrinter _logPrinter;
+        private WgbLogLevel _debugLog;
+        private readonly LogPrinter _logPrinter;
 
         // Create a GCHandle to keep the delegate alive
         private GCHandle _logPrinterHandle;
@@ -32,6 +30,12 @@ namespace epexgui
         {
             _outBox = output;
             _adapterMode = adapterMode;
+
+            // Create a new instance of the LogPrinter delegate
+            _logPrinter = PrintLog;
+
+            // Create a GCHandle to keep the delegate alive
+            _logPrinterHandle = GCHandle.Alloc(_logPrinter);
         }
 
         /// <summary>
@@ -68,23 +72,19 @@ namespace epexgui
         /// <param name="configPath">The path to the Wireguard configuration file.</param>
         public void Connect(string configPath)
         {
-            // Create a new instance of the LogPrinter delegate
-            _logPrinter = PrintLog;
-
-            // Create a GCHandle to keep the delegate alive
-            _logPrinterHandle = GCHandle.Alloc(_logPrinter);
+            _debugLog = Global.SetMan.AppSettings.EnableDebugLog ? WgbLogLevel.All : WgbLogLevel.Error;
 
             if (_wgboosterNatHandle == IntPtr.Zero)
             {
                 _wgboosterNatHandle = wgb_get_handle(_logPrinter,
-                    Global.SetMan.AppSettings.EnableDebugLog ? WgbLogLevel.All : WgbLogLevel.Error,
+                    _debugLog,
                     false);
             }
 
             if (_wgboosterNicHandle == IntPtr.Zero)
             {
                 _wgboosterNicHandle = wgbp_get_handle(_logPrinter,
-                    Global.SetMan.AppSettings.EnableDebugLog ? WgbLogLevel.All : WgbLogLevel.Error,
+                    _debugLog,
                     false);
             }
 
@@ -147,17 +147,20 @@ namespace epexgui
         /// <summary>
         /// Stops and disconnects from the Wireguard tunnel asynchronously.
         /// </summary>
-        public async Task DisconnectAsync()
+        public void Disconnect()
         {
-            await Task.Run(() =>
-            {
-                wgb_stop_tunnel(_wgboosterNatHandle);
-                wgb_drop_tunnel(_wgboosterNatHandle);
-                wgbp_stop_tunnel(_wgboosterNicHandle);
-                wgbp_drop_tunnel(_wgboosterNicHandle);
+            if (_debugLog != WgbLogLevel.Error)
+                EnableDebugLog(false);
 
-                Connected = false;
-            });
+            wgb_stop_tunnel(_wgboosterNatHandle);
+            wgb_drop_tunnel(_wgboosterNatHandle);
+            wgbp_stop_tunnel(_wgboosterNicHandle);
+            wgbp_drop_tunnel(_wgboosterNicHandle);
+
+            if (_debugLog != WgbLogLevel.Error)
+                EnableDebugLog(true);
+
+            Connected = false;
         }
 
         public void SetAdapterMode(bool adapterMode)
