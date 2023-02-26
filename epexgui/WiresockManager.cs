@@ -57,8 +57,8 @@ namespace epexgui
         {
             if (_outBox.IsHandleCreated)
             {
-                // Invoke the specified delegate on the UI thread, which appends the message to the _outBox control.
-                _outBox.Invoke((MethodInvoker)delegate
+                // Asynchronously invoke the specified delegate on the UI thread, which appends the message to the _outBox control.
+                _outBox.BeginInvoke((MethodInvoker)delegate
                 {
                     _outBox.AppendText(message);
                     _outBox.AppendText(Environment.NewLine);
@@ -149,16 +149,10 @@ namespace epexgui
         /// </summary>
         public void Disconnect()
         {
-            if (_debugLog != WgbLogLevel.Error)
-                EnableDebugLog(false);
-
             wgb_stop_tunnel(_wgboosterNatHandle);
             wgb_drop_tunnel(_wgboosterNatHandle);
             wgbp_stop_tunnel(_wgboosterNicHandle);
             wgbp_drop_tunnel(_wgboosterNicHandle);
-
-            if (_debugLog != WgbLogLevel.Error)
-                EnableDebugLog(true);
 
             Connected = false;
         }
