@@ -1,6 +1,6 @@
 ﻿using System.Windows.Forms;
 
-namespace epexgui
+namespace epexgui.Forms
 {
     partial class Main
     {

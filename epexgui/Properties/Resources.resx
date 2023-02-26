@@ -127,7 +127,10 @@
   <data name="Task" type="System.Resources.ResXFileRef, System.Windows.Forms">
     <value>..\Resources\Task.xml;System.String, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089;utf-16</value>
   </data>
-  <data name="wiresockInstaller" type="System.Resources.ResXFileRef, System.Windows.Forms">
-    <value>..\Resources\wiresockInstaller.msi;System.Byte[], mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  <data name="wiresockInstallerX86" type="System.Resources.ResXFileRef, System.Windows.Forms">
+    <value>..\Resources\wiresock-vpn-client-x86-1.2.18.1.msi;System.Byte[], mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="wiresockInstallerX64" type="System.Resources.ResXFileRef, System.Windows.Forms">
+	  <value>..\Resources\wiresock-vpn-client-x64-1.2.18.1.msi;System.Byte[], mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </data>
 </root>
