@@ -1,5 +1,4 @@
-﻿using Microsoft.Toolkit.Uwp.Notifications;
-using Microsoft.Win32;
+﻿using Microsoft.Win32;
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -26,7 +25,7 @@ namespace WireSockUI
             Application.ApplicationExit += (sender, eventArgs) =>
             {
                 // Ensure we de-register from toast notifications on exit
-                ToastNotificationManagerCompat.Uninstall();
+                //ToastNotificationManagerCompat.Uninstall();
             };
 
             if (!Directory.Exists(Global.MainFolder)) Directory.CreateDirectory(Global.MainFolder);

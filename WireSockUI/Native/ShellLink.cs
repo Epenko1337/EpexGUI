@@ -7,7 +7,7 @@ using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using FILETIME = System.Runtime.InteropServices.ComTypes.FILETIME;
 
-namespace WireSockUI.Notifications
+namespace WireSockUI.Native
 {
     // Modified from http://smdn.jp/programming/tips/createlnk/
     // Originally from http://www.vbaccelerator.com/home/NET/Code/Libraries/Shell_Projects

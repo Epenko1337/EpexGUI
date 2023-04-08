@@ -1,5 +1,4 @@
-﻿using Microsoft.Toolkit.Uwp.Notifications;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -30,26 +29,6 @@ namespace WireSockUI.Forms
          */
         private readonly WireSockManager _wiresock;
 
-        private void InitializeToastNotifications()
-        {
-            // Write the icon to local appdata folder for toast notifications
-            String toastIcon = $@"{Global.MainFolder}\WireSock.ico";
-
-            if (!File.Exists(toastIcon))
-            {
-                using (FileStream stream = new FileStream(toastIcon, FileMode.CreateNew))
-                {
-                    this.Icon.Save(stream);
-                }
-            }
-
-            ToastNotificationManagerCompat.OnActivated += toastArgs =>
-            {
-                ToastArguments args = ToastArguments.Parse(toastArgs.Argument);
-                
-            };
-        }
-
         /**
          * @brief Initializes a new instance of the Main class.
          */
@@ -61,8 +40,6 @@ namespace WireSockUI.Forms
             this.Icon = Resources.ico;
             trayIcon.Icon = Resources.ico;
             cmiStatus.Image = BitmapExtensions.DrawCircle(16, 15, Brushes.DarkGray);
-
-            InitializeToastNotifications();
 
             // Populate menu items with Windows supplied icons
             ddmAddTunnel.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.Addtunnel, 16).ToBitmap();
@@ -112,18 +89,6 @@ namespace WireSockUI.Forms
                 MessageBox.Show(Resources.LastProfileNotFound, Resources.DialogAutoConnect, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
-
-        private void LaunchToastNotification(string title, string description)
-        {
-            Uri toastUri = new Uri($@"{Global.MainFolder}\WireSock.ico");
-
-            new ToastContentBuilder()
-                .AddAppLogoOverride(toastUri)
-                .AddText(title)
-                .AddText(description)
-                .SetToastScenario(ToastScenario.Default)
-                .Show();
-        }
         private void menuExit_Click(object sender, EventArgs e)
         {
             Application.Exit();
@@ -349,7 +314,7 @@ namespace WireSockUI.Forms
                     gbxState.Visible = true;
                     tmrStats.Start();
 
-                    LaunchToastNotification(Resources.ToastActiveTitle, String.Format(Resources.ToastActiveMessage, _wiresock.ProfileName));
+                    Notifications.Notify(Resources.ToastActiveTitle, String.Format(Resources.ToastActiveMessage, _wiresock.ProfileName));
                     break;
                 case ConnectionState.Disconnected:
                     btnActivate.Text = Resources.ButtonInactive;
@@ -380,7 +345,7 @@ namespace WireSockUI.Forms
                     gbxState.Visible = false;
                     tmrStats.Stop();
 
-                    LaunchToastNotification(Resources.ToastInactiveTitle, String.Format(Resources.ToastInactiveMessage, _wiresock.ProfileName));
+                    Notifications.Notify(Resources.ToastInactiveTitle, String.Format(Resources.ToastInactiveMessage, _wiresock.ProfileName));
                     break;
             }
         }

@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Windows.Forms;
-using WireSockUI.Notifications;
+using WireSockUI.Native;
 using WireSockUI.Properties;
 
 namespace WireSockUI.Forms
