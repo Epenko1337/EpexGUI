@@ -99,7 +99,6 @@ namespace WireSockUI.Forms
             // 
             // mnuContext
             // 
-            this.mnuContext.ImageScalingSize = new System.Drawing.Size(32, 32);
             this.mnuContext.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
             this.cmiStatus,
             this.cmiAddresses,
@@ -110,7 +109,7 @@ namespace WireSockUI.Forms
             this.cmiExit});
             this.mnuContext.Name = "contextMenuStrip1";
             this.resControls.SetResourceKey(this.mnuContext, null);
-            this.mnuContext.Size = new System.Drawing.Size(211, 126);
+            this.mnuContext.Size = new System.Drawing.Size(211, 148);
             // 
             // cmiStatus
             // 
