@@ -3,7 +3,7 @@
 *WireSockUI is a complete rewrite of the EpexGUI initiative, credits to [EpexGUI](https://github.com/Epenko1337/EpexGUI) author for kicking this off*
 
 WireSockUI provides an user-interface to use the [WireSock VPN client](https://www.wiresock.net) directly from your Windows system tray.
-The interface design for WireSockUI follows the official [WireGuard for Windows[(https://www.wireguard.com/install/#windows-7-81-10-11-2008r2-2012r2-2016-2019-2022) interface.
+The interface design for WireSockUI follows the official [WireGuard for Windows](https://www.wireguard.com/install/#windows-7-81-10-11-2008r2-2012r2-2016-2019-2022) interface.
 
 ### Main screen
 
