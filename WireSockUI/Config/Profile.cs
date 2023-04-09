@@ -73,7 +73,8 @@ namespace WireSockUI.Config
         public String PrivateKey
         {
             get { return _privateKey; }
-            set {
+            set
+            {
                 ValidateKey("Interface", "PrivateKey", value);
                 _privateKey = value;
             }
@@ -89,7 +90,7 @@ namespace WireSockUI.Config
                 if (!String.IsNullOrEmpty(_privateKey))
                 {
                     // Determine public key from private key data
-                    return 
+                    return
                         Convert.ToBase64String(
                             Curve25519.GetPublicKey(
                                 Convert.FromBase64String(this.PrivateKey)));
@@ -144,10 +145,7 @@ namespace WireSockUI.Config
             {
                 if (!String.IsNullOrWhiteSpace(value))
                 {
-
-                    int mtu;
-
-                    if (!int.TryParse(value, out mtu))
+                    if (!int.TryParse(value, out int mtu))
                         throw new FormatException("\"MTU\" in \"Interface\", is not a numerical value.");
 
                     if (mtu < 576 || mtu > 65535)
@@ -180,7 +178,7 @@ namespace WireSockUI.Config
         /// </summary>
         public String PresharedKey
         {
-            get { return _presharedKey;  }
+            get { return _presharedKey; }
             set
             {
                 ValidateKey("Peer", "PresharedKey", value);
@@ -210,11 +208,12 @@ namespace WireSockUI.Config
         public String Endpoint
         {
             get { return _endpoint; }
-            set {
+            set
+            {
                 if (!Native.IPHelper.IsValidAddress(value))
                     throw new FormatException("\"Endpoint\" in \"Peer\", is not a valid IPv4, IPv6 or domain address.");
 
-                _endpoint = value; 
+                _endpoint = value;
             }
         }
 
@@ -232,10 +231,7 @@ namespace WireSockUI.Config
             {
                 if (!String.IsNullOrWhiteSpace(value))
                 {
-
-                    int mtu;
-
-                    if (!int.TryParse(value, out mtu))
+                    if (!int.TryParse(value, out int mtu))
                         throw new FormatException("\"PersistentKeepalive\" in \"Peer\", is not a numerical value.");
 
                     if (mtu < 0 || mtu > 65535)
@@ -316,7 +312,8 @@ namespace WireSockUI.Config
                         throw new FormatException("\"Endpoint\" in \"Peer\", is not a valid IPv4, IPv6 or domain address.");
 
                     _socks5Proxy = value;
-                } else
+                }
+                else
                 {
                     _socks5Proxy = null;
                 }
@@ -391,8 +388,8 @@ namespace WireSockUI.Config
         /// <summary>
         /// Create an empty profile from scratch
         /// </summary>
-        public Profile() 
-        { 
+        public Profile()
+        {
         }
 
         /// <summary>

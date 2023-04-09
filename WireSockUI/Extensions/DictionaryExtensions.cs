@@ -4,11 +4,9 @@ namespace WireSockUI.Extensions
 {
     public static class DictionaryExtensions
     {
-        public static TVal Get<TKey, TVal>(this Dictionary<TKey, TVal> dictionary, TKey key, TVal defaultVal = default(TVal))
+        public static TVal Get<TKey, TVal>(this Dictionary<TKey, TVal> dictionary, TKey key, TVal defaultVal = default)
         {
-            TVal val;
-
-            if (dictionary.TryGetValue(key, out val))
+            if (dictionary.TryGetValue(key, out TVal val))
                 return val;
 
             return defaultVal;

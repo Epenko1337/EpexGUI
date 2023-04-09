@@ -25,10 +25,10 @@ namespace WireSockUI.Native
         internal const uint SCF_DEFAULT = 0x0000;   // set the default charformat or paraformat
         internal const uint SCF_ALL = 0x0004;   // not valid with SCF_SELECTION or SCF_WORD
         internal const uint SCF_USEUIRULES = 0x0008;   // modifier for SCF_SELECTION; says that
-                                                      // the format came from a toolbar, etc. and
-                                                      // therefore UI formatting rules should be
-                                                      // used instead of strictly formatting the
-                                                      // selection.
+                                                       // the format came from a toolbar, etc. and
+                                                       // therefore UI formatting rules should be
+                                                       // used instead of strictly formatting the
+                                                       // selection.
 
         [StructLayout(LayoutKind.Sequential)]
         private struct CHARFORMAT2W
@@ -63,7 +63,7 @@ namespace WireSockUI.Native
                 set { szFaceName = Encoding.Unicode.GetBytes(value); }
             }
 
-            public int yHeight_Points
+            public int Height_Points
             {
                 get { return yHeight / 20; }
                 set { yHeight = value * 20; }
@@ -190,8 +190,7 @@ namespace WireSockUI.Native
 
         private static CHARFORMAT2W GetCharFormat(RichTextBox richTextBox, bool fSelection)
         {
-            CHARFORMAT2W format = new CHARFORMAT2W();
-            format.cbSize = CHARFORMAT2W.SIZE;
+            CHARFORMAT2W format = new CHARFORMAT2W() { cbSize = CHARFORMAT2W.SIZE };
             SendMessage(new HandleRef(richTextBox, richTextBox.Handle), EM_GETCHARFORMAT, fSelection ? SCF_SELECTION : SCF_ALL, ref format);
             return format;
         }
@@ -200,11 +199,6 @@ namespace WireSockUI.Native
         {
             format.cbSize = CHARFORMAT2W.SIZE;
             SendMessage(new HandleRef(richTextBox, richTextBox.Handle), EM_SETCHARFORMAT, (fSelection ? SCF_SELECTION : SCF_ALL), ref format);
-        }
-
-        private static CHARFORMAT2W GetSelectionCharFormat(RichTextBox richTextBox)
-        {
-            return GetCharFormat(richTextBox, true);
         }
 
         /// <summary>

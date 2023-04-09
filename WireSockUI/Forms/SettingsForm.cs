@@ -10,7 +10,7 @@ namespace WireSockUI.Forms
 {
     public partial class frmSettings : Form
     {
-        private static string linkFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "WireSockUI.lnk");
+        private static readonly string linkFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "WireSockUI.lnk");
 
         public frmSettings()
         {
@@ -28,12 +28,12 @@ namespace WireSockUI.Forms
             chkAutoConnect.Checked = File.Exists(linkFile);
         }
 
-        private void OpenFolder(object sender, EventArgs e)
+        private void OnProfilesFolderClick(object sender, EventArgs e)
         {
             Process.Start("explorer.exe", Global.MainFolder);
         }
 
-        private void Save(object sender, EventArgs e)
+        private void OnSaveClick(object sender, EventArgs e)
         {
             if (Settings.Default.AutoRun != chkAutorun.Checked)
             {

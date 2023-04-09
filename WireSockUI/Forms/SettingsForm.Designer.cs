@@ -82,7 +82,7 @@
             this.btnSave.TabIndex = 3;
             this.btnSave.TabStop = false;
             this.btnSave.Text = "Save";
-            this.btnSave.Click += new System.EventHandler(this.Save);
+            this.btnSave.Click += new System.EventHandler(this.OnSaveClick);
             // 
             // btnOpenFolder
             // 
@@ -93,7 +93,7 @@
             this.btnOpenFolder.TabIndex = 4;
             this.btnOpenFolder.TabStop = false;
             this.btnOpenFolder.Text = "Open profiles folder";
-            this.btnOpenFolder.Click += new System.EventHandler(this.OpenFolder);
+            this.btnOpenFolder.Click += new System.EventHandler(this.OnProfilesFolderClick);
             // 
             // ddlLogLevel
             // 

@@ -11,15 +11,15 @@ namespace WireSockUI.Forms
 {
     public partial class frmEdit : Form
     {
-        private static Regex profileMatch = new Regex(@"^\s*((?<comment>[;#].*)|(?<section>\[\w+\])|((?<key>[a-zA-Z0-9]+)[ \t]*=[ \t]*(?<value>.*?)))$", RegexOptions.Multiline | RegexOptions.Compiled);
-        private static Regex multiValueMatch = new Regex(@"[^, ]*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex _profileMatch = new Regex(@"^\s*((?<comment>[;#].*)|(?<section>\[\w+\])|((?<key>[a-zA-Z0-9]+)[ \t]*=[ \t]*(?<value>.*?)))$", RegexOptions.Multiline | RegexOptions.Compiled);
+        private static readonly Regex _multiValueMatch = new Regex(@"[^, ]*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         public String ReturnValue
         {
             get; private set;
         }
 
-        private void applySyntaxHighlighting()
+        private void ApplySyntaxHighlighting()
         {
             bool hasErrors = false;
 
@@ -36,7 +36,7 @@ namespace WireSockUI.Forms
             txtEditor.SelectionColor = originalColor;
             txtEditor.SelectionFont = new Font(txtEditor.SelectionFont, FontStyle.Regular);
 
-            foreach (Match m in profileMatch.Matches(txtEditor.Text))
+            foreach (Match m in _profileMatch.Matches(txtEditor.Text))
             {
                 if (m.Groups["comment"].Success)
                 {
@@ -102,7 +102,7 @@ namespace WireSockUI.Forms
                         // base64 256-bit keys
                         case "privatekey":
                         case "publickey":
-                            case "presharedkey":
+                        case "presharedkey":
                             {
                                 if (!String.IsNullOrEmpty(value))
                                 {
@@ -133,7 +133,7 @@ namespace WireSockUI.Forms
                         case "allowedips":
                         case "disallowedips":
                             {
-                                foreach (Match e in multiValueMatch.Matches(value))
+                                foreach (Match e in _multiValueMatch.Matches(value))
                                 {
                                     if (!String.IsNullOrWhiteSpace(e.Value) && !IPHelper.IsValidIPNetwork(e.Value))
                                     {
@@ -149,7 +149,7 @@ namespace WireSockUI.Forms
                         // IPv4/IPv6 values
                         case "dns":
                             {
-                                foreach (Match e in multiValueMatch.Matches(value))
+                                foreach (Match e in _multiValueMatch.Matches(value))
                                 {
                                     if (!String.IsNullOrWhiteSpace(e.Value) && !IPHelper.IsValidIPAddress(e.Value))
                                     {
@@ -194,7 +194,7 @@ namespace WireSockUI.Forms
                         case "allowedapps":
                         case "disallowedapps":
                             {
-                                foreach (Match e in multiValueMatch.Matches(value))
+                                foreach (Match e in _multiValueMatch.Matches(value))
                                 {
                                     if (!String.IsNullOrWhiteSpace(e.Value) && !Regex.IsMatch(e.Value, @"^[a-z0-9_-]+$", RegexOptions.IgnoreCase))
                                     {
@@ -232,34 +232,37 @@ namespace WireSockUI.Forms
             btnSave.Enabled = !hasErrors;
         }
 
-        public frmEdit()
+        private void Initialize()
         {
             InitializeComponent();
 
             this.Icon = Resources.ico;
-
             txtProfileName.SetCueBanner(Resources.EditProfileCue);
         }
 
-        public frmEdit(string config): this()
+        public frmEdit()
         {
-            if (String.IsNullOrEmpty(config))
-            {
-                Text = Resources.EditProfileTitleNew;
-                txtEditor.Text = Resources.template_conf;                
-            }
-            else
-            {
-                Text = String.Format(Resources.EditProfileTitle, config);
+            Initialize();
 
-                txtProfileName.Text = config.ToLowerInvariant();
-                txtEditor.Text = File.ReadAllText(Path.Combine(Global.ConfigsFolder, config + ".conf"));
-            }
+            this.Text = Resources.EditProfileTitleNew;
+            txtEditor.Text = Resources.template_conf;
 
-            applySyntaxHighlighting();
+            ApplySyntaxHighlighting();
         }
 
-        private void SaveProfile(object sender, EventArgs e)
+        public frmEdit(string config)
+        {
+            Initialize();
+
+            Text = String.Format(Resources.EditProfileTitle, config);
+
+            txtProfileName.Text = config.ToLowerInvariant();
+            txtEditor.Text = File.ReadAllText(Path.Combine(Global.ConfigsFolder, config + ".conf"));
+
+            ApplySyntaxHighlighting();
+        }
+
+        private void OnSaveClick(object sender, EventArgs e)
         {
             String tmpProfile = Path.GetTempFileName();
             File.WriteAllText(tmpProfile, txtEditor.Text);
@@ -292,11 +295,11 @@ namespace WireSockUI.Forms
             File.Move(tmpProfile, profilePath);
 
             this.ReturnValue = txtProfileName.Text;
-            
+
             Close();
         }
-       
-        private void FindProcess(object sender, EventArgs e)
+
+        private void OnProcessClick(object sender, EventArgs e)
         {
             using (TaskManager taskManager = new TaskManager())
             {
@@ -308,9 +311,9 @@ namespace WireSockUI.Forms
             }
         }
 
-        private void ProfileChanged(object sender, EventArgs e)
+        private void OnProfileChanged(object sender, EventArgs e)
         {
-            applySyntaxHighlighting();
+            ApplySyntaxHighlighting();
         }
     }
 }

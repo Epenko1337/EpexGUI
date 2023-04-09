@@ -152,7 +152,7 @@
             this.btnProcessList.Text = "Processes...";
             this.btnProcessList.TextImageRelation = System.Windows.Forms.TextImageRelation.ImageBeforeText;
             this.btnProcessList.UseVisualStyleBackColor = true;
-            this.btnProcessList.Click += new System.EventHandler(this.FindProcess);
+            this.btnProcessList.Click += new System.EventHandler(this.OnProcessClick);
             // 
             // btnSave
             // 
@@ -164,7 +164,7 @@
             this.btnSave.TabIndex = 1;
             this.btnSave.Text = "Save";
             this.btnSave.UseVisualStyleBackColor = true;
-            this.btnSave.Click += new System.EventHandler(this.SaveProfile);
+            this.btnSave.Click += new System.EventHandler(this.OnSaveClick);
             // 
             // btnCancel
             // 
@@ -189,7 +189,7 @@
             this.txtEditor.Size = new System.Drawing.Size(664, 352);
             this.txtEditor.TabIndex = 46;
             this.txtEditor.Text = "";
-            this.txtEditor.TextChanged += new System.EventHandler(this.ProfileChanged);
+            this.txtEditor.TextChanged += new System.EventHandler(this.OnProfileChanged);
             // 
             // resControls
             // 

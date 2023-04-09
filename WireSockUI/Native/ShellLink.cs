@@ -345,7 +345,7 @@ namespace WireSockUI.Native
 
         #region Constructor
 
-        public ShellLink(): this(null)
+        public ShellLink() : this(null)
         {
         }
 

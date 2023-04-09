@@ -10,7 +10,7 @@ namespace WireSockUI.Native
 {
     internal static class Notifications
     {
-        private static string icon; 
+        private static readonly string icon;
         private static Windows.Data.Xml.Dom.XmlDocument GetXml(string title, string body)
         {
             XElement toast =
@@ -29,19 +29,6 @@ namespace WireSockUI.Native
             xml.LoadXml(toast.ToString());
 
             return xml;
-        }
-
-        private static void ToastNotificationOnDismissed(ToastNotification sender, ToastDismissedEventArgs args)
-        {
-            switch (args.Reason)
-            {
-                case ToastDismissalReason.ApplicationHidden:
-                    break;
-                case ToastDismissalReason.TimedOut:
-                    break;
-                case ToastDismissalReason.UserCanceled:
-                    break;
-            }
         }
 
         static Notifications()
@@ -96,7 +83,8 @@ namespace WireSockUI.Native
             {
                 if (form.Name == "frmMain")
                 {
-                    form.BeginInvoke((Action)(() => {
+                    form.BeginInvoke((Action)(() =>
+                    {
 
                         form.Show();
                         form.WindowState = FormWindowState.Normal;

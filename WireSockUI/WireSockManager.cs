@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -15,33 +14,36 @@ namespace WireSockUI
     /// </summary>
     internal class WireSockManager : IDisposable
     {
+        #region Wireguard Boost Library
         private delegate IntPtr GetHandle(LogPrinter logPrinter, WgbLogLevel logLevel, bool enableTrafficCapture);
         private delegate void SetLogLevel(IntPtr handle, WgbLogLevel logLevel);
         private delegate bool CreateTunnelFromFile(IntPtr handle, string fileName);
         private delegate bool TunnelAction(IntPtr handle);
         private delegate WgbStats TunnelState(IntPtr handle);
 
-        private Mode _adapterMode;
         private GetHandle _getHandle;
         private SetLogLevel _setLogLevel;
-        private CreateTunnelFromFile _createTunnelFromFile;        
+        private CreateTunnelFromFile _createTunnelFromFile;
         private TunnelAction _startTunnel;
         private TunnelAction _stopTunnel;
         private TunnelAction _dropTunnel;
         private TunnelAction _tunnelActive;
         private TunnelState _tunnelState;
 
+        private Mode _adapterMode;
+        #endregion
+
         private volatile IntPtr _handle = IntPtr.Zero;
         private string _profileName;
 
-        private BlockingCollection<LogMessage> _logQueue;
+        private readonly BlockingCollection<LogMessage> _logQueue;
         private GCHandle _logPrinterHandle;
 
         private readonly LogPrinter _logPrinter;
 
         private WgbLogLevel _logLevel;
-        private Control _logControl;
-        private LogMessageCallback _logMessageCallback;
+        private readonly Control _logControl;
+        private readonly LogMessageCallback _logMessageCallback;
 
         /// <summary>
         /// LogMessage function delegate
@@ -196,9 +198,9 @@ namespace WireSockUI
         }
 
         /// <summary>
-        /// Appends the specified message to the _outBox control on the UI thread.
+        /// Appends the specified message to the log queue to process control on the UI thread.
         /// </summary>
-        /// <param name="message">The message to append to the _outBox control.</param>
+        /// <param name="message">The message to append to the log queue.</param>
         private void PrintLog(string message)
         {
             _logQueue.Add(new LogMessage() { Message = message });

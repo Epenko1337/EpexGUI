@@ -54,16 +54,16 @@ namespace WireSockUI.Forms
 
                     return new ListViewItem(Path.GetFileNameWithoutExtension(p.ImageName), p.ProcessId.ToString());
                 }).ToArray());
-           
+
         }
 
-        private void UpdateProcesses(object sender, EventArgs e)
+        private void OnRefreshClick(object sender, EventArgs e)
         {
             UpdateProcesses();
             txtSearch.Text = String.Empty;
         }
 
-        private void FindProcess(object sender, EventArgs e)
+        private void OnFindProcessChanged(object sender, EventArgs e)
         {
             if (!String.IsNullOrWhiteSpace(txtSearch.Text))
             {
@@ -86,7 +86,7 @@ namespace WireSockUI.Forms
             }
         }
 
-        private void SelectProcess(object sender, EventArgs e)
+        private void OnProcessSelected(object sender, EventArgs e)
         {
             DialogResult = DialogResult.OK;
             this.ReturnValue = lstProcesses.SelectedItems[0].Text;

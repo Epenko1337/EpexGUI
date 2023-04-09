@@ -22,15 +22,9 @@ namespace WireSockUI
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            Application.ApplicationExit += (sender, eventArgs) =>
-            {
-                // Ensure we de-register from toast notifications on exit
-                //ToastNotificationManagerCompat.Uninstall();
-            };
-
             if (!Directory.Exists(Global.MainFolder)) Directory.CreateDirectory(Global.MainFolder);
             if (!Directory.Exists(Global.ConfigsFolder)) Directory.CreateDirectory(Global.ConfigsFolder);
-            
+
             if (!IsWireSockInstalled())
             {
                 MessageBox.Show(Resources.AppNoWireSockMessage, Resources.AppNoWireSockTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);

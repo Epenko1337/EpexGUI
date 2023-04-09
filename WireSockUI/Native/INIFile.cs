@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 
 namespace WireSockUI.Native
 {
- 
+
     /// <summary>
     /// Read and Write INI File format using Windows native APIs
     /// </summary>
@@ -101,7 +101,7 @@ namespace WireSockUI.Native
 
             uint length = GetPrivateProfileString(sectionName, key, null, buffer, BUFFER_SIZE, fileName);
 
-            if (length != (BUFFER_SIZE -2))
+            if (length != (BUFFER_SIZE - 2))
             {
                 return new string(buffer, 0, (int)length);
             }

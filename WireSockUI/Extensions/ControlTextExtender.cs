@@ -1,5 +1,4 @@
-﻿using System.Collections;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.ComponentModel;
 using System.Resources;
 using System.Windows.Forms;
@@ -7,9 +6,9 @@ using System.Windows.Forms;
 namespace WireSockUI.Extensions
 {
     [ProvideProperty("ResourceKey", typeof(Control))]
-    public class ControlTextExtender: Component, System.ComponentModel.IExtenderProvider, ISupportInitialize
+    public class ControlTextExtender : Component, System.ComponentModel.IExtenderProvider, ISupportInitialize
     {
-        private Dictionary<Control, string> _items;
+        private readonly Dictionary<Control, string> _items;
 
         public ControlTextExtender() : base()
         {
@@ -26,9 +25,7 @@ namespace WireSockUI.Extensions
 
         public string GetResourceKey(Control item)
         {
-            string value;
-
-            if (_items.TryGetValue(item, out value))
+            if (_items.TryGetValue(item, out string value))
                 return value;
 
             return null;

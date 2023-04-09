@@ -1,5 +1,4 @@
-﻿using System.Collections;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.ComponentModel;
 using System.Resources;
 using System.Windows.Forms;
@@ -7,11 +6,11 @@ using System.Windows.Forms;
 namespace WireSockUI.Extensions
 {
     [ProvideProperty("ResourceKey", typeof(ToolStripItem))]
-    internal class MenuTextExtender: Component, System.ComponentModel.IExtenderProvider, ISupportInitialize
+    internal class MenuTextExtender : Component, System.ComponentModel.IExtenderProvider, ISupportInitialize
     {
         private Dictionary<ToolStripItem, string> _items;
 
-        public MenuTextExtender() : base() 
+        public MenuTextExtender() : base()
         {
             _items = new Dictionary<ToolStripItem, string>();
         }
@@ -58,6 +57,6 @@ namespace WireSockUI.Extensions
             }
         }
 
-        
+
     }
 }

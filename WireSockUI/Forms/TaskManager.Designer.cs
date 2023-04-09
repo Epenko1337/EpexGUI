@@ -59,7 +59,7 @@
             this.lstProcesses.TabIndex = 0;
             this.lstProcesses.UseCompatibleStateImageBehavior = false;
             this.lstProcesses.View = System.Windows.Forms.View.Details;
-            this.lstProcesses.ItemActivate += new System.EventHandler(this.SelectProcess);
+            this.lstProcesses.ItemActivate += new System.EventHandler(this.OnProcessSelected);
             // 
             // colProcess
             // 
@@ -81,7 +81,7 @@
             this.txtSearch.Size = new System.Drawing.Size(284, 20);
             this.txtSearch.TabIndex = 25;
             this.txtSearch.TabStop = false;
-            this.txtSearch.TextChanged += new System.EventHandler(this.FindProcess);
+            this.txtSearch.TextChanged += new System.EventHandler(this.OnFindProcessChanged);
             // 
             // btnRefresh
             // 
@@ -93,7 +93,7 @@
             this.btnRefresh.TabIndex = 26;
             this.btnRefresh.TabStop = false;
             this.btnRefresh.UseVisualStyleBackColor = false;
-            this.btnRefresh.Click += new System.EventHandler(this.UpdateProcesses);
+            this.btnRefresh.Click += new System.EventHandler(this.OnRefreshClick);
             // 
             // resControls
             // 
