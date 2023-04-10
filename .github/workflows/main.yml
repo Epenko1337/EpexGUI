@@ -18,8 +18,15 @@ jobs:
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@v1
 
+      - name: Parse Version
+        shell: bash
+        run: |
+          # Strip "v" prefix from tag name 
+          VERSION=$(echo ${{ github.ref_name }} | sed -e 's/^v//') 
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
       - name: Build
-        run: msbuild WireSockUI/WireSockUI.csproj -t:rebuild -verbosity:minimal -property:Configuration=Release
+        run: msbuild WireSockUI/WireSockUI.csproj -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Version=${{ env.VERSION }}
 
       - name: Package Release
         uses: thedoctor0/zip-release@0.7.1
