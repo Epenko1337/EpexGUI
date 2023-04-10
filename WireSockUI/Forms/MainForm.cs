@@ -11,7 +11,6 @@ using WireSockUI.Config;
 using WireSockUI.Extensions;
 using WireSockUI.Native;
 using WireSockUI.Properties;
-using static System.Windows.Forms.AxHost;
 using static WireSockUI.Native.WireguardBoosterExports;
 
 namespace WireSockUI.Forms
@@ -78,8 +77,6 @@ namespace WireSockUI.Forms
                 while (!worker.CancellationPending)
                 {
                     Thread.Sleep(1000);
-
-                    Debug.WriteLine("Doing work.");
 
                     if (_wiresock.Connected)
                     {
@@ -304,27 +301,28 @@ namespace WireSockUI.Forms
             LoadProfiles();
 
             // Create a new WireSockManager instance, attached to the logging control
-            _wiresock = new WireSockManager(lstLog, this.OnWireSockLogMessage);
+            _wiresock = new WireSockManager(this.OnWireSockLogMessage);
+            _wiresock.LogLevel = _wiresock.LogLevelSetting;
         }
 
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
 
-            if (Properties.Settings.Default.AutoMinimize)
+            if (Settings.Default.AutoMinimize)
             {
                 this.WindowState = FormWindowState.Minimized;
                 this.ShowInTaskbar = false;
                 Hide();
             }
 
-            if (lstProfiles.Items.ContainsKey(Properties.Settings.Default.LastProfile))
-                lstProfiles.Items[Properties.Settings.Default.LastProfile].Selected = true;
+            if (lstProfiles.Items.ContainsKey(Settings.Default.LastProfile))
+                lstProfiles.Items[Settings.Default.LastProfile].Selected = true;
 
             // Connect to the last used configuration, if required.
-            if (!Properties.Settings.Default.AutoConnect) return;
+            if (!Settings.Default.AutoConnect) return;
 
-            if (lstProfiles.Items.ContainsKey(Properties.Settings.Default.LastProfile))
+            if (lstProfiles.Items.ContainsKey(Settings.Default.LastProfile))
                 OnProfileClick(lstProfiles, EventArgs.Empty);
             else
                 MessageBox.Show(Resources.LastProfileNotFound, Resources.DialogAutoConnect, MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -444,7 +442,7 @@ namespace WireSockUI.Forms
             }
             else
             {
-                _wiresock.TunnelMode = Properties.Settings.Default.UseAdapter ? WireSockManager.Mode.VirtualAdapter : WireSockManager.Mode.Transparent;
+                _wiresock.TunnelMode = Settings.Default.UseAdapter ? WireSockManager.Mode.VirtualAdapter : WireSockManager.Mode.Transparent;
 
                 string profile = lstProfiles.SelectedItems[0].Text;
 
@@ -685,10 +683,12 @@ namespace WireSockUI.Forms
 
             if ((e.ItemIndex % 2) == 1)
             {
+                Color color = Color.FromKnownColor(KnownColor.Window);
+
                 e.Item.BackColor = Color.FromArgb(
-                    (int)(e.Item.BackColor.R * 0.95),
-                    (int)(e.Item.BackColor.G * 0.95),
-                    (int)(e.Item.BackColor.B * 0.95));
+                    (int)(color.R * 0.95),
+                    (int)(color.G * 0.95),
+                    (int)(color.B * 0.95));
 
                 e.Item.UseItemStyleForSubItems = true;
             }
