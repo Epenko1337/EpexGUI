@@ -25,7 +25,7 @@ namespace WireSockUI.Forms
             ddlLogLevel.SelectedItem = Settings.Default.LogLevel;
 
             // If the shortcut exists, and the setting does not match update it to reflect the actual status
-            chkAutoConnect.Checked = File.Exists(linkFile);
+            chkAutorun.Checked = File.Exists(linkFile);
         }
 
         private void OnProfilesFolderClick(object sender, EventArgs e)
