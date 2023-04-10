@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 using WireSockUI.Config;
 using WireSockUI.Properties;
@@ -40,10 +40,7 @@ namespace WireSockUI
         private GCHandle _logPrinterHandle;
 
         private readonly LogPrinter _logPrinter;
-
         private WgbLogLevel _logLevel;
-        private readonly Control _logControl;
-        private readonly LogMessageCallback _logMessageCallback;
 
         /// <summary>
         /// LogMessage function delegate
@@ -142,7 +139,7 @@ namespace WireSockUI
         {
             get
             {
-                switch (Properties.Settings.Default.LogLevel)
+                switch (Settings.Default.LogLevel)
                 {
                     case "Info":
                         return WgbLogLevel.Info;
@@ -207,37 +204,44 @@ namespace WireSockUI
         }
 
         /// <summary>
+        /// Initialize a <see cref="T:BackgroundWorker" /> which retrieves log messages from the logging queue
+        /// </summary>
+        /// <param name="logMessageCallback"><see cref="T:LogMessageCallback" /> to call for each log message</param>
+        /// <returns><see cref="T:BackgroundWorker" /></returns>
+        private BackgroundWorker InitializeLogWorker(LogMessageCallback logMessageCallback)
+        {
+            BackgroundWorker worker = new BackgroundWorker()
+            {
+                WorkerReportsProgress = true
+            };
+
+            worker.DoWork += (object s, DoWorkEventArgs e) =>
+            {
+                // Exit when the logQueue is done adding and empty
+                while (!_logQueue.IsCompleted)
+                {
+                    LogMessage message = _logQueue.Take();
+                    worker.ReportProgress(0, message);
+                }
+            };
+
+            worker.ProgressChanged += (object s, ProgressChangedEventArgs e) =>
+            {
+                if (e.UserState is LogMessage message)
+                    logMessageCallback(message);
+            };
+
+            return worker;
+        }
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="WireSockManager" />.
         /// </summary>
-        /// <param name="logControl"><see cref="T:Control" /> owning the <paramref name="logMessageCallback"/></param>
         /// <param name="logMessageCallback"><see cref="T:LogMessageCallback" /></param>
-        public WireSockManager(Control logControl = null, LogMessageCallback logMessageCallback = null)
+        public WireSockManager(LogMessageCallback logMessageCallback = null)
         {
             _logQueue = new BlockingCollection<LogMessage>(new ConcurrentQueue<LogMessage>());
-            _logControl = logControl;
-            _logMessageCallback = logMessageCallback;
-
-            Task.Run(() =>
-            {
-                try
-                {
-                    while (true)
-                    {
-                        LogMessage message = _logQueue.Take();
-
-                        if (_logControl != null && _logMessageCallback != null)
-                        {
-                            if (_logControl.InvokeRequired)
-                                _logControl.BeginInvoke(_logMessageCallback, new object[] { message });
-                            else
-                                _logMessageCallback(message);
-                        }
-                    }
-                }
-                catch (InvalidOperationException)
-                {
-                }
-            });
+            InitializeLogWorker(logMessageCallback).RunWorkerAsync();
 
             this.TunnelMode = Mode.Transparent;
 
