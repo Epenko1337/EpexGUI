@@ -25,13 +25,13 @@ namespace WireSockUI.Properties {
         
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
-        [global::System.Configuration.DefaultSettingValueAttribute("")]
-        public string LastProfile {
+        [global::System.Configuration.DefaultSettingValueAttribute("False")]
+        public bool AutoConnect {
             get {
-                return ((string)(this["LastProfile"]));
+                return ((bool)(this["AutoConnect"]));
             }
             set {
-                this["LastProfile"] = value;
+                this["AutoConnect"] = value;
             }
         }
         
@@ -50,24 +50,36 @@ namespace WireSockUI.Properties {
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
         [global::System.Configuration.DefaultSettingValueAttribute("False")]
-        public bool AutoConnect {
-            get {
-                return ((bool)(this["AutoConnect"]));
-            }
-            set {
-                this["AutoConnect"] = value;
-            }
-        }
-        
-        [global::System.Configuration.UserScopedSettingAttribute()]
-        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
-        [global::System.Configuration.DefaultSettingValueAttribute("False")]
         public bool AutoMinimize {
             get {
                 return ((bool)(this["AutoMinimize"]));
             }
             set {
                 this["AutoMinimize"] = value;
+            }
+        }
+        
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("True")]
+        public bool AutoUpdate {
+            get {
+                return ((bool)(this["AutoUpdate"]));
+            }
+            set {
+                this["AutoUpdate"] = value;
+            }
+        }
+        
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("")]
+        public string LastProfile {
+            get {
+                return ((string)(this["LastProfile"]));
+            }
+            set {
+                this["LastProfile"] = value;
             }
         }
         

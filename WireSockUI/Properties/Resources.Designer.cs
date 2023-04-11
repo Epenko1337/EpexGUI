@@ -97,6 +97,24 @@ namespace WireSockUI.Properties {
         }
         
         /// <summary>
+        ///   Looks up a localized string similar to A newer WireSockUI client is available for download..
+        /// </summary>
+        internal static string AppUpdateMessage {
+            get {
+                return ResourceManager.GetString("AppUpdateMessage", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to New version.
+        /// </summary>
+        internal static string AppUpdateTitle {
+            get {
+                return ResourceManager.GetString("AppUpdateTitle", resourceCulture);
+            }
+        }
+        
+        /// <summary>
         ///   Looks up a localized string similar to https://www.wiresock.net/.
         /// </summary>
         internal static string AppWireSockURL {
@@ -643,6 +661,15 @@ namespace WireSockUI.Properties {
         internal static string SettingsAutoRun {
             get {
                 return ResourceManager.GetString("SettingsAutoRun", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Check online for updates.
+        /// </summary>
+        internal static string SettingsAutoUpdate {
+            get {
+                return ResourceManager.GetString("SettingsAutoUpdate", resourceCulture);
             }
         }
         
