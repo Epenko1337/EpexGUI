@@ -129,6 +129,12 @@
   <data name="AppNoWireSockTitle" xml:space="preserve">
     <value>WireSock not found</value>
   </data>
+  <data name="AppUpdateMessage" xml:space="preserve">
+    <value>A newer WireSockUI client is available for download.</value>
+  </data>
+  <data name="AppUpdateTitle" xml:space="preserve">
+    <value>New version</value>
+  </data>
   <data name="AppWireSockURL" xml:space="preserve">
     <value>https://www.wiresock.net/</value>
   </data>
@@ -312,6 +318,9 @@
   </data>
   <data name="SettingsAutoRun" xml:space="preserve">
     <value>Run when Windows starts</value>
+  </data>
+  <data name="SettingsAutoUpdate" xml:space="preserve">
+    <value>Check online for updates</value>
   </data>
   <data name="SettingsLogLevel" xml:space="preserve">
     <value>Log level</value>
