@@ -19,8 +19,9 @@ namespace WireSockUI.Forms
             this.Icon = Resources.ico;
 
             chkAutorun.Checked = Settings.Default.AutoRun;
-            chkMinimizeTray.Checked = Settings.Default.AutoMinimize;
+            chkAutoMinimize.Checked = Settings.Default.AutoMinimize;
             chkAutoConnect.Checked = Settings.Default.AutoConnect;
+            chkAutoUpdate.Checked = Settings.Default.AutoUpdate;
             chkUseAdapter.Checked = Settings.Default.UseAdapter;
             ddlLogLevel.SelectedItem = Settings.Default.LogLevel;
 
@@ -54,7 +55,8 @@ namespace WireSockUI.Forms
             }
 
             Settings.Default.AutoConnect = chkAutoConnect.Checked;
-            Settings.Default.AutoMinimize = chkMinimizeTray.Checked;
+            Settings.Default.AutoMinimize = chkAutoMinimize.Checked;
+            Settings.Default.AutoUpdate = chkAutoUpdate.Checked;
             Settings.Default.UseAdapter = chkUseAdapter.Checked;
             Settings.Default.LogLevel = ddlLogLevel.SelectedItem as string;
 
@@ -63,5 +65,6 @@ namespace WireSockUI.Forms
             DialogResult = DialogResult.OK;
             Close();
         }
+
     }
 }

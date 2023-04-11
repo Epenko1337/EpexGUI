@@ -29,7 +29,7 @@
         private void InitializeComponent()
         {
             this.chkAutorun = new System.Windows.Forms.CheckBox();
-            this.chkMinimizeTray = new System.Windows.Forms.CheckBox();
+            this.chkAutoMinimize = new System.Windows.Forms.CheckBox();
             this.chkAutoConnect = new System.Windows.Forms.CheckBox();
             this.btnSave = new System.Windows.Forms.Button();
             this.btnOpenFolder = new System.Windows.Forms.Button();
@@ -37,6 +37,7 @@
             this.lblLogLevel = new System.Windows.Forms.Label();
             this.chkUseAdapter = new System.Windows.Forms.CheckBox();
             this.resControls = new WireSockUI.Extensions.ControlTextExtender();
+            this.chkAutoUpdate = new System.Windows.Forms.CheckBox();
             ((System.ComponentModel.ISupportInitialize)(this.resControls)).BeginInit();
             this.SuspendLayout();
             // 
@@ -53,19 +54,19 @@
             // 
             // chkMinimizeTray
             // 
-            this.chkMinimizeTray.AutoSize = true;
-            this.chkMinimizeTray.Location = new System.Drawing.Point(12, 40);
-            this.chkMinimizeTray.Name = "chkMinimizeTray";
-            this.resControls.SetResourceKey(this.chkMinimizeTray, "SettingsAutoMinimize");
-            this.chkMinimizeTray.Size = new System.Drawing.Size(136, 17);
-            this.chkMinimizeTray.TabIndex = 1;
-            this.chkMinimizeTray.Text = "Minimize to tray on start";
-            this.chkMinimizeTray.UseVisualStyleBackColor = true;
+            this.chkAutoMinimize.AutoSize = true;
+            this.chkAutoMinimize.Location = new System.Drawing.Point(12, 38);
+            this.chkAutoMinimize.Name = "chkMinimizeTray";
+            this.resControls.SetResourceKey(this.chkAutoMinimize, "SettingsAutoMinimize");
+            this.chkAutoMinimize.Size = new System.Drawing.Size(136, 17);
+            this.chkAutoMinimize.TabIndex = 1;
+            this.chkAutoMinimize.Text = "Minimize to tray on start";
+            this.chkAutoMinimize.UseVisualStyleBackColor = true;
             // 
             // chkAutoConnect
             // 
             this.chkAutoConnect.AutoSize = true;
-            this.chkAutoConnect.Location = new System.Drawing.Point(12, 68);
+            this.chkAutoConnect.Location = new System.Drawing.Point(12, 64);
             this.chkAutoConnect.Name = "chkAutoConnect";
             this.resControls.SetResourceKey(this.chkAutoConnect, "SettingsAutoConnect");
             this.chkAutoConnect.Size = new System.Drawing.Size(168, 17);
@@ -75,7 +76,7 @@
             // 
             // btnSave
             // 
-            this.btnSave.Location = new System.Drawing.Point(12, 168);
+            this.btnSave.Location = new System.Drawing.Point(12, 190);
             this.btnSave.Name = "btnSave";
             this.resControls.SetResourceKey(this.btnSave, "SettingsSave");
             this.btnSave.Size = new System.Drawing.Size(75, 25);
@@ -86,7 +87,7 @@
             // 
             // btnOpenFolder
             // 
-            this.btnOpenFolder.Location = new System.Drawing.Point(93, 168);
+            this.btnOpenFolder.Location = new System.Drawing.Point(93, 190);
             this.btnOpenFolder.Name = "btnOpenFolder";
             this.resControls.SetResourceKey(this.btnOpenFolder, "SettingsProfiles");
             this.btnOpenFolder.Size = new System.Drawing.Size(121, 25);
@@ -104,7 +105,7 @@
             "Info",
             "Error",
             "All"});
-            this.ddlLogLevel.Location = new System.Drawing.Point(12, 135);
+            this.ddlLogLevel.Location = new System.Drawing.Point(12, 157);
             this.ddlLogLevel.Name = "ddlLogLevel";
             this.resControls.SetResourceKey(this.ddlLogLevel, null);
             this.ddlLogLevel.Size = new System.Drawing.Size(121, 21);
@@ -113,7 +114,7 @@
             // lblLogLevel
             // 
             this.lblLogLevel.AutoSize = true;
-            this.lblLogLevel.Location = new System.Drawing.Point(9, 119);
+            this.lblLogLevel.Location = new System.Drawing.Point(9, 141);
             this.lblLogLevel.Name = "lblLogLevel";
             this.resControls.SetResourceKey(this.lblLogLevel, "SettingsLogLevel");
             this.lblLogLevel.Size = new System.Drawing.Size(70, 13);
@@ -123,7 +124,7 @@
             // chkUseAdapter
             // 
             this.chkUseAdapter.AutoSize = true;
-            this.chkUseAdapter.Location = new System.Drawing.Point(12, 96);
+            this.chkUseAdapter.Location = new System.Drawing.Point(12, 116);
             this.chkUseAdapter.Name = "chkUseAdapter";
             this.resControls.SetResourceKey(this.chkUseAdapter, null);
             this.chkUseAdapter.Size = new System.Drawing.Size(167, 17);
@@ -134,18 +135,30 @@
             // 
             this.resControls.ResourceClassName = "WireSockUI.Properties.Resources";
             // 
+            // chkAutoUpdate
+            // 
+            this.chkAutoUpdate.AutoSize = true;
+            this.chkAutoUpdate.Location = new System.Drawing.Point(12, 90);
+            this.chkAutoUpdate.Name = "chkAutoUpdate";
+            this.resControls.SetResourceKey(this.chkAutoUpdate, "SettingsAutoUpdate");
+            this.chkAutoUpdate.Size = new System.Drawing.Size(144, 17);
+            this.chkAutoUpdate.TabIndex = 9;
+            this.chkAutoUpdate.Text = "Check online for updates";
+            this.chkAutoUpdate.UseVisualStyleBackColor = true;
+            // 
             // frmSettings
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(222, 197);
+            this.ClientSize = new System.Drawing.Size(222, 222);
+            this.Controls.Add(this.chkAutoUpdate);
             this.Controls.Add(this.lblLogLevel);
             this.Controls.Add(this.ddlLogLevel);
             this.Controls.Add(this.chkUseAdapter);
             this.Controls.Add(this.btnOpenFolder);
             this.Controls.Add(this.btnSave);
             this.Controls.Add(this.chkAutoConnect);
-            this.Controls.Add(this.chkMinimizeTray);
+            this.Controls.Add(this.chkAutoMinimize);
             this.Controls.Add(this.chkAutorun);
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
@@ -163,7 +176,7 @@
         #endregion
 
         private System.Windows.Forms.CheckBox chkAutorun;
-        private System.Windows.Forms.CheckBox chkMinimizeTray;
+        private System.Windows.Forms.CheckBox chkAutoMinimize;
         private System.Windows.Forms.CheckBox chkAutoConnect;
         private System.Windows.Forms.Button btnSave;
         private System.Windows.Forms.Button btnOpenFolder;
@@ -171,5 +184,6 @@
         private System.Windows.Forms.Label lblLogLevel;
         private System.Windows.Forms.CheckBox chkUseAdapter;
         private Extensions.ControlTextExtender resControls;
+        private System.Windows.Forms.CheckBox chkAutoUpdate;
     }
 }
