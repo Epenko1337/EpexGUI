@@ -31,7 +31,7 @@ namespace WireSockUI.Forms
 
         private void OnProfilesFolderClick(object sender, EventArgs e)
         {
-            Process.Start("explorer.exe", Global.MainFolder);
+            Process.Start("explorer.exe", Global.mainFolder);
         }
 
         private void OnSaveClick(object sender, EventArgs e)

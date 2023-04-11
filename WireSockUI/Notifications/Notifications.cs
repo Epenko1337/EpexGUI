@@ -34,7 +34,7 @@ namespace WireSockUI.Native
         static Notifications()
         {
             // Write the icon to local appdata folder for toast notifications
-            icon = $@"{Global.MainFolder}\WireSock.ico";
+            icon = $@"{Global.mainFolder}\WireSock.ico";
 
             if (!File.Exists(icon))
                 using (FileStream stream = new FileStream(icon, FileMode.CreateNew))

@@ -5,7 +5,8 @@
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <Version Condition="'$(Version)' == ''">0.0.1</Version>
-    <Repository Condition="'$(Repository)' == ''"></Repository>
+    <Repository Condition="'$(Repository)' == ''">
+    </Repository>
     <ProjectGuid>{C309F359-DAFF-42D0-8379-70ECC9688943}</ProjectGuid>
     <OutputType>WinExe</OutputType>
     <RootNamespace>WireSockUI</RootNamespace>
@@ -71,9 +72,7 @@
     <Reference Include="System.Runtime" />
     <Reference Include="System.Runtime.InteropServices.WindowsRuntime" />
     <Reference Include="System.Windows.Forms" />
-    <Reference Include="Windows.Data" />
-    <Reference Include="Windows.Foundation" />
-    <Reference Include="Windows.UI" />
+    <Reference Include="Windows" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Config\Curve25519.cs" />

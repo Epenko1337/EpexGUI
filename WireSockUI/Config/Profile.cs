@@ -354,7 +354,7 @@ namespace WireSockUI.Config
 
         public static IEnumerable<String> GetProfiles()
         {
-            String[] files = Directory.GetFiles(Global.ConfigsFolder);
+            String[] files = Directory.GetFiles(Global.configsFolder);
 
             foreach (String file in files)
             {
@@ -372,7 +372,7 @@ namespace WireSockUI.Config
         /// <remarks>The profile might not exist, this merely returns the path it should be at.</remarks>
         public static String GetProfilePath(string profileName)
         {
-            return Path.Combine(Global.ConfigsFolder, profileName + ".conf");
+            return Path.Combine(Global.configsFolder, profileName + ".conf");
         }
 
         /// <summary>

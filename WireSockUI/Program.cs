@@ -3,6 +3,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Threading;
 using System.Windows.Forms;
 using WireSockUI.Extensions;
 using WireSockUI.Forms;
@@ -12,8 +13,9 @@ namespace WireSockUI
 {
     internal static class Global
     {
-        public static string MainFolder = $"{Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)}\\WireSockUI";
-        public static string ConfigsFolder = MainFolder + "\\Configs";
+        public static string mainFolder = $"{Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)}\\WireSockUI";
+        public static string configsFolder = mainFolder + "\\Configs";
+        public static Mutex alreadyRunning;
     }
 
     internal static class Program
@@ -24,15 +26,21 @@ namespace WireSockUI
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            if (!Directory.Exists(Global.MainFolder)) Directory.CreateDirectory(Global.MainFolder);
-            if (!Directory.Exists(Global.ConfigsFolder)) Directory.CreateDirectory(Global.ConfigsFolder);
+            if (!Directory.Exists(Global.mainFolder)) Directory.CreateDirectory(Global.mainFolder);
+            if (!Directory.Exists(Global.configsFolder)) Directory.CreateDirectory(Global.configsFolder);
+
+            if (IsApplicationAlreadyRunning())
+            {
+                MessageBox.Show(Resources.AlreadyRunningMessage, Resources.AlreadyRunningTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                Environment.Exit(1);
+            }
 
             if (!IsWireSockInstalled())
             {
                 MessageBox.Show(Resources.AppNoWireSockMessage, Resources.AppNoWireSockTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 OpenBrowser(Resources.AppWireSockURL);
 
-                Application.Exit();
+                Environment.Exit(1);
             }
 
             CheckVersion();
@@ -123,5 +131,32 @@ namespace WireSockUI
                 return File.Exists(wiresockLocation);
             }
         }
+
+        /// <summary>
+        /// Determines if another instance of the current application is already running.
+        /// </summary>
+        /// <returns>
+        /// A boolean value that is true if another instance of the application is already running,
+        /// and false if the current instance is the only one running.
+        /// </returns>
+        /// <remarks>
+        /// This function uses a named Mutex (a synchronization primitive) to check if it has been
+        /// created before. If the Mutex is not new, that means another instance of the application
+        /// is already running.
+        /// </remarks>
+        static bool IsApplicationAlreadyRunning()
+        {
+            const string mutexName = "Global\\WiresockClientService";
+            Global.alreadyRunning = new Mutex(true, mutexName, out var createdNew);
+
+            if (!createdNew)
+            {
+                Global.alreadyRunning.Dispose();
+                return true;
+            }
+
+            return false;
+        }
+
     }
 }

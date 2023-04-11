@@ -19,7 +19,7 @@ namespace WireSockUI.Properties {
     // class via a tool like ResGen or Visual Studio.
     // To add or remove a member, edit your .ResX file then rerun ResGen
     // with the /str option, or rebuild your VS project.
-    [global::System.CodeDom.Compiler.GeneratedCodeAttribute("System.Resources.Tools.StronglyTypedResourceBuilder", "17.0.0.0")]
+    [global::System.CodeDom.Compiler.GeneratedCodeAttribute("System.Resources.Tools.StronglyTypedResourceBuilder", "16.0.0.0")]
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
     [global::System.Runtime.CompilerServices.CompilerGeneratedAttribute()]
     internal class Resources {
@@ -79,7 +79,25 @@ namespace WireSockUI.Properties {
         }
         
         /// <summary>
-        ///   Looks up a localized string similar to WireSock needs to be installed for WireSockUI to function.
+        ///   Looks up a localized string similar to Another instance of WireSockUI or Wiresock VPN Client Service is already running..
+        /// </summary>
+        internal static string AlreadyRunningMessage {
+            get {
+                return ResourceManager.GetString("AlreadyRunningMessage", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Already Running.
+        /// </summary>
+        internal static string AlreadyRunningTitle {
+            get {
+                return ResourceManager.GetString("AlreadyRunningTitle", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to WireSock needs to be installed for WireSockUI to function..
         /// </summary>
         internal static string AppNoWireSockMessage {
             get {

@@ -257,7 +257,7 @@ namespace WireSockUI.Forms
             Text = String.Format(Resources.EditProfileTitle, config);
 
             txtProfileName.Text = config.ToLowerInvariant();
-            txtEditor.Text = File.ReadAllText(Path.Combine(Global.ConfigsFolder, config + ".conf"));
+            txtEditor.Text = File.ReadAllText(Path.Combine(Global.configsFolder, config + ".conf"));
 
             ApplySyntaxHighlighting();
         }
@@ -289,7 +289,7 @@ namespace WireSockUI.Forms
                 return;
             }
 
-            String profilePath = Path.Combine(Global.ConfigsFolder, txtProfileName.Text + ".conf");
+            String profilePath = Path.Combine(Global.configsFolder, txtProfileName.Text + ".conf");
 
             File.Delete(profilePath);
             File.Move(tmpProfile, profilePath);
