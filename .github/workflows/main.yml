@@ -26,7 +26,7 @@ jobs:
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
       - name: Build
-        run: msbuild WireSockUI/WireSockUI.csproj -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Version=${{ env.VERSION }}
+        run: msbuild WireSockUI/WireSockUI.csproj -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Version=${{ env.VERSION }} -property:Repository=${{ GITHUB_REPOSITORY }}
 
       - name: Package Release
         uses: thedoctor0/zip-release@0.7.1
