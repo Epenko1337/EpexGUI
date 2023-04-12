@@ -109,7 +109,7 @@ namespace WireSockUI
                     case Mode.VirtualAdapter:
                         _getHandle = wgbp_get_handle;
                         _setLogLevel = wgbp_set_log_level;
-                        _createTunnelFromFile = wgbp_create_tunnel_from_file;
+                        _createTunnelFromFile = wgbp_create_tunnel_from_file_w;
                         _startTunnel = wgbp_start_tunnel;
                         _stopTunnel = wgbp_stop_tunnel;
                         _dropTunnel = wgbp_drop_tunnel;
@@ -119,7 +119,7 @@ namespace WireSockUI
                     default:
                         _getHandle = wgb_get_handle;
                         _setLogLevel = wgb_set_log_level;
-                        _createTunnelFromFile = wgb_create_tunnel_from_file;
+                        _createTunnelFromFile = wgb_create_tunnel_from_file_w;
                         _startTunnel = wgb_start_tunnel;
                         _stopTunnel = wgb_stop_tunnel;
                         _dropTunnel = wgb_drop_tunnel;

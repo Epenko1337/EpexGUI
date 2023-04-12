@@ -11,23 +11,23 @@ namespace WireSockUI.Native
     internal static class INIFile
     {
         // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprivateprofilesectionnamesw
-        [DllImport("kernel32")]
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern uint GetPrivateProfileSectionNames([In, Out] char[] lpszReturnBuffer, int nSize, string lpFileName);
 
         // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprivateprofilesectiona
-        [DllImport("kernel32")]
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern uint GetPrivateProfileSection(string lpAppName, [In, Out] char[] lpszReturnBuffer, int nSize, string lpFileName);
 
         // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprivateprofilestring
-        [DllImport("kernel32")]
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern uint GetPrivateProfileString(string lpAppName, string lpKeyName, string lpDefault, [In, Out] char[] lpReturnedString, int nSize, string lpFileName);
 
         // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprivateprofileint
-        [DllImport("kernel32")]
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern uint GetPrivateProfileInt(string lpAppName, string lpKeyName, string lpDefault, [In, Out] char[] lpReturnedString, int nSize, string lpFileName);
 
         // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-writeprivateprofilestringa
-        [DllImport("kernel32")]
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern long WritePrivateProfileString(string name, string key, string val, string filePath);
 
         /// <summary>
