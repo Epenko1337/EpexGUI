@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Net;
 using System.Runtime.InteropServices;
 
 namespace WireSockUI.Native
@@ -174,6 +175,50 @@ namespace WireSockUI.Native
         public static bool IsValidIPNetwork(string ipNetwork)
         {
             return ParseNetworkString(ipNetwork.Trim(), NET_STRING.NET_STRING_IP_NETWORK) == 0;
+        }
+
+        /// <summary>
+        /// Determines if the given string is a valid CIDR notation representing an IPv4 or IPv6 address with a subnet mask.
+        /// </summary>
+        /// <param name="cidr">The CIDR notation string to validate.</param>
+        /// <returns><c>true</c> if the input string is a valid CIDR notation, otherwise <c>false</c>.</returns>
+        /// <remarks>
+        /// This method checks if the input string is in the format of an IPv4 or IPv6 address, followed by a forward slash and a subnet mask.
+        /// It validates the IP address, the subnet mask, and the address family (IPv4 or IPv6).
+        /// </remarks>
+        public static bool IsValidCidr(string cidr)
+        {
+            try
+            {
+                var parts = cidr.Split('/');
+                if (parts.Length != 2) return false;
+
+                if (!IPAddress.TryParse(parts[0], out var ipAddress)) return false;
+
+                if (!int.TryParse(parts[1], out var prefixLength)) return false;
+
+                switch (ipAddress.AddressFamily)
+                {
+                    case System.Net.Sockets.AddressFamily.InterNetwork:
+                    {
+                        if (prefixLength < 0 || prefixLength > 32) return false;
+                        break;
+                    }
+                    case System.Net.Sockets.AddressFamily.InterNetworkV6:
+                    {
+                        if (prefixLength < 0 || prefixLength > 128) return false;
+                        break;
+                    }
+                    default:
+                        return false;
+                }
+
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         /// <summary>

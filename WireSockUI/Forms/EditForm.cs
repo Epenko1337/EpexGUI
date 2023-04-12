@@ -135,7 +135,7 @@ namespace WireSockUI.Forms
                             {
                                 foreach (Match e in _multiValueMatch.Matches(value))
                                 {
-                                    if (!String.IsNullOrWhiteSpace(e.Value) && !IPHelper.IsValidIPNetwork(e.Value))
+                                    if (!String.IsNullOrWhiteSpace(e.Value) && !IPHelper.IsValidCidr(e.Value))
                                     {
                                         txtEditor.SelectionStart = m.Groups["value"].Index + e.Index;
                                         txtEditor.SelectionLength = e.Length;

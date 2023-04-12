@@ -60,7 +60,7 @@ namespace WireSockUI.Config
 
             foreach (String value in keyValue.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
             {
-                if (!validator(value))
+                if (!validator(value.Trim()))
                 {
                     throw new FormatException($"\"{key}\" in \"{section}\", invalid address \"{value}\".");
                 }
@@ -111,7 +111,7 @@ namespace WireSockUI.Config
             }
             set
             {
-                ValidateAddresses("Interface", "Address", value, Native.IPHelper.IsValidIPNetwork);
+                ValidateAddresses("Interface", "Address", value, Native.IPHelper.IsValidCidr);
                 _address = value;
             }
         }
