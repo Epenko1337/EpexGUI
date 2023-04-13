@@ -18,6 +18,8 @@ namespace WireSockUI.Forms
         private static readonly Regex MultiValueMatch =
             new Regex(@"[^, ]*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+        private volatile bool _highlighting = false;
+
         public FrmEdit()
         {
             Initialize();
@@ -44,6 +46,9 @@ namespace WireSockUI.Forms
 
         private void ApplySyntaxHighlighting()
         {
+            if (_highlighting) return;
+            _highlighting = true;
+
             var hasErrors = false;
 
             // Saving the original settings
@@ -245,6 +250,8 @@ namespace WireSockUI.Forms
             txtEditor.Focus();
 
             btnSave.Enabled = !hasErrors;
+
+            _highlighting = false;
         }
 
         private void Initialize()
