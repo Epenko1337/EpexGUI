@@ -23,27 +23,23 @@ namespace WireSockUI.Native
         [Guid("000214F9-0000-0000-C000-000000000046")]
         private interface IShellLinkW
         {
-            uint GetPath([Out] [MarshalAs(UnmanagedType.LPWStr)]
-                StringBuilder pszFile,
-                int cchMaxPath, ref WIN32_FIND_DATAW pfd, uint fFlags);
+            uint GetPath([Out] [MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFile,
+                int cchMaxPath, ref Win32FindDataw pfd, uint fFlags);
 
             uint GetIDList(out IntPtr ppidl);
             uint SetIDList(IntPtr pidl);
 
-            uint GetDescription([Out] [MarshalAs(UnmanagedType.LPWStr)]
-                StringBuilder pszName,
+            uint GetDescription([Out] [MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszName,
                 int cchMaxName);
 
             uint SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
 
-            uint GetWorkingDirectory([Out] [MarshalAs(UnmanagedType.LPWStr)]
-                StringBuilder pszDir,
+            uint GetWorkingDirectory([Out] [MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszDir,
                 int cchMaxPath);
 
             uint SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
 
-            uint GetArguments([Out] [MarshalAs(UnmanagedType.LPWStr)]
-                StringBuilder pszArgs,
+            uint GetArguments([Out] [MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszArgs,
                 int cchMaxPath);
 
             uint SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
@@ -52,8 +48,7 @@ namespace WireSockUI.Native
             uint GetShowCmd(out int piShowCmd);
             uint SetShowCmd(int iShowCmd);
 
-            uint GetIconLocation([Out] [MarshalAs(UnmanagedType.LPWStr)]
-                StringBuilder pszIconPath,
+            uint GetIconLocation([Out] [MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszIconPath,
                 int cchIconPath, out int piIcon);
 
             uint SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
@@ -75,7 +70,7 @@ namespace WireSockUI.Native
 
         // WIN32_FIND_DATAW Structure
         [StructLayout(LayoutKind.Sequential, Pack = 4, CharSet = CharSet.Unicode)]
-        private struct WIN32_FIND_DATAW
+        private struct Win32FindDataw
         {
             public readonly uint dwFileAttributes;
             public readonly FILETIME ftCreationTime;
@@ -86,7 +81,7 @@ namespace WireSockUI.Native
             public readonly uint dwReserved0;
             public readonly uint dwReserved1;
 
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = MAX_PATH)]
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = MaxPath)]
             public readonly string cFileName;
 
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)]
@@ -190,10 +185,7 @@ namespace WireSockUI.Native
             // Construct with string value
             public PropVariant(string value)
             {
-                if (value == null)
-                {
-                    throw new ArgumentException("Failed to set value.");
-                }
+                if (value == null) throw new ArgumentException("Failed to set value.");
 
                 valueType = (ushort)VarEnum.VT_LPWSTR;
                 ptr = Marshal.StringToCoTaskMemUni(value);
@@ -218,27 +210,27 @@ namespace WireSockUI.Native
         }
 
         [DllImport("Ole32.dll", PreserveSig = false)]
-        private static extern void PropVariantClear([In][Out] PropVariant pvar);
+        private static extern void PropVariantClear([In] [Out] PropVariant pvar);
 
         #endregion
 
         #region Fields
 
-        private IShellLinkW shellLinkW;
+        private IShellLinkW _shellLinkW;
 
         // Name = System.AppUserModel.ID
         // ShellPKey = PKEY_AppUserModel_ID
         // FormatID = 9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3
         // PropID = 5
         // Type = String (VT_LPWSTR)
-        private readonly PropertyKey AppUserModelIDKey =
+        private readonly PropertyKey _appUserModelIdKey =
             new PropertyKey("{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}", 5);
 
-        private const int MAX_PATH = 260;
-        private const int INFOTIPSIZE = 1024;
+        private const int MaxPath = 260;
+        private const int Infotipsize = 1024;
 
-        private const int STGM_READ = 0x00000000; // STGM constants
-        private const uint SLGP_UNCPRIORITY = 0x0002; // SLGP flags
+        private const int StgmRead = 0x00000000; // STGM constants
+        private const uint SlgpUncpriority = 0x0002; // SLGP flags
 
         #endregion
 
@@ -248,7 +240,7 @@ namespace WireSockUI.Native
         {
             get
             {
-                if (!(shellLinkW is IPersistFile persistFile))
+                if (!(_shellLinkW is IPersistFile persistFile))
                     throw new COMException("Failed to create IPersistFile.");
 
                 return persistFile;
@@ -259,10 +251,10 @@ namespace WireSockUI.Native
         {
             get
             {
-                if (!(shellLinkW is IPropertyStore PropertyStore))
+                if (!(_shellLinkW is IPropertyStore propertyStore))
                     throw new COMException("Failed to create IPropertyStore.");
 
-                return PropertyStore;
+                return propertyStore;
             }
         }
 
@@ -288,16 +280,16 @@ namespace WireSockUI.Native
             get
             {
                 // No limitation to length of buffer string in the case of Unicode though.
-                StringBuilder targetPath = new StringBuilder(MAX_PATH);
+                var targetPath = new StringBuilder(MaxPath);
 
-                var data = new WIN32_FIND_DATAW();
+                var data = new Win32FindDataw();
 
-                VerifySucceeded(shellLinkW.GetPath(targetPath, targetPath.Capacity, ref data,
-                    SLGP_UNCPRIORITY));
+                VerifySucceeded(_shellLinkW.GetPath(targetPath, targetPath.Capacity, ref data,
+                    SlgpUncpriority));
 
                 return targetPath.ToString();
             }
-            set => VerifySucceeded(shellLinkW.SetPath(value));
+            set => VerifySucceeded(_shellLinkW.SetPath(value));
         }
 
         public string Arguments
@@ -305,37 +297,34 @@ namespace WireSockUI.Native
             get
             {
                 // No limitation to length of buffer string in the case of Unicode though.
-                StringBuilder arguments = new StringBuilder(INFOTIPSIZE);
+                var arguments = new StringBuilder(Infotipsize);
 
-                VerifySucceeded(shellLinkW.GetArguments(arguments, arguments.Capacity));
+                VerifySucceeded(_shellLinkW.GetArguments(arguments, arguments.Capacity));
 
                 return arguments.ToString();
             }
-            set => VerifySucceeded(shellLinkW.SetArguments(value));
+            set => VerifySucceeded(_shellLinkW.SetArguments(value));
         }
 
         // AppUserModelID to be used for Windows 7 or later.
-        public string AppUserModelID
+        public string AppUserModelId
         {
             get
             {
-                using (PropVariant pv = new PropVariant())
+                using (var pv = new PropVariant())
                 {
-                    VerifySucceeded(PropertyStore.GetValue(AppUserModelIDKey, pv));
+                    VerifySucceeded(PropertyStore.GetValue(_appUserModelIdKey, pv));
 
-                    if (pv.Value == null)
-                    {
-                        return "Null";
-                    }
+                    if (pv.Value == null) return "Null";
 
                     return pv.Value;
                 }
             }
             set
             {
-                using (PropVariant pv = new PropVariant(value))
+                using (var pv = new PropVariant(value))
                 {
-                    VerifySucceeded(PropertyStore.SetValue(AppUserModelIDKey, pv));
+                    VerifySucceeded(PropertyStore.SetValue(_appUserModelIdKey, pv));
                     VerifySucceeded(PropertyStore.Commit());
                 }
             }
@@ -354,17 +343,14 @@ namespace WireSockUI.Native
         {
             try
             {
-                shellLinkW = (IShellLinkW)new CShellLink();
+                _shellLinkW = (IShellLinkW)new CShellLink();
             }
             catch
             {
                 throw new COMException("Failed to create ShellLink object.");
             }
 
-            if (file != null)
-            {
-                Load(file);
-            }
+            if (file != null) Load(file);
         }
 
         #endregion
@@ -384,11 +370,11 @@ namespace WireSockUI.Native
 
         protected virtual void Dispose(bool disposing)
         {
-            if (shellLinkW != null)
+            if (_shellLinkW != null)
             {
                 // Release all references.
-                Marshal.FinalReleaseComObject(shellLinkW);
-                shellLinkW = null;
+                Marshal.FinalReleaseComObject(_shellLinkW);
+                _shellLinkW = null;
             }
         }
 
@@ -399,7 +385,7 @@ namespace WireSockUI.Native
         // Save shortcut file.
         public void Save()
         {
-            string file = ShortcutFile;
+            var file = ShortcutFile;
 
             if (file == null)
                 throw new InvalidOperationException("File name is not given.");
@@ -421,7 +407,7 @@ namespace WireSockUI.Native
             if (!File.Exists(file))
                 throw new FileNotFoundException("File is not found.", file);
 
-            PersistFile.Load(file, STGM_READ);
+            PersistFile.Load(file, StgmRead);
         }
 
         // Verify if operation succeeded.
@@ -431,6 +417,7 @@ namespace WireSockUI.Native
                 throw new InvalidOperationException("Failed with HRESULT: " +
                                                     hresult.ToString("X"));
         }
+
         #endregion
     }
 }

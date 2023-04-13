@@ -6,37 +6,10 @@ using System.Runtime.InteropServices;
 namespace WireSockUI.Native
 {
     /// <summary>
-    /// Native API class to retrieve specific size icons from icongroups in Windows resources
+    ///     Native API class to retrieve specific size icons from icongroups in Windows resources
     /// </summary>
-    /// 
-
-
     internal class WindowsIcons
     {
-        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Ansi)]
-        private static extern IntPtr LoadLibrary([MarshalAs(UnmanagedType.LPStr)] string lpFileName);
-
-        [DllImport("kernel32")]
-        private static extern IntPtr FindResource(IntPtr hModule, int lpName, int lpType);
-
-        [DllImport("kernel32", SetLastError = true)]
-        private static extern IntPtr LoadResource(IntPtr hModule, IntPtr hResInfo);
-
-        [DllImport("kernel32")]
-        private static extern IntPtr LockResource(IntPtr hResData);
-
-        [DllImport("user32")]
-        private static extern int LookupIconIdFromDirectoryEx(byte[] presbits, bool fIcon, int cxDesired, int cyDesired, uint Flags);
-
-        [DllImport("user32")]
-        private static extern IntPtr CreateIconFromResourceEx(byte[] pbIconBits, uint cbIconBits, bool fIcon, uint dwVersion, int cxDesired, int cyDesired, uint uFlags);
-
-        [DllImport("kernel32", SetLastError = true)]
-        private static extern uint SizeofResource(IntPtr hModule, IntPtr hResInfo);
-
-        const int RT_GROUP_ICON = 14;
-        const int RT_ICON = 0x00000003;
-
         /*
          * Icons of interest
          *  New: 2
@@ -70,24 +43,50 @@ namespace WireSockUI.Native
             Activated = 106
         }
 
+        private const int RtGroupIcon = 14;
+        private const int RtIcon = 0x00000003;
+
+        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Ansi)]
+        private static extern IntPtr LoadLibrary([MarshalAs(UnmanagedType.LPStr)] string lpFileName);
+
+        [DllImport("kernel32")]
+        private static extern IntPtr FindResource(IntPtr hModule, int lpName, int lpType);
+
+        [DllImport("kernel32", SetLastError = true)]
+        private static extern IntPtr LoadResource(IntPtr hModule, IntPtr hResInfo);
+
+        [DllImport("kernel32")]
+        private static extern IntPtr LockResource(IntPtr hResData);
+
+        [DllImport("user32")]
+        private static extern int LookupIconIdFromDirectoryEx(byte[] presbits, bool fIcon, int cxDesired, int cyDesired,
+            uint flags);
+
+        [DllImport("user32")]
+        private static extern IntPtr CreateIconFromResourceEx(byte[] pbIconBits, uint cbIconBits, bool fIcon,
+            uint dwVersion, int cxDesired, int cyDesired, uint uFlags);
+
+        [DllImport("kernel32", SetLastError = true)]
+        private static extern uint SizeofResource(IntPtr hModule, IntPtr hResInfo);
+
         private static Icon GetIconFromGroup(string file, int groupId, int size)
         {
-            IntPtr hLibrary = LoadLibrary(file);
+            var hLibrary = LoadLibrary(file);
 
             if (hLibrary != IntPtr.Zero)
             {
-                IntPtr hResource = FindResource(hLibrary, groupId, RT_GROUP_ICON);
+                var hResource = FindResource(hLibrary, groupId, RtGroupIcon);
 
-                IntPtr hMem = LoadResource(hLibrary, hResource);
+                var hMem = LoadResource(hLibrary, hResource);
 
-                IntPtr lpResourcePtr = LockResource(hMem);
-                uint sz = SizeofResource(hLibrary, hResource);
-                byte[] lpResource = new byte[sz];
+                var lpResourcePtr = LockResource(hMem);
+                var sz = SizeofResource(hLibrary, hResource);
+                var lpResource = new byte[sz];
                 Marshal.Copy(lpResourcePtr, lpResource, 0, (int)sz);
 
-                int nID = LookupIconIdFromDirectoryEx(lpResource, true, size, size, 0x0000);
+                var nId = LookupIconIdFromDirectoryEx(lpResource, true, size, size, 0x0000);
 
-                hResource = FindResource(hLibrary, nID, RT_ICON);
+                hResource = FindResource(hLibrary, nId, RtIcon);
 
                 hMem = LoadResource(hLibrary, hResource);
 
@@ -96,7 +95,7 @@ namespace WireSockUI.Native
                 lpResource = new byte[sz];
                 Marshal.Copy(lpResourcePtr, lpResource, 0, (int)sz);
 
-                IntPtr hIcon = CreateIconFromResourceEx(lpResource, sz, true, 0x00030000, size, size, 0);
+                var hIcon = CreateIconFromResourceEx(lpResource, sz, true, 0x00030000, size, size, 0);
 
                 return Icon.FromHandle(hIcon);
             }
@@ -105,21 +104,22 @@ namespace WireSockUI.Native
         }
 
         /// <summary>
-        /// Get specific size icon (in pixels) from the Icons enum
+        ///     Get specific size icon (in pixels) from the Icons enum
         /// </summary>
-        /// <param name="icon"><see cref="Icons"/></param>
+        /// <param name="icon">
+        ///     <see cref="Icons" />
+        /// </param>
         /// <param name="size">Icon size/width in pixels</param>
-        /// <returns><see cref="Icon"/> or null</returns>
+        /// <returns><see cref="Icon" /> or null</returns>
         /// <exception cref="FileNotFoundException">Windows ImageRes resource could not be located.</exception>
         public static Icon GetWindowsIcon(Icons icon, int size)
         {
             // Windows 11
-            String library = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SystemResources", "imageres.dll.mun");
+            var library = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SystemResources",
+                "imageres.dll.mun");
 
             if (!File.Exists(library))
-            {
                 library = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "imageres.dll");
-            }
 
             if (!File.Exists(library))
                 throw new FileNotFoundException("Unable to locate imageres.dll for Windows Icons");

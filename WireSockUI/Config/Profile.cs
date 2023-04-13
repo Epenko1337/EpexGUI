@@ -3,76 +3,106 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using WireSockUI.Extensions;
+using WireSockUI.Native;
 
 namespace WireSockUI.Config
 {
     /// <summary>
-    /// WireGuard Profile, including WireSock extensions
+    ///     WireGuard Profile, including WireSock extensions
     /// </summary>
     internal class Profile
     {
+        private string _address;
+
+        // WireSock Extensions
+        private string _allowedIPs;
+        private string _dns;
+        private string _endpoint;
+        private string _mtu;
+        private string _persistentKeepAlive;
+
+        private string _presharedKey;
+
         // Interface values
         private string _privateKey;
-        private string _address;
-        private string _mtu;
-        private string _dns;
 
         // Peer values
         private string _publicKey;
-        private string _presharedKey;
-        private string _allowedIPs;
-        private string _endpoint;
-        private string _persistentKeepAlive;
-
-        // WireSock Extensions
-        private string _allowedApps;
-        private string _disallowedApps;
-        private string _disallowedIPs;
         private string _socks5Proxy;
-        private string _socks5ProxyUsername;
-        private string _socks5ProxyPassword;
 
-        internal static void ValidateKey(string section, string key, string keyValue)
+        /// <summary>
+        ///     Create an empty profile from scratch
+        /// </summary>
+        public Profile()
         {
-            byte[] keyBinary;
-
-            if (String.IsNullOrWhiteSpace(keyValue)) return;
-
-            try
-            {
-                keyBinary = Convert.FromBase64String(keyValue);
-            }
-            catch (FormatException)
-            {
-                throw new FormatException($"\"{key}\" in \"{section}\", invalid base64 encoded value.");
-            }
-
-            // 256-bit keys only
-            if (keyBinary.Length != 32)
-            {
-                throw new FormatException($"\"{key}\" in \"{section}\", invalid key length, only 256-bit keys are supported.");
-            }
-        }
-
-        internal static void ValidateAddresses(string section, string key, string keyValue, Func<string, bool> validator)
-        {
-            if (String.IsNullOrWhiteSpace(keyValue)) return;
-
-            foreach (String value in keyValue.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                if (!validator(value.Trim()))
-                {
-                    throw new FormatException($"\"{key}\" in \"{section}\", invalid address \"{value}\".");
-                }
-            }
         }
 
         /// <summary>
-        /// Local interface private key
+        ///     Load a profile from specified filepath
         /// </summary>
-        public String PrivateKey
+        /// <param name="profilePath">Full filepath to a profile</param>
+        public Profile(string profilePath)
         {
-            get { return _privateKey; }
+            if (!File.Exists(profilePath))
+                throw new FileNotFoundException($"Profile {Path.GetFileName(profilePath)} does not exist.");
+
+            var sections = IniFile.GetSectionNames(profilePath);
+
+            if (!sections.Contains("Interface"))
+                throw new ArgumentException(
+                    $"Profile {Path.GetFileName(profilePath)} does not contain an \"Interface\" section.");
+
+            var section = IniFile.GetSection(profilePath, "Interface");
+
+            // Validate minimum required fields
+            if (!section.ContainsKey("PrivateKey"))
+                throw new ArgumentException(
+                    $"Profile {Path.GetFileName(profilePath)}, section \"Interface\" does not have a \"PrivateKey\" defined.");
+
+            if (!section.ContainsKey("Address"))
+                throw new ArgumentException(
+                    $"Profile {Path.GetFileName(profilePath)}, section \"Interface\" does not have a \"Address\" defined.");
+
+            PrivateKey = section.Get("PrivateKey");
+            Address = section.Get("Address");
+            Dns = section.Get("DNS");
+            Mtu = section.Get("MTU");
+
+            if (!sections.Contains("Peer"))
+                throw new ArgumentException(
+                    $"Profile {Path.GetFileName(profilePath)} does not contain an \"Peer\" section.");
+
+            section = IniFile.GetSection(profilePath, "Peer");
+
+            // Validate minimum required fields
+            if (!section.ContainsKey("PublicKey"))
+                throw new ArgumentException(
+                    $"Profile {Path.GetFileName(profilePath)}, section \"Peer\" does not have a \"PublicKey\" defined.");
+
+            if (!section.ContainsKey("Endpoint"))
+                throw new ArgumentException(
+                    $"Profile {Path.GetFileName(profilePath)}, section \"Peer\" does not have a \"Endpoint\" defined.");
+
+            PeerKey = section.Get("PublicKey");
+            PresharedKey = section.Get("PresharedKey");
+            AllowedIPs = section.Get("AllowedIPs");
+            Endpoint = section.Get("Endpoint");
+            PersistentKeepAlive = section.Get("PersistentKeepAlive");
+
+            AllowedApps = section.Get("AllowedApps");
+            DisallowedApps = section.Get("DisallowedApps");
+            DisallowedIPs = section.Get("DisallowedIPs");
+            Socks5Proxy = section.Get("Socks5Proxy");
+            Socks5ProxyUsername = section.Get("Socks5Username");
+            Socks5ProxyPassword = section.Get("Socks5ProxyPassword");
+        }
+
+        /// <summary>
+        ///     Local interface private key
+        /// </summary>
+        public string PrivateKey
+        {
+            get => _privateKey;
             set
             {
                 ValidateKey("Interface", "PrivateKey", value);
@@ -81,71 +111,60 @@ namespace WireSockUI.Config
         }
 
         /// <summary>
-        /// Local interface public key, derived from private key
+        ///     Local interface public key, derived from private key
         /// </summary>
-        public String PublicKey
+        public string PublicKey
         {
             get
             {
-                if (!String.IsNullOrEmpty(_privateKey))
-                {
+                if (!string.IsNullOrEmpty(_privateKey))
                     // Determine public key from private key data
                     return
                         Convert.ToBase64String(
                             Curve25519.GetPublicKey(
-                                Convert.FromBase64String(this.PrivateKey)));
-                }
+                                Convert.FromBase64String(PrivateKey)));
 
                 return null;
             }
         }
 
         /// <summary>
-        /// List of interface IP addresses
+        ///     List of interface IP addresses
         /// </summary>
-        public String Address
+        public string Address
         {
-            get
-            {
-                return _address;
-            }
+            get => _address;
             set
             {
-                ValidateAddresses("Interface", "Address", value, Native.IPHelper.IsValidCidr);
+                ValidateAddresses("Interface", "Address", value, IpHelper.IsValidCidr);
                 _address = value;
             }
         }
 
         /// <summary>
-        /// List of interface DNS servers
+        ///     List of interface DNS servers
         /// </summary>
-        public String DNS
+        public string Dns
         {
-            get
-            {
-                return _dns;
-            }
+            get => _dns;
             set
             {
-                ValidateAddresses("Interface", "DNS", value, Native.IPHelper.IsValidIPAddress);
+                ValidateAddresses("Interface", "DNS", value, IpHelper.IsValidIpAddress);
                 _dns = value;
             }
         }
 
         /// <summary>
-        /// Interface Maximum Transmissable Unit size
+        ///     Interface Maximum Transmissable Unit size
         /// </summary>
-        public String MTU
+        public string Mtu
         {
-            get
-            {
-                return _mtu;
-            }
+            get => _mtu;
             set
             {
-                if (!String.IsNullOrWhiteSpace(value))
+                if (!string.IsNullOrWhiteSpace(value))
                 {
-                    if (!int.TryParse(value, out int mtu))
+                    if (!int.TryParse(value, out var mtu))
                         throw new FormatException("\"MTU\" in \"Interface\", is not a numerical value.");
 
                     if (mtu < 576 || mtu > 65535)
@@ -161,11 +180,11 @@ namespace WireSockUI.Config
         }
 
         /// <summary>
-        /// Peer public key
+        ///     Peer public key
         /// </summary>
-        public String PeerKey
+        public string PeerKey
         {
-            get { return _publicKey; }
+            get => _publicKey;
             set
             {
                 ValidateKey("Peer", "PublicKey", value);
@@ -174,11 +193,11 @@ namespace WireSockUI.Config
         }
 
         /// <summary>
-        /// Peer preshared key (optional)
+        ///     Peer preshared key (optional)
         /// </summary>
-        public String PresharedKey
+        public string PresharedKey
         {
-            get { return _presharedKey; }
+            get => _presharedKey;
             set
             {
                 ValidateKey("Peer", "PresharedKey", value);
@@ -187,30 +206,27 @@ namespace WireSockUI.Config
         }
 
         /// <summary>
-        /// Peer allowed IP list
+        ///     Peer allowed IP list
         /// </summary>
-        public String AllowedIPs
+        public string AllowedIPs
         {
-            get
-            {
-                return _allowedIPs;
-            }
+            get => _allowedIPs;
             set
             {
-                ValidateAddresses("Peer", "AllowedIPs", value, Native.IPHelper.IsValidIPNetwork);
+                ValidateAddresses("Peer", "AllowedIPs", value, IpHelper.IsValidIpNetwork);
                 _allowedIPs = value;
             }
         }
 
         /// <summary>
-        /// Peer endpoint address (DNS or IP)
+        ///     Peer endpoint address (DNS or IP)
         /// </summary>
-        public String Endpoint
+        public string Endpoint
         {
-            get { return _endpoint; }
+            get => _endpoint;
             set
             {
-                if (!Native.IPHelper.IsValidAddress(value))
+                if (!IpHelper.IsValidAddress(value))
                     throw new FormatException("\"Endpoint\" in \"Peer\", is not a valid IPv4, IPv6 or domain address.");
 
                 _endpoint = value;
@@ -219,23 +235,21 @@ namespace WireSockUI.Config
 
 
         /// <summary>
-        /// Persistent keep alive interval
+        ///     Persistent keep alive interval
         /// </summary>
-        public String PersistentKeepAlive
+        public string PersistentKeepAlive
         {
-            get
-            {
-                return _persistentKeepAlive;
-            }
+            get => _persistentKeepAlive;
             set
             {
-                if (!String.IsNullOrWhiteSpace(value))
+                if (!string.IsNullOrWhiteSpace(value))
                 {
-                    if (!int.TryParse(value, out int mtu))
+                    if (!int.TryParse(value, out var mtu))
                         throw new FormatException("\"PersistentKeepalive\" in \"Peer\", is not a numerical value.");
 
                     if (mtu < 0 || mtu > 65535)
-                        throw new FormatException("\"PersistentKeepalive\" in \"Peer\", invalid value. Expected 0...65535.");
+                        throw new FormatException(
+                            "\"PersistentKeepalive\" in \"Peer\", invalid value. Expected 0...65535.");
 
                     _persistentKeepAlive = value;
                 }
@@ -247,69 +261,37 @@ namespace WireSockUI.Config
         }
 
         /// <summary>
-        /// Peer allowed applications list
+        ///     Peer allowed applications list
         /// </summary>
         /// <remarks>WireSock specific extension</remarks>
-        public String AllowedApps
-        {
-            get
-            {
-                return _allowedApps;
-            }
-            set
-            {
-                _allowedApps = value;
-            }
-        }
+        public string AllowedApps { get; set; }
 
         /// <summary>
-        /// Peer disallowed applications list
+        ///     Peer disallowed applications list
         /// </summary>
         /// <remarks>WireSock specific extension</remarks>
-        public String DisallowedApps
-        {
-            get
-            {
-                return _disallowedApps;
-            }
-            set
-            {
-                _disallowedApps = value;
-            }
-        }
+        public string DisallowedApps { get; set; }
 
         /// <summary>
-        /// Peer disallowed IP addresses
+        ///     Peer disallowed IP addresses
         /// </summary>
         /// <remarks>WireSock specific extension</remarks>
-        public String DisallowedIPs
-        {
-            get
-            {
-                return _disallowedIPs;
-            }
-            set
-            {
-                _disallowedIPs = value;
-            }
-        }
+        public string DisallowedIPs { get; set; }
 
         /// <summary>
-        /// Peer SOCKS5 proxy
+        ///     Peer SOCKS5 proxy
         /// </summary>
         /// <remarks>WireSock specific extension</remarks>
-        public String Socks5Proxy
+        public string Socks5Proxy
         {
-            get
-            {
-                return _socks5Proxy;
-            }
+            get => _socks5Proxy;
             set
             {
-                if (!String.IsNullOrEmpty(value))
+                if (!string.IsNullOrEmpty(value))
                 {
-                    if (!Native.IPHelper.IsValidAddress(value))
-                        throw new FormatException("\"Endpoint\" in \"Peer\", is not a valid IPv4, IPv6 or domain address.");
+                    if (!IpHelper.IsValidAddress(value))
+                        throw new FormatException(
+                            "\"Endpoint\" in \"Peer\", is not a valid IPv4, IPv6 or domain address.");
 
                     _socks5Proxy = value;
                 }
@@ -321,42 +303,53 @@ namespace WireSockUI.Config
         }
 
         /// <summary>
-        /// Peer SOCKS5 proxy username
+        ///     Peer SOCKS5 proxy username
         /// </summary>
         /// <remarks>WireSock specific extension</remarks>
-        public String Socks5ProxyUsername
-        {
-            get
-            {
-                return _socks5ProxyUsername;
-            }
-            set
-            {
-                _socks5ProxyUsername = value;
-            }
-        }
+        public string Socks5ProxyUsername { get; set; }
 
         /// <summary>
-        /// Peer SOCKS5 proxy password
+        ///     Peer SOCKS5 proxy password
         /// </summary>
         /// <remarks>WireSock specific extension</remarks>
-        public String Socks5ProxyPassword
+        public string Socks5ProxyPassword { get; set; }
+
+        internal static void ValidateKey(string section, string key, string keyValue)
         {
-            get
+            byte[] keyBinary;
+
+            if (string.IsNullOrWhiteSpace(keyValue)) return;
+
+            try
             {
-                return _socks5ProxyPassword;
+                keyBinary = Convert.FromBase64String(keyValue);
             }
-            set
+            catch (FormatException)
             {
-                _socks5ProxyPassword = value;
+                throw new FormatException($"\"{key}\" in \"{section}\", invalid base64 encoded value.");
             }
+
+            // 256-bit keys only
+            if (keyBinary.Length != 32)
+                throw new FormatException(
+                    $"\"{key}\" in \"{section}\", invalid key length, only 256-bit keys are supported.");
         }
 
-        public static IEnumerable<String> GetProfiles()
+        internal static void ValidateAddresses(string section, string key, string keyValue,
+            Func<string, bool> validator)
         {
-            String[] files = Directory.GetFiles(Global.configsFolder);
+            if (string.IsNullOrWhiteSpace(keyValue)) return;
 
-            foreach (String file in files)
+            foreach (var value in keyValue.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                if (!validator(value.Trim()))
+                    throw new FormatException($"\"{key}\" in \"{section}\", invalid address \"{value}\".");
+        }
+
+        public static IEnumerable<string> GetProfiles()
+        {
+            var files = Directory.GetFiles(Global.ConfigsFolder);
+
+            foreach (var file in files)
             {
                 if (!file.EndsWith(".conf")) continue;
 
@@ -365,88 +358,24 @@ namespace WireSockUI.Config
         }
 
         /// <summary>
-        /// Retrieve the full path to a given <paramref name="profileName"/>
+        ///     Retrieve the full path to a given <paramref name="profileName" />
         /// </summary>
         /// <param name="profileName">Profile name</param>
         /// <returns>Full path to the profile</returns>
         /// <remarks>The profile might not exist, this merely returns the path it should be at.</remarks>
-        public static String GetProfilePath(string profileName)
+        public static string GetProfilePath(string profileName)
         {
-            return Path.Combine(Global.configsFolder, profileName + ".conf");
+            return Path.Combine(Global.ConfigsFolder, profileName + ".conf");
         }
 
         /// <summary>
-        /// Load an existing named profile
+        ///     Load an existing named profile
         /// </summary>
         /// <param name="profileName">Profile name (i.e. filename without extension)</param>
         public static Profile LoadProfile(string profileName)
         {
-            String filename = GetProfilePath(profileName);
+            var filename = GetProfilePath(profileName);
             return new Profile(filename);
         }
-
-        /// <summary>
-        /// Create an empty profile from scratch
-        /// </summary>
-        public Profile()
-        {
-        }
-
-        /// <summary>
-        /// Load a profile from specified filepath
-        /// </summary>
-        /// <param name="profilePath">Full filepath to a profile</param>
-        public Profile(String profilePath)
-        {
-            if (!File.Exists(profilePath))
-            {
-                throw new FileNotFoundException($"Profile {Path.GetFileName(profilePath)} does not exist.");
-            }
-
-            IEnumerable<string> sections = Native.INIFile.GetSectionNames(profilePath);
-
-            if (!sections.Contains("Interface"))
-                throw new ArgumentException($"Profile {Path.GetFileName(profilePath)} does not contain an \"Interface\" section.");
-
-            Dictionary<String, String> section = Native.INIFile.GetSection(profilePath, "Interface");
-
-            // Validate minimum required fields
-            if (!section.ContainsKey("PrivateKey"))
-                throw new ArgumentException($"Profile {Path.GetFileName(profilePath)}, section \"Interface\" does not have a \"PrivateKey\" defined.");
-
-            if (!section.ContainsKey("Address"))
-                throw new ArgumentException($"Profile {Path.GetFileName(profilePath)}, section \"Interface\" does not have a \"Address\" defined.");
-
-            this.PrivateKey = section.Get<string, string>("PrivateKey");
-            this.Address = section.Get<string, string>("Address");
-            this.DNS = section.Get<string, string>("DNS");
-            this.MTU = section.Get<string, string>("MTU");
-
-            if (!sections.Contains("Peer"))
-                throw new ArgumentException($"Profile {Path.GetFileName(profilePath)} does not contain an \"Peer\" section.");
-
-            section = Native.INIFile.GetSection(profilePath, "Peer");
-
-            // Validate minimum required fields
-            if (!section.ContainsKey("PublicKey"))
-                throw new ArgumentException($"Profile {Path.GetFileName(profilePath)}, section \"Peer\" does not have a \"PublicKey\" defined.");
-
-            if (!section.ContainsKey("Endpoint"))
-                throw new ArgumentException($"Profile {Path.GetFileName(profilePath)}, section \"Peer\" does not have a \"Endpoint\" defined.");
-
-            this.PeerKey = section.Get<string, string>("PublicKey");
-            this.PresharedKey = section.Get<string, string>("PresharedKey");
-            this.AllowedIPs = section.Get<string, string>("AllowedIPs");
-            this.Endpoint = section.Get<string, string>("Endpoint");
-            this.PersistentKeepAlive = section.Get<string, string>("PersistentKeepAlive");
-
-            this.AllowedApps = section.Get<string, string>("AllowedApps");
-            this.DisallowedApps = section.Get<string, string>("DisallowedApps");
-            this.DisallowedIPs = section.Get<string, string>("DisallowedIPs");
-            this.Socks5Proxy = section.Get<string, string>("Socks5Proxy");
-            this.Socks5ProxyUsername = section.Get<string, string>("Socks5Username");
-            this.Socks5ProxyPassword = section.Get<string, string>("Socks5ProxyPassword");
-        }
-
     }
 }

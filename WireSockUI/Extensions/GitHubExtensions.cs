@@ -1,8 +1,6 @@
 ﻿using System;
 using System.IO;
 using System.Net;
-using System.Reflection;
-using System.Windows.Forms;
 using Windows.Data.Json;
 
 namespace WireSockUI.Extensions
@@ -10,39 +8,31 @@ namespace WireSockUI.Extensions
     internal static class GitHubExtensions
     {
         /// <summary>
-        /// Retrieve latest published release version from GitHub
+        ///     Retrieve latest published release version from GitHub
         /// </summary>
-        /// <returns><see cref="T:Version"/> or null</returns>
+        /// <returns><see cref="T:Version" /> or null</returns>
         public static Version GetLatestRelease(string repository)
         {
-            if (!String.IsNullOrEmpty(repository))
+            if (string.IsNullOrEmpty(repository)) return null;
+            var request = WebRequest.CreateHttp($"https://api.github.com/repos/{repository}/releases/latest");
+
+            request.Method = "GET";
+            request.Accept = "application/vnd.github+json";
+            request.UserAgent = "WireSockUI";
+
+            using (var response = request.GetResponse())
             {
-
-                HttpWebRequest request = WebRequest.CreateHttp($"https://api.github.com/repos/{repository}/releases/latest");
-
-                request.Method = "GET";
-                request.Accept = "application/vnd.github+json";
-                request.UserAgent = "WireSockUI";
-
-                using (WebResponse response = request.GetResponse())
+                using (var reader = new StreamReader(response.GetResponseStream()))
                 {
-                    using (StreamReader reader = new StreamReader(response.GetResponseStream()))
-                    {
-                        string data = reader.ReadToEnd();
+                    var data = reader.ReadToEnd();
 
-                        if (JsonObject.TryParse(data, out JsonObject json))
-                        {
-                            string tag = json.GetNamedString("tag_name");
-                            tag = tag.Trim(new char[] { 'v' });
+                    if (!JsonObject.TryParse(data, out var json)) return null;
+                    var tag = json.GetNamedString("tag_name");
+                    tag = tag.Trim('v');
 
-                            return new Version(tag);
-                        }
-                    }
+                    return new Version(tag);
                 }
-
             }
-
-            return null;
         }
     }
 }

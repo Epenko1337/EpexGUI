@@ -4,110 +4,89 @@ using System.Runtime.InteropServices;
 
 namespace WireSockUI.Native
 {
-
     /// <summary>
-    /// Read and Write INI File format using Windows native APIs
+    /// Provides methods to read and write INI files using Windows native APIs.
     /// </summary>
-    internal static class INIFile
+    internal static class IniFile
     {
-        // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprivateprofilesectionnamesw
+        // External function declarations
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern uint GetPrivateProfileSectionNames([In, Out] char[] lpszReturnBuffer, int nSize, string lpFileName);
+        private static extern uint GetPrivateProfileSectionNames([In][Out] char[] lpszReturnBuffer, int nSize,
+            string lpFileName);
 
-        // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprivateprofilesectiona
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern uint GetPrivateProfileSection(string lpAppName, [In, Out] char[] lpszReturnBuffer, int nSize, string lpFileName);
+        private static extern uint GetPrivateProfileSection(string lpAppName, [In][Out] char[] lpszReturnBuffer,
+            int nSize, string lpFileName);
 
-        // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprivateprofilestring
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern uint GetPrivateProfileString(string lpAppName, string lpKeyName, string lpDefault, [In, Out] char[] lpReturnedString, int nSize, string lpFileName);
+        private static extern uint GetPrivateProfileString(string lpAppName, string lpKeyName, string lpDefault,
+            [In][Out] char[] lpReturnedString, int nSize, string lpFileName);
 
-        // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprivateprofileint
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern uint GetPrivateProfileInt(string lpAppName, string lpKeyName, string lpDefault, [In, Out] char[] lpReturnedString, int nSize, string lpFileName);
-
-        // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-writeprivateprofilestringa
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern long WritePrivateProfileString(string name, string key, string val, string filePath);
 
         /// <summary>
-        /// Enumerate all available section names in the specified INI file
+        /// Retrieves all section names in the specified INI file.
         /// </summary>
-        /// <param name="fileName">Path to INI file</param>
-        /// <returns><see cref="IEnumerable{string}"/> with all section names</returns>
+        /// <param name="fileName">Path to the INI file.</param>
+        /// <returns>An IEnumerable of section names.</returns>
         public static IEnumerable<string> GetSectionNames(string fileName)
         {
-            const int BUFFER_SIZE = 32 * 1024;
+            const int bufferSize = 32 * 1024;
 
             // MSDN specifies maximum of 32 KB
-            char[] buffer = new char[BUFFER_SIZE];
+            var buffer = new char[bufferSize];
 
-            uint length = GetPrivateProfileSectionNames(buffer, BUFFER_SIZE, fileName);
+            var length = GetPrivateProfileSectionNames(buffer, bufferSize, fileName);
 
-            if (length != (BUFFER_SIZE - 2))
-            {
-                string value = new string(buffer, 0, (int)length);
+            if (length == bufferSize - 2) yield break;
+            var value = new string(buffer, 0, (int)length);
 
-                foreach (string entry in value.Trim('\0').Split('\0'))
-                {
-                    yield return entry;
-                }
-            }
+            foreach (var entry in value.Trim('\0').Split('\0')) yield return entry;
         }
 
         /// <summary>
-        /// Enumerate all available keys in a <paramref name="sectionName"/> in the specified INI file
-        /// </summary>        
-        /// <param name="fileName">Path to INI file</param>
-        /// <param name="sectionName">Section name to lookup</param>
-        /// <returns><see cref="IEnumerable{string}"/> with all section values</returns>
+        /// Retrieves all keys and their values in a section from the specified INI file.
+        /// </summary>
+        /// <param name="fileName">Path to the INI file.</param>
+        /// <param name="sectionName">The name of the section to look up.</param>
+        /// <returns>A dictionary containing keys and their values in the specified section.</returns>
         public static Dictionary<string, string> GetSection(string fileName, string sectionName)
         {
-            const int BUFFER_SIZE = 32 * 1024;
+            const int bufferSize = 32 * 1024;
 
             // MSDN specifies maximum of 32 KB
-            char[] buffer = new char[BUFFER_SIZE];
+            var buffer = new char[bufferSize];
 
-            uint length = GetPrivateProfileSection(sectionName, buffer, BUFFER_SIZE, fileName);
+            var length = GetPrivateProfileSection(sectionName, buffer, bufferSize, fileName);
 
-            Dictionary<string, string> section = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var section = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-            if (length != (BUFFER_SIZE - 2))
-            {
-                string value = new string(buffer, 0, (int)length);
+            if (length == bufferSize - 2) return section;
+            var value = new string(buffer, 0, (int)length);
 
-                foreach (string entry in value.Trim('\0').Split('\0'))
-                {
-                    section.Add(entry.Substring(0, entry.IndexOf('=')), entry.Substring(entry.IndexOf('=') + 1));
-                }
-            }
+            foreach (var entry in value.Trim('\0').Split('\0'))
+                section.Add(entry.Substring(0, entry.IndexOf('=')), entry.Substring(entry.IndexOf('=') + 1));
 
             return section;
         }
 
         /// <summary>
-        /// 
+        /// Reads a string value associated with the specified key in the given section of the INI file.
         /// </summary>
-        /// <param name="fileName">Path to INI file</param>
-        /// <param name="sectionName">Section name to lookup</param>
-        /// <param name="key">Value key</param>
-        /// <returns><see cref="String"/ or empty</returns>
-
+        /// <param name="fileName">The path to the INI file.</param>
+        /// <param name="sectionName">The name of the section to look up.</param>
+        /// <param name="key">The key of the value to read.</param>
+        /// <returns>A string containing the value associated with the specified key, or an empty string if the key is not found.</returns>
         public static string ReadString(string fileName, string sectionName, string key)
         {
-            const int BUFFER_SIZE = 2 * 1024;
+            const int bufferSize = 2 * 1024;
 
-            char[] buffer = new char[BUFFER_SIZE];
+            var buffer = new char[bufferSize];
 
-            uint length = GetPrivateProfileString(sectionName, key, null, buffer, BUFFER_SIZE, fileName);
+            var length = GetPrivateProfileString(sectionName, key, null, buffer, bufferSize, fileName);
 
-            if (length != (BUFFER_SIZE - 2))
-            {
-                return new string(buffer, 0, (int)length);
-            }
-
-            return String.Empty;
+            return length != bufferSize - 2 ? new string(buffer, 0, (int)length) : string.Empty;
         }
-
     }
 }

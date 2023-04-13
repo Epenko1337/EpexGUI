@@ -5,56 +5,10 @@ using System.Security.Principal;
 
 namespace WireSockUI.Native
 {
-    public class ProcessEntry
-    {
-        /// <summary>
-        /// Unique process identifier
-        /// </summary>
-        public int ProcessId { get; private set; }
-
-        /// <summary>
-        /// Process display name
-        /// </summary>
-        public string Name { get; private set; }
-
-        /// <summary>
-        /// Process image executable path
-        /// </summary>
-        public string ImageName { get; private set; }
-
-        /// <summary>
-        /// Process username
-        /// </summary>
-        public string User { get; private set; }
-
-        public static IEqualityComparer<ProcessEntry> Comparer { get; } = new ProcessEntryEqualityComparer();
-
-        public ProcessEntry(int processId, string name, string imageName, string user)
-        {
-            ProcessId = processId;
-            Name = name;
-            ImageName = imageName;
-            User = user;
-        }
-
-        private sealed class ProcessEntryEqualityComparer : IEqualityComparer<ProcessEntry>
-        {
-            public bool Equals(ProcessEntry x, ProcessEntry y)
-            {
-                return String.Equals(x.Name, y.Name, StringComparison.OrdinalIgnoreCase);
-            }
-
-            public int GetHashCode(ProcessEntry p)
-            {
-                return (p.Name != null ? p.Name.GetHashCode() : 0);
-            }
-        }
-    }
-
     internal class ProcessList
     {
         [DllImport("advapi32", SetLastError = true)]
-        private static extern bool OpenProcessToken(IntPtr ProcessHandle, int DesiredAccess, out IntPtr TokenHandle);
+        private static extern bool OpenProcessToken(IntPtr processHandle, int desiredAccess, out IntPtr tokenHandle);
 
         [DllImport("kernel32", SetLastError = true)]
         private static extern IntPtr OpenProcess(int dwDesiredAccess, bool bInheritHandle, int dwProcessId);
@@ -63,46 +17,30 @@ namespace WireSockUI.Native
         private static extern bool CloseHandle(IntPtr hObject);
 
         [DllImport("kernel32", SetLastError = true)]
-        private static extern IntPtr CreateToolhelp32Snapshot(int dwFlags, int th32ProcessID);
+        private static extern IntPtr CreateToolhelp32Snapshot(int dwFlags, int th32ProcessId);
 
         [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool Process32First(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+        private static extern bool Process32First(IntPtr hSnapshot, ref Processentry32 lppe);
 
         [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool Process32Next(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+        private static extern bool Process32Next(IntPtr hSnapshot, ref Processentry32 lppe);
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        private static extern bool QueryFullProcessImageName(IntPtr hProcess, uint dwFlags, [Out] char[] lpExeName, [In, Out] ref int lpdwSize);
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-        private struct PROCESSENTRY32
-        {
-            public int dwSize;
-            public int cntUsage;
-            public int th32ProcessID;
-            public IntPtr th32DefaultHeapID;
-            public int th32ModuleID;
-            public int cntThreads;
-            public int th32ParentProcessID;
-            public int pcPriClassBase;
-            public int dwFlags;
-
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
-            public string szExeFile;
-        }
+        private static extern bool QueryFullProcessImageName(IntPtr hProcess, uint dwFlags, [Out] char[] lpExeName,
+            [In] [Out] ref int lpdwSize);
 
         private static string GetProcessUser(IntPtr handle)
         {
-            const int TOKEN_QUERY = 0x0008;
+            const int tokenQuery = 0x0008;
 
             if (handle == IntPtr.Zero)
                 return null;
 
 
-            if (!OpenProcessToken(handle, TOKEN_QUERY, out var tokenHandle))
+            if (!OpenProcessToken(handle, tokenQuery, out var tokenHandle))
                 return null;
 
-            using (WindowsIdentity wi = new WindowsIdentity(tokenHandle))
+            using (var wi = new WindowsIdentity(tokenHandle))
             {
                 CloseHandle(tokenHandle);
                 return wi.Name;
@@ -111,8 +49,8 @@ namespace WireSockUI.Native
 
         private static string GetProcessImage(IntPtr handle)
         {
-            char[] buffer = new char[1024];
-            int size = 1024;
+            var buffer = new char[1024];
+            var size = 1024;
 
             if (QueryFullProcessImageName(handle, 0, buffer, ref size))
                 return new string(buffer, 0, size);
@@ -121,23 +59,22 @@ namespace WireSockUI.Native
         }
 
         /// <summary>
-        /// Retrieve a list of <see cref="ProcessEntry" /> for all processes running in the system.
+        ///     Retrieve a list of <see cref="ProcessEntry" /> for all processes running in the system.
         /// </summary>
         /// <returns>Lis of <see cref="ProcessEntry" /></returns>
         public static IEnumerable<ProcessEntry> GetProcessList()
         {
-            const int TH32CS_SNAPPROCESS = 2;
-            const int PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000;
+            const int th32CsSnapprocess = 2;
+            const int processQueryLimitedInformation = 0x00001000;
 
-            IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            var snap = CreateToolhelp32Snapshot(th32CsSnapprocess, 0);
 
-            PROCESSENTRY32 entry = new PROCESSENTRY32() { dwSize = Marshal.SizeOf<PROCESSENTRY32>() };
+            var entry = new Processentry32 { dwSize = Marshal.SizeOf<Processentry32>() };
 
             if (Process32First(snap, ref entry))
-            {
                 do
                 {
-                    IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, entry.th32ProcessID);
+                    var handle = OpenProcess(processQueryLimitedInformation, false, entry.th32ProcessID);
 
                     yield return new ProcessEntry(
                         entry.th32ProcessID,
@@ -147,11 +84,26 @@ namespace WireSockUI.Native
 
                     if (handle != IntPtr.Zero)
                         CloseHandle(handle);
-                }
-                while (Process32Next(snap, ref entry));
-            }
+                } while (Process32Next(snap, ref entry));
 
             CloseHandle(snap);
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        private struct Processentry32
+        {
+            public int dwSize;
+            public readonly int cntUsage;
+            public readonly int th32ProcessID;
+            public readonly IntPtr th32DefaultHeapID;
+            public readonly int th32ModuleID;
+            public readonly int cntThreads;
+            public readonly int th32ParentProcessID;
+            public readonly int pcPriClassBase;
+            public readonly int dwFlags;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public readonly string szExeFile;
         }
     }
 }

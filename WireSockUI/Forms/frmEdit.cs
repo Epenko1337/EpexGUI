@@ -9,24 +9,47 @@ using WireSockUI.Properties;
 
 namespace WireSockUI.Forms
 {
-    public partial class frmEdit : Form
+    public partial class FrmEdit : Form
     {
-        private static readonly Regex _profileMatch = new Regex(@"^\s*((?<comment>[;#].*)|(?<section>\[\w+\])|((?<key>[a-zA-Z0-9]+)[ \t]*=[ \t]*(?<value>.*?)))$", RegexOptions.Multiline | RegexOptions.Compiled);
-        private static readonly Regex _multiValueMatch = new Regex(@"[^, ]*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex ProfileMatch =
+            new Regex(@"^\s*((?<comment>[;#].*)|(?<section>\[\w+\])|((?<key>[a-zA-Z0-9]+)[ \t]*=[ \t]*(?<value>.*?)))$",
+                RegexOptions.Multiline | RegexOptions.Compiled);
 
-        public String ReturnValue
+        private static readonly Regex MultiValueMatch =
+            new Regex(@"[^, ]*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        public FrmEdit()
         {
-            get; private set;
+            Initialize();
+
+            Text = Resources.EditProfileTitleNew;
+            txtEditor.Text = Resources.template_conf;
+
+            ApplySyntaxHighlighting();
         }
+
+        public FrmEdit(string config)
+        {
+            Initialize();
+
+            Text = string.Format(Resources.EditProfileTitle, config);
+
+            txtProfileName.Text = config.ToLowerInvariant();
+            txtEditor.Text = File.ReadAllText(Path.Combine(Global.ConfigsFolder, config + ".conf"));
+
+            ApplySyntaxHighlighting();
+        }
+
+        public string ReturnValue { get; private set; }
 
         private void ApplySyntaxHighlighting()
         {
-            bool hasErrors = false;
+            var hasErrors = false;
 
             // Saving the original settings
-            int originalIndex = txtEditor.SelectionStart;
-            int originalLength = txtEditor.SelectionLength;
-            Color originalColor = Color.Black;
+            var originalIndex = txtEditor.SelectionStart;
+            var originalLength = txtEditor.SelectionLength;
+            var originalColor = Color.Black;
 
             lblName.Focus();
 
@@ -36,7 +59,7 @@ namespace WireSockUI.Forms
             txtEditor.SelectionColor = originalColor;
             txtEditor.SelectionFont = new Font(txtEditor.SelectionFont, FontStyle.Regular);
 
-            foreach (Match m in _profileMatch.Matches(txtEditor.Text))
+            foreach (Match m in ProfileMatch.Matches(txtEditor.Text))
             {
                 if (m.Groups["comment"].Success)
                 {
@@ -85,8 +108,8 @@ namespace WireSockUI.Forms
                     txtEditor.SelectionLength = m.Groups["key"].Length;
                     txtEditor.SelectionColor = Color.Navy;
 
-                    string key = m.Groups["key"].Value.ToLowerInvariant();
-                    string value = String.Empty;
+                    var key = m.Groups["key"].Value.ToLowerInvariant();
+                    var value = string.Empty;
 
                     if (m.Groups["value"].Success)
                     {
@@ -103,108 +126,101 @@ namespace WireSockUI.Forms
                         case "privatekey":
                         case "publickey":
                         case "presharedkey":
-                            {
-                                if (!String.IsNullOrEmpty(value))
+                        {
+                            if (!string.IsNullOrEmpty(value))
+                                try
                                 {
-                                    try
-                                    {
-                                        if (key == "privatekey")
-                                            txtPublicKey.Text = String.Empty;
+                                    if (key == "privatekey")
+                                        txtPublicKey.Text = string.Empty;
 
-                                        byte[] binaryKey = Convert.FromBase64String(value);
+                                    var binaryKey = Convert.FromBase64String(value);
 
-                                        if (binaryKey.Length != 32)
-                                            throw new FormatException();
+                                    if (binaryKey.Length != 32)
+                                        throw new FormatException();
 
-                                        // Convert Peer.PrivateKey into PublicKey for display
-                                        if (key == "privatekey")
-                                            txtPublicKey.Text = Convert.ToBase64String(Curve25519.GetPublicKey(binaryKey));
-                                    }
-                                    catch (FormatException)
-                                    {
-                                        txtEditor.UnderlineSelection();
-                                        hasErrors = true;
-                                    }
+                                    // Convert Peer.PrivateKey into PublicKey for display
+                                    if (key == "privatekey")
+                                        txtPublicKey.Text = Convert.ToBase64String(Curve25519.GetPublicKey(binaryKey));
                                 }
-                            }
+                                catch (FormatException)
+                                {
+                                    txtEditor.UnderlineSelection();
+                                    hasErrors = true;
+                                }
+                        }
                             break;
                         // IPv4/IPv6 CIDR notation values
                         case "address":
                         case "allowedips":
                         case "disallowedips":
-                            {
-                                foreach (Match e in _multiValueMatch.Matches(value))
+                        {
+                            foreach (Match e in MultiValueMatch.Matches(value))
+                                if (!string.IsNullOrWhiteSpace(e.Value) && !IpHelper.IsValidCidr(e.Value))
                                 {
-                                    if (!String.IsNullOrWhiteSpace(e.Value) && !IPHelper.IsValidCidr(e.Value))
-                                    {
-                                        txtEditor.SelectionStart = m.Groups["value"].Index + e.Index;
-                                        txtEditor.SelectionLength = e.Length;
-                                        txtEditor.UnderlineSelection();
-                                        hasErrors = true;
-                                    }
+                                    txtEditor.SelectionStart = m.Groups["value"].Index + e.Index;
+                                    txtEditor.SelectionLength = e.Length;
+                                    txtEditor.UnderlineSelection();
+                                    hasErrors = true;
                                 }
-
-                            }
+                        }
                             break;
                         // IPv4/IPv6 values
                         case "dns":
-                            {
-                                foreach (Match e in _multiValueMatch.Matches(value))
+                        {
+                            foreach (Match e in MultiValueMatch.Matches(value))
+                                if (!string.IsNullOrWhiteSpace(e.Value) && !IpHelper.IsValidIpAddress(e.Value))
                                 {
-                                    if (!String.IsNullOrWhiteSpace(e.Value) && !IPHelper.IsValidIPAddress(e.Value))
-                                    {
-                                        txtEditor.SelectionStart = m.Groups["value"].Index + e.Index;
-                                        txtEditor.SelectionLength = e.Length;
-                                        txtEditor.UnderlineSelection();
-                                        hasErrors = true;
-                                    }
+                                    txtEditor.SelectionStart = m.Groups["value"].Index + e.Index;
+                                    txtEditor.SelectionLength = e.Length;
+                                    txtEditor.UnderlineSelection();
+                                    hasErrors = true;
                                 }
-                            }
+                        }
 
                             break;
                         // IPv4, IPv6 or DNS value
                         case "endpoint":
                         case "socks5proxy":
-                            if (!IPHelper.IsValidAddress(value))
+                            if (!IpHelper.IsValidAddress(value))
                             {
                                 txtEditor.UnderlineSelection();
                                 hasErrors = true;
                             }
+
                             break;
                         // Numerical values
                         case "mtu":
                         case "persistentkeepalive":
+                        {
+                            if (!int.TryParse(m.Groups["value"].Value, out var intValue))
                             {
-                                if (!int.TryParse(m.Groups["value"].Value, out int intValue))
+                                txtEditor.UnderlineSelection();
+                                hasErrors = true;
+                            }
+                            else
+                            {
+                                if (intValue < 0 || intValue > 65535)
                                 {
                                     txtEditor.UnderlineSelection();
                                     hasErrors = true;
                                 }
-                                else
-                                {
-                                    if (intValue < 0 || intValue > 65535)
-                                    {
-                                        txtEditor.UnderlineSelection();
-                                        hasErrors = true;
-                                    }
-                                }
                             }
+                        }
                             break;
                         // Comma-delimited string values
                         case "allowedapps":
                         case "disallowedapps":
-                            {
-                                foreach (Match e in _multiValueMatch.Matches(value))
+                        {
+                            foreach (Match e in MultiValueMatch.Matches(value))
+                                if (!string.IsNullOrWhiteSpace(e.Value) &&
+                                    !Regex.IsMatch(e.Value, @"^[a-z0-9_-]+$", RegexOptions.IgnoreCase))
                                 {
-                                    if (!String.IsNullOrWhiteSpace(e.Value) && !Regex.IsMatch(e.Value, @"^[a-z0-9_-]+$", RegexOptions.IgnoreCase))
-                                    {
-                                        txtEditor.SelectionStart = m.Groups["value"].Index + e.Index;
-                                        txtEditor.SelectionLength = e.Length;
-                                        txtEditor.UnderlineSelection();
-                                        hasErrors = true;
-                                    }
+                                    txtEditor.SelectionStart = m.Groups["value"].Index + e.Index;
+                                    txtEditor.SelectionLength = e.Length;
+                                    txtEditor.UnderlineSelection();
+                                    hasErrors = true;
                                 }
-                            }
+                        }
                             break;
                         // String values
                         case "socks5proxyusername":
@@ -218,7 +234,6 @@ namespace WireSockUI.Forms
                             hasErrors = true;
                             break;
                     }
-
                 }
             }
 
@@ -236,72 +251,52 @@ namespace WireSockUI.Forms
         {
             InitializeComponent();
 
-            this.Icon = Resources.ico;
+            Icon = Resources.ico;
             txtProfileName.SetCueBanner(Resources.EditProfileCue);
-        }
-
-        public frmEdit()
-        {
-            Initialize();
-
-            this.Text = Resources.EditProfileTitleNew;
-            txtEditor.Text = Resources.template_conf;
-
-            ApplySyntaxHighlighting();
-        }
-
-        public frmEdit(string config)
-        {
-            Initialize();
-
-            Text = String.Format(Resources.EditProfileTitle, config);
-
-            txtProfileName.Text = config.ToLowerInvariant();
-            txtEditor.Text = File.ReadAllText(Path.Combine(Global.configsFolder, config + ".conf"));
-
-            ApplySyntaxHighlighting();
         }
 
         private void OnSaveClick(object sender, EventArgs e)
         {
-            String tmpProfile = Path.GetTempFileName();
+            var tmpProfile = Path.GetTempFileName();
             File.WriteAllText(tmpProfile, txtEditor.Text);
 
             try
             {
-                Profile profile = new Profile(tmpProfile);
+                var profile = new Profile(tmpProfile);
             }
             catch (Exception ex)
             {
                 MessageBox.Show(ex.Message, Resources.EditProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 File.Delete(tmpProfile);
 
-                this.DialogResult = DialogResult.None;
+                DialogResult = DialogResult.None;
                 return;
             }
 
-            if (String.IsNullOrWhiteSpace(txtProfileName.Text) || txtProfileName.Text.IndexOfAny(Path.GetInvalidFileNameChars()) > 0)
+            if (string.IsNullOrWhiteSpace(txtProfileName.Text) ||
+                txtProfileName.Text.IndexOfAny(Path.GetInvalidFileNameChars()) > 0)
             {
-                MessageBox.Show(Resources.EditProfileNameError, Resources.EditProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(Resources.EditProfileNameError, Resources.EditProfileError, MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
                 File.Delete(tmpProfile);
 
-                this.DialogResult = DialogResult.None;
+                DialogResult = DialogResult.None;
                 return;
             }
 
-            String profilePath = Path.Combine(Global.configsFolder, txtProfileName.Text + ".conf");
+            var profilePath = Path.Combine(Global.ConfigsFolder, txtProfileName.Text + ".conf");
 
             File.Delete(profilePath);
             File.Move(tmpProfile, profilePath);
 
-            this.ReturnValue = txtProfileName.Text;
+            ReturnValue = txtProfileName.Text;
 
             Close();
         }
 
         private void OnProcessClick(object sender, EventArgs e)
         {
-            using (TaskManager taskManager = new TaskManager())
+            using (var taskManager = new TaskManager())
             {
                 if (taskManager.ShowDialog() == DialogResult.OK)
                 {

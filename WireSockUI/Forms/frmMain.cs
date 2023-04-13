@@ -1,7 +1,5 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -18,32 +16,83 @@ namespace WireSockUI.Forms
     /**
      * @brief The main form of the application.
      */
-    public partial class frmMain : Form
+    public partial class FrmMain : Form
     {
-        public enum ConnectionState { Connecting, Connected, Disconnected }
+        public enum ConnectionState
+        {
+            Connecting,
+            Connected,
+            Disconnected
+        }
+
+        private readonly BackgroundWorker _tunnelConnectionWorker;
+        private readonly BackgroundWorker _tunnelStateWorker;
 
         /**
          * @brief The manager that handles the Wireguard connections.
          */
         private readonly WireSockManager _wiresock;
-        private readonly BackgroundWorker _tunnelConnectionWorker;
-        private readonly BackgroundWorker _tunnelStateWorker;
+
+        /**
+         * @brief Initializes a new instance of the Main class.
+         */
+        public FrmMain()
+        {
+            InitializeComponent();
+
+            _tunnelConnectionWorker = InitializeTunnelConnectionWorker();
+            _tunnelStateWorker = InitTunnelStateWorker();
+
+            // Configure icons
+            Icon = trayIcon.Icon = Resources.ico;
+            cmiStatus.Image = BitmapExtensions.DrawCircle(16, 15, Brushes.DarkGray);
+
+            // Populate menu items with Windows supplied icons
+            ddmAddTunnel.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.Addtunnel, 16).ToBitmap();
+            mniImportTunnel.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.OpenTunnel, 16).ToBitmap();
+            mniNewTunnel.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.NewTunnel, 16).ToBitmap();
+            mniDeleteTunnel.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.DeleteTunnel, 16).ToBitmap();
+            mniSettings.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.Settings, 16).ToBitmap();
+
+            // Populate profile image list with Windows supplied icons
+            imlProfiles.Images.Clear();
+            imlProfiles.Images.Add(ConnectionState.Disconnected.ToString(),
+                WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.DisconnectedTunnel, 24));
+            imlProfiles.Images.Add(ConnectionState.Connected.ToString(),
+                WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.ConnectedTunnel, 24));
+            imlProfiles.Images.Add(ConnectionState.Connecting.ToString(),
+                WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.ConnectingTunnel, 24));
+
+            // Ensure the profile list rows fill the entire width, but no scrollbar appears
+            lstProfiles.Columns[0].Width = lstProfiles.Size.Width - 4;
+
+            OnLogWindowResize(lstLog, EventArgs.Empty);
+
+            // Update the list of available configurations.
+            LoadProfiles();
+
+            // Create a new WireSockManager instance, attached to the logging control
+            _wiresock = new WireSockManager(OnWireSockLogMessage);
+            _wiresock.LogLevel = _wiresock.LogLevelSetting;
+        }
 
         /// <summary>
-        /// Initialize a <see cref="T:BackgroundWorker" /> which retrieves tunnel connecting / connecting state and updates it in the UI
+        ///     Initialize a <see cref="T:BackgroundWorker" /> which retrieves tunnel connecting / connecting state and updates it
+        ///     in the UI
         /// </summary>
-        /// <returns><see cref="T:BackgroundWorker" /></returns>
+        /// <returns>
+        ///     <see cref="T:BackgroundWorker" />
+        /// </returns>
         private BackgroundWorker InitializeTunnelConnectionWorker()
         {
-            BackgroundWorker worker = new BackgroundWorker()
+            var worker = new BackgroundWorker
             {
                 WorkerSupportsCancellation = true,
                 WorkerReportsProgress = true
             };
 
-            worker.DoWork += (object s, DoWorkEventArgs e) =>
+            worker.DoWork += (s, e) =>
             {
-
                 do
                 {
                     Thread.Sleep(500);
@@ -51,7 +100,7 @@ namespace WireSockUI.Forms
                 } while (!worker.CancellationPending && !_wiresock.Connected);
             };
 
-            worker.ProgressChanged += (object s, ProgressChangedEventArgs e) =>
+            worker.ProgressChanged += (s, e) =>
             {
                 if ((bool)e.UserState)
                     UpdateState(ConnectionState.Connected);
@@ -61,18 +110,20 @@ namespace WireSockUI.Forms
         }
 
         /// <summary>
-        /// Initialize a <see cref="T:BackgroundWorker" /> which retrieves the connected tunnel state and updates it in the UI
+        ///     Initialize a <see cref="T:BackgroundWorker" /> which retrieves the connected tunnel state and updates it in the UI
         /// </summary>
-        /// <returns><see cref="T:BackgroundWorker" /></returns>
+        /// <returns>
+        ///     <see cref="T:BackgroundWorker" />
+        /// </returns>
         private BackgroundWorker InitTunnelStateWorker()
         {
-            BackgroundWorker worker = new BackgroundWorker()
+            var worker = new BackgroundWorker
             {
                 WorkerSupportsCancellation = true,
                 WorkerReportsProgress = true
             };
 
-            worker.DoWork += (object s, DoWorkEventArgs e) =>
+            worker.DoWork += (s, e) =>
             {
                 while (!worker.CancellationPending)
                 {
@@ -80,13 +131,13 @@ namespace WireSockUI.Forms
 
                     if (_wiresock.Connected)
                     {
-                        WgbStats stats = _wiresock.GetState();
+                        var stats = _wiresock.GetState();
                         worker.ReportProgress(0, stats);
                     }
                 }
             };
 
-            worker.ProgressChanged += (object s, ProgressChangedEventArgs e) =>
+            worker.ProgressChanged += (s, e) =>
             {
                 if (e.UserState is WgbStats stats)
                 {
@@ -94,15 +145,15 @@ namespace WireSockUI.Forms
                         txtHandshake.Text = stats.time_since_last_handshake.AsTimeAgo();
 
                     if (layoutState.Controls["txtTransfer"] is TextBox txtTransfer)
-                        txtTransfer.Text = String.Format(Resources.StateTransferValue,
+                        txtTransfer.Text = string.Format(Resources.StateTransferValue,
                             stats.rx_bytes.AsHumanReadable(),
                             stats.tx_bytes.AsHumanReadable());
 
-                    if (layoutState.Controls["txtRTT"] is TextBox txtRTT)
-                        txtRTT.Text = String.Format(Resources.StateRTTValue, stats.estimated_rtt);
+                    if (layoutState.Controls["txtRTT"] is TextBox txtRtt)
+                        txtRtt.Text = string.Format(Resources.StateRTTValue, stats.estimated_rtt);
 
                     if (layoutState.Controls["txtLoss"] is TextBox txtLoss)
-                        txtLoss.Text = String.Format(Resources.StateLossValue, stats.estimated_loss * 100);
+                        txtLoss.Text = string.Format(Resources.StateLossValue, stats.estimated_loss * 100);
                 }
             };
 
@@ -110,37 +161,37 @@ namespace WireSockUI.Forms
         }
 
         /// <summary>
-        /// Reload profile list and optionally pre-select a profile
+        ///     Reload profile list and optionally pre-select a profile
         /// </summary>
         /// <param name="selectedProfile">Optional profile to automatically select</param>
-        private void LoadProfiles(String selectedProfile = "")
+        private void LoadProfiles(string selectedProfile = "")
         {
             lstProfiles.Items.Clear();
 
-            List<string> profiles = Profile.GetProfiles().ToList();
+            var profiles = Profile.GetProfiles().ToList();
             profiles.Sort();
 
             lstProfiles.Items.AddRange(profiles
-                    .Select(p => new ListViewItem(p, "disconnected") { Name = p }).ToArray());
+                .Select(p => new ListViewItem(p, "disconnected") { Name = p }).ToArray());
 
             // Clear any previously loaded tunnels
-            for (int i = mnuContext.Items.Count - 1; i >= 0; i--)
+            for (var i = mnuContext.Items.Count - 1; i >= 0; i--)
             {
-                ToolStripItem item = mnuContext.Items[i];
+                var item = mnuContext.Items[i];
 
-                if (String.Equals(item.Tag, "tunnel"))
+                if (Equals(item.Tag, "tunnel"))
                     mnuContext.Items.Remove(item);
             }
 
             if (profiles.Any())
             {
-                int insertIndex = mnuContext.Items.IndexOf(cmiSepTunnels);
+                var insertIndex = mnuContext.Items.IndexOf(cmiSepTunnels);
 
-                mnuContext.Items.Insert(insertIndex + 1, new ToolStripSeparator() { Tag = "tunnel" });
+                mnuContext.Items.Insert(insertIndex + 1, new ToolStripSeparator { Tag = "tunnel" });
 
-                foreach (string profile in profiles.Reverse<string>())
+                foreach (var profile in profiles.Reverse<string>())
                 {
-                    ToolStripMenuItem item = new ToolStripMenuItem(profile) { Tag = "tunnel", Text = profile };
+                    var item = new ToolStripMenuItem(profile) { Tag = "tunnel", Text = profile };
                     item.Click += (s, e) =>
                     {
                         lstProfiles.Items[item.Text].Selected = true;
@@ -153,9 +204,9 @@ namespace WireSockUI.Forms
 
             if (lstProfiles.Items.Count > 0)
             {
-                if (!String.IsNullOrWhiteSpace(selectedProfile))
+                if (!string.IsNullOrWhiteSpace(selectedProfile))
                 {
-                    ListViewItem profile = lstProfiles.Items[selectedProfile];
+                    var profile = lstProfiles.Items[selectedProfile];
 
                     if (profile != null)
                     {
@@ -169,16 +220,18 @@ namespace WireSockUI.Forms
         }
 
         /// <summary>
-        /// Update the connection state of the WireSock tunnel
+        ///     Update the connection state of the WireSock tunnel
         /// </summary>
-        /// <param name="state"><see cref="T:ConnectionState"/></param>
+        /// <param name="state">
+        ///     <see cref="T:ConnectionState" />
+        /// </param>
         /// <remarks>This updates both the actual tunnel state and all related UI elements.</remarks>
         private void UpdateState(ConnectionState state)
         {
-            Button btnActivate = layoutInterface.Controls["btnActivate"] as Button;
-            PictureBox imgStatus = layoutInterface.Controls.Find("imgStatus", true).FirstOrDefault() as PictureBox;
-            TextBox txtStatus = layoutInterface.Controls.Find("txtStatus", true).FirstOrDefault() as TextBox;
-            TextBox txtAddresses = layoutInterface.Controls["txtAddresses"] as TextBox;
+            var btnActivate = layoutInterface.Controls["btnActivate"] as Button;
+            var imgStatus = layoutInterface.Controls.Find("imgStatus", true).FirstOrDefault() as PictureBox;
+            var txtStatus = layoutInterface.Controls.Find("txtStatus", true).FirstOrDefault() as TextBox;
+            var txtAddresses = layoutInterface.Controls["txtAddresses"] as TextBox;
 
             switch (state)
             {
@@ -211,10 +264,8 @@ namespace WireSockUI.Forms
                     cmiAddresses.Visible = true;
 
                     foreach (ToolStripItem item in mnuContext.Items)
-                    {
-                        if (item is ToolStripMenuItem menuItem && String.Equals(menuItem.Tag, "tunnel"))
-                            menuItem.Checked = (menuItem.Text == _wiresock.ProfileName);
-                    }
+                        if (item is ToolStripMenuItem menuItem && Equals(menuItem.Tag, "tunnel"))
+                            menuItem.Checked = menuItem.Text == _wiresock.ProfileName;
 
                     lstProfiles.Items[_wiresock.ProfileName].ImageKey = ConnectionState.Connected.ToString();
 
@@ -226,7 +277,8 @@ namespace WireSockUI.Forms
                     if (!_tunnelStateWorker.IsBusy)
                         _tunnelStateWorker.RunWorkerAsync();
 
-                    Notifications.Notify(Resources.ToastActiveTitle, String.Format(Resources.ToastActiveMessage, _wiresock.ProfileName));
+                    Notifications.Notifications.Notify(Resources.ToastActiveTitle,
+                        string.Format(Resources.ToastActiveMessage, _wiresock.ProfileName));
                     break;
                 case ConnectionState.Disconnected:
                     btnActivate.Text = Resources.ButtonInactive;
@@ -241,68 +293,24 @@ namespace WireSockUI.Forms
                     cmiStatus.Image = imgStatus.Image;
                     cmiStatus.Text = Resources.ContextMenuInactive;
 
-                    cmiAddresses.Text = String.Empty;
+                    cmiAddresses.Text = string.Empty;
                     cmiAddresses.Visible = false;
 
                     foreach (ToolStripItem item in mnuContext.Items)
-                    {
-                        if (item is ToolStripMenuItem menuItem && String.Equals(menuItem.Tag, "tunnel"))
+                        if (item is ToolStripMenuItem menuItem && Equals(menuItem.Tag, "tunnel"))
                             menuItem.Checked = false;
-                    }
 
                     lstProfiles.Items[_wiresock.ProfileName].ImageKey = ConnectionState.Disconnected.ToString();
 
                     gbxState.Visible = false;
                     _tunnelStateWorker.CancelAsync();
 
-                    Notifications.Notify(Resources.ToastInactiveTitle, String.Format(Resources.ToastInactiveMessage, _wiresock.ProfileName));
+                    Notifications.Notifications.Notify(Resources.ToastInactiveTitle,
+                        string.Format(Resources.ToastInactiveMessage, _wiresock.ProfileName));
 
                     _wiresock.Disconnect();
                     break;
             }
-        }
-
-        /**
-         * @brief Initializes a new instance of the Main class.
-         */
-        public frmMain()
-        {
-            InitializeComponent();
-
-            _tunnelConnectionWorker = InitializeTunnelConnectionWorker();
-            _tunnelStateWorker = InitTunnelStateWorker();
-
-            // Configure icons
-            this.Icon = trayIcon.Icon = Resources.ico;
-            cmiStatus.Image = BitmapExtensions.DrawCircle(16, 15, Brushes.DarkGray);
-
-            // Populate menu items with Windows supplied icons
-            ddmAddTunnel.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.Addtunnel, 16).ToBitmap();
-            mniImportTunnel.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.OpenTunnel, 16).ToBitmap();
-            mniNewTunnel.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.NewTunnel, 16).ToBitmap();
-            mniDeleteTunnel.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.DeleteTunnel, 16).ToBitmap();
-            mniSettings.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.Settings, 16).ToBitmap();
-
-            // Populate profile image list with Windows supplied icons
-            imlProfiles.Images.Clear();
-            imlProfiles.Images.Add(ConnectionState.Disconnected.ToString(),
-                WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.DisconnectedTunnel, 24));
-            imlProfiles.Images.Add(ConnectionState.Connected.ToString(),
-                WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.ConnectedTunnel, 24));
-            imlProfiles.Images.Add(ConnectionState.Connecting.ToString(),
-                WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.ConnectingTunnel, 24));
-
-            // Ensure the profile list rows fill the entire width, but no scrollbar appears
-            lstProfiles.Columns[0].Width = lstProfiles.Size.Width - 4;
-
-            OnLogWindowResize(lstLog, EventArgs.Empty);
-
-            // Update the list of available configurations.
-            LoadProfiles();
-
-            // Create a new WireSockManager instance, attached to the logging control
-            _wiresock = new WireSockManager(this.OnWireSockLogMessage);
-            _wiresock.LogLevel = _wiresock.LogLevelSetting;
         }
 
         protected override void OnLoad(EventArgs e)
@@ -311,8 +319,8 @@ namespace WireSockUI.Forms
 
             if (Settings.Default.AutoMinimize)
             {
-                this.WindowState = FormWindowState.Minimized;
-                this.ShowInTaskbar = false;
+                WindowState = FormWindowState.Minimized;
+                ShowInTaskbar = false;
                 Hide();
             }
 
@@ -325,7 +333,8 @@ namespace WireSockUI.Forms
             if (lstProfiles.Items.ContainsKey(Settings.Default.LastProfile))
                 OnProfileClick(lstProfiles, EventArgs.Empty);
             else
-                MessageBox.Show(Resources.LastProfileNotFound, Resources.DialogAutoConnect, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(Resources.LastProfileNotFound, Resources.DialogAutoConnect, MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
         }
 
         private void OnExitClick(object sender, EventArgs e)
@@ -343,18 +352,18 @@ namespace WireSockUI.Forms
         private void OnFormShow(object sender, EventArgs e)
         {
             Show();
-            this.WindowState = FormWindowState.Normal;
+            WindowState = FormWindowState.Normal;
         }
 
         private void OnFormMinimize(object sender, EventArgs e)
         {
-            if (this.WindowState == FormWindowState.Minimized)
+            if (WindowState == FormWindowState.Minimized)
                 Hide();
         }
 
         private void OnNewProfileClick(object sender, EventArgs e)
         {
-            using (Form form = new frmEdit())
+            using (Form form = new FrmEdit())
             {
                 if (form.ShowDialog() == DialogResult.OK)
                     LoadProfiles();
@@ -363,7 +372,7 @@ namespace WireSockUI.Forms
 
         private void OnAddProfileClick(object sender, EventArgs e)
         {
-            using (OpenFileDialog openFileDialog = new OpenFileDialog())
+            using (var openFileDialog = new OpenFileDialog())
             {
                 openFileDialog.Title = Resources.DialogOpenFileTitle;
                 openFileDialog.InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Recent);
@@ -373,13 +382,14 @@ namespace WireSockUI.Forms
                 if (openFileDialog.ShowDialog() != DialogResult.OK)
                     return;
 
-                String filePath = openFileDialog.FileName;
+                var filePath = openFileDialog.FileName;
 
-                String profileName = Path.GetFileNameWithoutExtension(filePath);
+                var profileName = Path.GetFileNameWithoutExtension(filePath);
 
                 if (Profile.GetProfiles().Contains(profileName, StringComparer.OrdinalIgnoreCase))
                 {
-                    MessageBox.Show(String.Format(Resources.AddProfileExistsMsg, profileName), Resources.AddProfileExistsTitle,
+                    MessageBox.Show(string.Format(Resources.AddProfileExistsMsg, profileName),
+                        Resources.AddProfileExistsTitle,
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
@@ -391,9 +401,9 @@ namespace WireSockUI.Forms
 
         private void OnEditProfileClick(object sender, EventArgs e)
         {
-            String profile = lstProfiles.SelectedItems[0].Text;
+            var profile = lstProfiles.SelectedItems[0].Text;
 
-            using (frmEdit form = new frmEdit(profile))
+            using (var form = new FrmEdit(profile))
             {
                 if (form.ShowDialog() == DialogResult.OK)
                 {
@@ -407,9 +417,10 @@ namespace WireSockUI.Forms
 
         private void OnDeleteProfileClick(object sender, EventArgs e)
         {
-            String selectedConf = lstProfiles.SelectedItems[0].Text;
+            var selectedConf = lstProfiles.SelectedItems[0].Text;
 
-            if (MessageBox.Show(String.Format(Resources.DeleteProfileConfirmMsg, selectedConf), Resources.DeleteProfileConfirmTitle,
+            if (MessageBox.Show(string.Format(Resources.DeleteProfileConfirmMsg, selectedConf),
+                    Resources.DeleteProfileConfirmTitle,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Exclamation) != DialogResult.Yes)
                 return;
 
@@ -422,7 +433,7 @@ namespace WireSockUI.Forms
 
         private void OnSettingsClick(object sender, EventArgs e)
         {
-            using (frmSettings form = new frmSettings())
+            using (var form = new FrmSettings())
             {
                 // set the owner of the child form to the main form instance
                 form.Owner = this;
@@ -442,9 +453,11 @@ namespace WireSockUI.Forms
             }
             else
             {
-                _wiresock.TunnelMode = Settings.Default.UseAdapter ? WireSockManager.Mode.VirtualAdapter : WireSockManager.Mode.Transparent;
+                _wiresock.TunnelMode = Settings.Default.UseAdapter
+                    ? WireSockManager.Mode.VirtualAdapter
+                    : WireSockManager.Mode.Transparent;
 
-                string profile = lstProfiles.SelectedItems[0].Text;
+                var profile = lstProfiles.SelectedItems[0].Text;
 
                 if (_wiresock.Connect(profile))
                     UpdateState(ConnectionState.Connecting);
@@ -453,22 +466,24 @@ namespace WireSockUI.Forms
 
         private void OnWireSockLogMessage(WireSockManager.LogMessage logMessage)
         {
-            lstLog.Items.Add(new ListViewItem(new string[] { logMessage.Timestamp.ToString(Resources.LogTimestampFormat), logMessage.Message }));
+            lstLog.Items.Add(new ListViewItem(new[]
+                { logMessage.Timestamp.ToString(Resources.LogTimestampFormat), logMessage.Message }));
         }
 
         #region Layout
 
         private void OnProfileChange(object sender, ListViewItemSelectionChangedEventArgs e)
         {
-            TextBox addRow(TableLayoutPanel container, string name, string key, string value, bool isOptional = false, Bitmap icon = null)
+            TextBox AddRow(TableLayoutPanel container, string name, string key, string value, bool isOptional = false,
+                Bitmap icon = null)
             {
-                if (isOptional && String.IsNullOrWhiteSpace(value))
+                if (isOptional && string.IsNullOrWhiteSpace(value))
                     return null;
 
                 container.RowStyles.Add(new RowStyle(SizeType.AutoSize));
                 container.RowCount = container.RowStyles.Count;
 
-                Label label = new Label()
+                var label = new Label
                 {
                     Dock = DockStyle.Fill,
                     Name = $"lbl{name}",
@@ -483,14 +498,13 @@ namespace WireSockUI.Forms
 
                 if (icon != null)
                 {
-                    TableLayoutPanel panel = new TableLayoutPanel()
+                    var panel = new TableLayoutPanel
                     {
                         AutoSize = true,
                         AutoSizeMode = AutoSizeMode.GrowAndShrink,
                         Dock = DockStyle.Fill,
                         Margin = new Padding(0),
-                        Padding = new Padding(0),
-
+                        Padding = new Padding(0)
                     };
 
                     panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
@@ -500,7 +514,7 @@ namespace WireSockUI.Forms
                     panel.RowCount = panel.RowStyles.Count;
                     panel.ColumnCount = panel.ColumnStyles.Count;
 
-                    panel.Controls.Add(new PictureBox()
+                    panel.Controls.Add(new PictureBox
                     {
                         Dock = DockStyle.Fill,
                         Height = 16,
@@ -508,10 +522,10 @@ namespace WireSockUI.Forms
                         Margin = new Padding(0),
                         Name = $"img{name}",
                         Padding = new Padding(0),
-                        Width = 16,
+                        Width = 16
                     }, 0, 0);
 
-                    panel.Controls.Add(new TextBox()
+                    panel.Controls.Add(new TextBox
                     {
                         BorderStyle = BorderStyle.None,
                         BackColor = Color.FromKnownColor(KnownColor.Control),
@@ -528,7 +542,7 @@ namespace WireSockUI.Forms
                 }
                 else
                 {
-                    TextBox textBox = new TextBox()
+                    var textBox = new TextBox
                     {
                         BorderStyle = BorderStyle.None,
                         BackColor = Color.FromKnownColor(KnownColor.Control),
@@ -562,25 +576,26 @@ namespace WireSockUI.Forms
 
             if (e.IsSelected)
             {
-                String selectedConf = lstProfiles.SelectedItems[0].Text;
+                var selectedConf = lstProfiles.SelectedItems[0].Text;
 
                 try
                 {
-                    Profile profile = Profile.LoadProfile(selectedConf);
+                    var profile = Profile.LoadProfile(selectedConf);
 
                     // Interface Panel
-                    gbxInterface.Text = String.Format(Resources.InterfaceTitle, selectedConf);
+                    gbxInterface.Text = string.Format(Resources.InterfaceTitle, selectedConf);
 
-                    addRow(layoutInterface, "Status", Resources.InterfaceStatus, Resources.InterfaceStatusInactive, false, BitmapExtensions.DrawCircle(16, 15, Brushes.DarkGray));
-                    addRow(layoutInterface, "PrivateKey", Resources.InterfacePublicKey, profile.PublicKey);
-                    addRow(layoutInterface, "MTU", Resources.InterfaceMTU, profile.MTU, true);
-                    addRow(layoutInterface, "Addresses", Resources.InterfaceAddresses, profile.Address);
+                    AddRow(layoutInterface, "Status", Resources.InterfaceStatus, Resources.InterfaceStatusInactive,
+                        false, BitmapExtensions.DrawCircle(16, 15, Brushes.DarkGray));
+                    AddRow(layoutInterface, "PrivateKey", Resources.InterfacePublicKey, profile.PublicKey);
+                    AddRow(layoutInterface, "MTU", Resources.InterfaceMTU, profile.Mtu, true);
+                    AddRow(layoutInterface, "Addresses", Resources.InterfaceAddresses, profile.Address);
 
                     layoutInterface.RowStyles.Add(new RowStyle(SizeType.Absolute, 10));
                     layoutInterface.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
                     layoutInterface.RowCount = layoutInterface.RowStyles.Count;
 
-                    Button btnActivate = new Button()
+                    var btnActivate = new Button
                     {
                         AutoSize = true,
                         AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -599,25 +614,33 @@ namespace WireSockUI.Forms
                     OnLayoutPanelResize(layoutInterface, EventArgs.Empty);
 
                     // Peer Panel
-                    addRow(layoutPeer, "PublicKey", Resources.PeerPublicKey, profile.PeerKey);
-                    addRow(layoutPeer, "PresharedKey", Resources.PeerPresharedKey, !String.IsNullOrWhiteSpace(profile.PresharedKey) ? Resources.PeerPresharedKeyValue : String.Empty, true);
-                    addRow(layoutPeer, "AllowedIPs", Resources.PeerAllowedIPs, profile.AllowedIPs);
-                    addRow(layoutPeer, "Endpoint", Resources.PeerEndpoint, profile.Endpoint);
-                    addRow(layoutPeer, "PersistentKeepAlive", Resources.PeerPersistentKeepAlive, profile.PersistentKeepAlive, true);
+                    AddRow(layoutPeer, "PublicKey", Resources.PeerPublicKey, profile.PeerKey);
+                    AddRow(layoutPeer, "PresharedKey", Resources.PeerPresharedKey,
+                        !string.IsNullOrWhiteSpace(profile.PresharedKey)
+                            ? Resources.PeerPresharedKeyValue
+                            : string.Empty, true);
+                    AddRow(layoutPeer, "AllowedIPs", Resources.PeerAllowedIPs, profile.AllowedIPs);
+                    AddRow(layoutPeer, "Endpoint", Resources.PeerEndpoint, profile.Endpoint);
+                    AddRow(layoutPeer, "PersistentKeepAlive", Resources.PeerPersistentKeepAlive,
+                        profile.PersistentKeepAlive, true);
 
                     layoutPeer.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
 
-                    addRow(layoutPeer, "AllowedApps", Resources.PeerAllowedApps, profile.AllowedApps, true);
-                    addRow(layoutPeer, "DisallowedApps", Resources.PeerDisallowedApps, profile.DisallowedApps, true);
-                    addRow(layoutPeer, "DisallowedIPs", Resources.PeerDisallowedIPs, profile.DisallowedIPs, true);
-                    addRow(layoutPeer, "Socks5Proxy", Resources.PeerSocks5Proxy, profile.Socks5Proxy, true);
-                    addRow(layoutPeer, "Socks5Username", Resources.PeerSocks5Username, profile.Socks5ProxyUsername, true);
-                    addRow(layoutPeer, "Socks5Password", Resources.PeerSocks5Password, !String.IsNullOrWhiteSpace(profile.Socks5ProxyPassword) ? Resources.PeerSocks5PasswordValue : String.Empty, true);
+                    AddRow(layoutPeer, "AllowedApps", Resources.PeerAllowedApps, profile.AllowedApps, true);
+                    AddRow(layoutPeer, "DisallowedApps", Resources.PeerDisallowedApps, profile.DisallowedApps, true);
+                    AddRow(layoutPeer, "DisallowedIPs", Resources.PeerDisallowedIPs, profile.DisallowedIPs, true);
+                    AddRow(layoutPeer, "Socks5Proxy", Resources.PeerSocks5Proxy, profile.Socks5Proxy, true);
+                    AddRow(layoutPeer, "Socks5Username", Resources.PeerSocks5Username, profile.Socks5ProxyUsername,
+                        true);
+                    AddRow(layoutPeer, "Socks5Password", Resources.PeerSocks5Password,
+                        !string.IsNullOrWhiteSpace(profile.Socks5ProxyPassword)
+                            ? Resources.PeerSocks5PasswordValue
+                            : string.Empty, true);
 
-                    if (!String.IsNullOrWhiteSpace(profile.AllowedApps) ||
-                        !String.IsNullOrWhiteSpace(profile.DisallowedApps) ||
-                        !String.IsNullOrWhiteSpace(profile.DisallowedIPs) ||
-                        !String.IsNullOrWhiteSpace(profile.Socks5Proxy))
+                    if (!string.IsNullOrWhiteSpace(profile.AllowedApps) ||
+                        !string.IsNullOrWhiteSpace(profile.DisallowedApps) ||
+                        !string.IsNullOrWhiteSpace(profile.DisallowedIPs) ||
+                        !string.IsNullOrWhiteSpace(profile.Socks5Proxy))
                         layoutPeer.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
 
                     layoutPeer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -626,10 +649,10 @@ namespace WireSockUI.Forms
                     OnLayoutPanelResize(layoutPeer, EventArgs.Empty);
 
                     // Layout state                    
-                    addRow(layoutState, "Handshake", Resources.StateHandshake, "");
-                    addRow(layoutState, "Transfer", Resources.StateTransfer, "");
-                    addRow(layoutState, "RTT", Resources.StateRTT, "");
-                    addRow(layoutState, "Loss", Resources.StateLoss, "");
+                    AddRow(layoutState, "Handshake", Resources.StateHandshake, "");
+                    AddRow(layoutState, "Transfer", Resources.StateTransfer, "");
+                    AddRow(layoutState, "RTT", Resources.StateRTT, "");
+                    AddRow(layoutState, "Loss", Resources.StateLoss, "");
 
                     layoutState.RowStyles.Add(new RowStyle(SizeType.AutoSize));
                 }
@@ -645,17 +668,16 @@ namespace WireSockUI.Forms
 
         private void OnLayoutPanelResize(object sender, EventArgs e)
         {
-            TableLayoutPanel panel = sender as TableLayoutPanel;
+            var panel = sender as TableLayoutPanel;
             if (panel.Width > 0)
                 panel.ColumnStyles[1].Width = panel.Width - panel.ColumnStyles[0].Width;
 
             foreach (Control control in panel.Controls)
-            {
                 if (control is TextBox)
                 {
-                    TextBox textBox = control as TextBox;
+                    var textBox = control as TextBox;
 
-                    int textHeight = TextRenderer.MeasureText(
+                    var textHeight = TextRenderer.MeasureText(
                         textBox.Text,
                         textBox.Font,
                         new Size(
@@ -663,10 +685,10 @@ namespace WireSockUI.Forms
                             textBox.ClientSize.Height),
                         TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl).Height;
 
-                    textBox.Height = textHeight + 0 + (textHeight / textBox.Font.Height);
+                    textBox.Height = textHeight + 0 + textHeight / textBox.Font.Height;
                 }
-            }
         }
+
         #endregion
 
         #region LogWindow
@@ -681,9 +703,9 @@ namespace WireSockUI.Forms
         {
             e.DrawDefault = true;
 
-            if ((e.ItemIndex % 2) == 1)
+            if (e.ItemIndex % 2 == 1)
             {
-                Color color = Color.FromKnownColor(KnownColor.Window);
+                var color = Color.FromKnownColor(KnownColor.Window);
 
                 e.Item.BackColor = Color.FromArgb(
                     (int)(color.R * 0.95),
@@ -698,7 +720,7 @@ namespace WireSockUI.Forms
         {
             e.DrawDefault = true;
         }
-        #endregion
 
+        #endregion
     }
 }

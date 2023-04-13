@@ -33,12 +33,12 @@ jobs:
         with:
           type: 'zip'
           filename: 'WireSockUI-${{ github.ref_name }}.zip'
-          directory: 'bin\exe\x64\Release'
+          directory: 'bin\exe\Release'
           exclusions: '*.pdb'
 
       - name: Upload Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: 'bin\exe\x64\Release\WireSockUI-${{ github.ref_name }}.zip'
+          artifacts: 'bin\exe\Release\WireSockUI-${{ github.ref_name }}.zip'
           name: 'WireSockUI-${{ github.ref_name }}'
           token: ${{ secrets.GITHUB_TOKEN }}

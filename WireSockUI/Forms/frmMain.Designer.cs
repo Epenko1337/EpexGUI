@@ -2,7 +2,7 @@
 
 namespace WireSockUI.Forms
 {
-    partial class frmMain
+    partial class FrmMain
     {
         /// <summary>
         /// Required designer variable.
@@ -497,7 +497,7 @@ namespace WireSockUI.Forms
             this.Controls.Add(this.tabControl);
             this.MaximizeBox = false;
             this.MinimumSize = new System.Drawing.Size(595, 427);
-            this.Name = "frmMain";
+            this.Name = "FrmMain";
             this.resControls.SetResourceKey(this, "FormMain");
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
             this.Text = "WireSock UI";

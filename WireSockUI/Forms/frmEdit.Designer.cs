@@ -1,6 +1,6 @@
 ﻿namespace WireSockUI.Forms
 {
-    partial class frmEdit
+    partial class FrmEdit
     {
         /// <summary>
         /// Required designer variable.
@@ -207,7 +207,7 @@
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
-            this.Name = "frmEdit";
+            this.Name = "FrmEdit";
             this.resControls.SetResourceKey(this, null);
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterParent;
             this.Text = "Edit";

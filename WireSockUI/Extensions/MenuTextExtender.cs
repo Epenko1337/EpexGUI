@@ -6,11 +6,11 @@ using System.Windows.Forms;
 namespace WireSockUI.Extensions
 {
     [ProvideProperty("ResourceKey", typeof(ToolStripItem))]
-    internal class MenuTextExtender : Component, System.ComponentModel.IExtenderProvider, ISupportInitialize
+    internal class MenuTextExtender : Component, IExtenderProvider, ISupportInitialize
     {
-        private Dictionary<ToolStripItem, string> _items;
+        private readonly Dictionary<ToolStripItem, string> _items;
 
-        public MenuTextExtender() : base()
+        public MenuTextExtender()
         {
             _items = new Dictionary<ToolStripItem, string>();
         }
@@ -20,7 +20,25 @@ namespace WireSockUI.Extensions
 
         public bool CanExtend(object extendee)
         {
-            return (extendee is ToolStripItem);
+            return extendee is ToolStripItem;
+        }
+
+        public void BeginInit()
+        {
+        }
+
+        public void EndInit()
+        {
+            if (DesignMode)
+                return;
+
+            var resourceManage = new ResourceManager(ResourceClassName, GetType().Assembly);
+
+            foreach (var menuItem in _items)
+            {
+                var value = resourceManage.GetString(menuItem.Value);
+                menuItem.Key.Text = value;
+            }
         }
 
         public string GetResourceKey(ToolStripItem item)
@@ -40,23 +58,5 @@ namespace WireSockUI.Extensions
             else
                 _items[item] = key;
         }
-
-        public void BeginInit() { }
-
-        public void EndInit()
-        {
-            if (DesignMode)
-                return;
-
-            ResourceManager resourceManage = new ResourceManager(this.ResourceClassName, this.GetType().Assembly);
-
-            foreach (KeyValuePair<ToolStripItem, string> menuItem in _items)
-            {
-                string value = resourceManage.GetString(menuItem.Value);
-                menuItem.Key.Text = value;
-            }
-        }
-
-
     }
 }

@@ -8,15 +8,16 @@ using WireSockUI.Properties;
 
 namespace WireSockUI.Forms
 {
-    public partial class frmSettings : Form
+    public partial class FrmSettings : Form
     {
-        private static readonly string linkFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "WireSockUI.lnk");
+        private static readonly string LinkFile =
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "WireSockUI.lnk");
 
-        public frmSettings()
+        public FrmSettings()
         {
             InitializeComponent();
 
-            this.Icon = Resources.ico;
+            Icon = Resources.ico;
 
             chkAutorun.Checked = Settings.Default.AutoRun;
             chkAutoMinimize.Checked = Settings.Default.AutoMinimize;
@@ -26,30 +27,26 @@ namespace WireSockUI.Forms
             ddlLogLevel.SelectedItem = Settings.Default.LogLevel;
 
             // If the shortcut exists, and the setting does not match update it to reflect the actual status
-            chkAutorun.Checked = File.Exists(linkFile);
+            chkAutorun.Checked = File.Exists(LinkFile);
         }
 
         private void OnProfilesFolderClick(object sender, EventArgs e)
         {
-            Process.Start("explorer.exe", Global.mainFolder);
+            Process.Start("explorer.exe", Global.MainFolder);
         }
 
         private void OnSaveClick(object sender, EventArgs e)
         {
             if (Settings.Default.AutoRun != chkAutorun.Checked)
             {
-                if (!chkAutorun.Checked && File.Exists(linkFile))
-                {
-                    File.Delete(linkFile);
-                }
+                if (!chkAutorun.Checked && File.Exists(LinkFile))
+                    File.Delete(LinkFile);
                 else
-                {
-                    using (ShellLink link = new ShellLink())
+                    using (var link = new ShellLink())
                     {
                         link.TargetPath = Assembly.GetExecutingAssembly().Location;
-                        link.Save(linkFile);
+                        link.Save(LinkFile);
                     }
-                }
 
                 Settings.Default.AutoRun = chkAutorun.Checked;
             }
@@ -65,6 +62,5 @@ namespace WireSockUI.Forms
             DialogResult = DialogResult.OK;
             Close();
         }
-
     }
 }

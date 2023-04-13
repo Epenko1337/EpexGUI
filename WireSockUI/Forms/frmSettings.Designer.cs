@@ -1,6 +1,6 @@
 ﻿namespace WireSockUI.Forms
 {
-    partial class frmSettings
+    partial class FrmSettings
     {
         /// <summary>
         /// Required designer variable.
@@ -163,7 +163,7 @@
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
-            this.Name = "frmSettings";
+            this.Name = "FrmSettings";
             this.resControls.SetResourceKey(this, "FormSettings");
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterParent;
             this.Text = "Settings";

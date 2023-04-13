@@ -6,11 +6,11 @@ using System.Windows.Forms;
 namespace WireSockUI.Extensions
 {
     [ProvideProperty("ResourceKey", typeof(Control))]
-    public class ControlTextExtender : Component, System.ComponentModel.IExtenderProvider, ISupportInitialize
+    public class ControlTextExtender : Component, IExtenderProvider, ISupportInitialize
     {
         private readonly Dictionary<Control, string> _items;
 
-        public ControlTextExtender() : base()
+        public ControlTextExtender()
         {
             _items = new Dictionary<Control, string>();
         }
@@ -20,12 +20,30 @@ namespace WireSockUI.Extensions
 
         public bool CanExtend(object extendee)
         {
-            return (extendee is Control);
+            return extendee is Control;
+        }
+
+        public void BeginInit()
+        {
+        }
+
+        public void EndInit()
+        {
+            if (DesignMode)
+                return;
+
+            var resourceManage = new ResourceManager(ResourceClassName, GetType().Assembly);
+
+            foreach (var menuItem in _items)
+            {
+                var value = resourceManage.GetString(menuItem.Value);
+                menuItem.Key.Text = value;
+            }
         }
 
         public string GetResourceKey(Control item)
         {
-            if (_items.TryGetValue(item, out string value))
+            if (_items.TryGetValue(item, out var value))
                 return value;
 
             return null;
@@ -38,22 +56,5 @@ namespace WireSockUI.Extensions
             else
                 _items[item] = key;
         }
-
-        public void BeginInit() { }
-
-        public void EndInit()
-        {
-            if (DesignMode)
-                return;
-
-            ResourceManager resourceManage = new ResourceManager(this.ResourceClassName, this.GetType().Assembly);
-
-            foreach (KeyValuePair<Control, string> menuItem in _items)
-            {
-                string value = resourceManage.GetString(menuItem.Value);
-                menuItem.Key.Text = value;
-            }
-        }
-
     }
 }
