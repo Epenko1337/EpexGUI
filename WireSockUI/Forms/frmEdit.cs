@@ -298,11 +298,9 @@ namespace WireSockUI.Forms
         {
             using (var taskManager = new TaskManager())
             {
-                if (taskManager.ShowDialog() == DialogResult.OK)
-                {
-                    txtEditor.SelectionLength = 0;
-                    txtEditor.SelectedText = taskManager.ReturnValue;
-                }
+                if (taskManager.ShowDialog() != DialogResult.OK) return;
+                txtEditor.SelectionLength = 0;
+                txtEditor.SelectedText = taskManager.ReturnValue;
             }
         }
 

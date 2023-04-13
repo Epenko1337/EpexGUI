@@ -49,6 +49,16 @@ namespace WireSockUI.Native
         [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Ansi)]
         private static extern IntPtr LoadLibrary([MarshalAs(UnmanagedType.LPStr)] string lpFileName);
 
+        /// <summary>
+        /// Frees the loaded dynamic-link library (DLL) module and, if necessary, decrements its reference count. 
+        /// When the reference count reaches zero, the module is unloaded from the address space of the calling process and the handle is no longer valid.
+        /// </summary>
+        /// <param name="hModule">A handle to the loaded library module. The LoadLibrary or GetModuleHandle function returns this handle.</param>
+        /// <returns>If the function succeeds, the return value is nonzero; otherwise, it is zero. To get extended error information, call GetLastError.</returns>
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool FreeLibrary(IntPtr hModule);
+
+
         [DllImport("kernel32")]
         private static extern IntPtr FindResource(IntPtr hModule, int lpName, int lpType);
 
@@ -69,38 +79,64 @@ namespace WireSockUI.Native
         [DllImport("kernel32", SetLastError = true)]
         private static extern uint SizeofResource(IntPtr hModule, IntPtr hResInfo);
 
+        /// <summary>
+        /// Retrieves an icon from the specified file and group ID.
+        /// </summary>
+        /// <param name="file">The file containing the icon resource.</param>
+        /// <param name="groupId">The group ID of the icon resource.</param>
+        /// <param name="size">The desired size of the icon.</param>
+        /// <returns>An Icon object representing the requested icon, or null if it cannot be found.</returns>
         private static Icon GetIconFromGroup(string file, int groupId, int size)
         {
-            var hLibrary = LoadLibrary(file);
+            Icon icon = null;
 
-            if (hLibrary != IntPtr.Zero)
+            // Load the library containing the icon resource
+            var hLibrary = LoadLibrary(file);
+            if (hLibrary == IntPtr.Zero) return null;
+
+            try
             {
+                // Find and load the group icon resource
                 var hResource = FindResource(hLibrary, groupId, RtGroupIcon);
+                if (hResource == IntPtr.Zero) return null;
 
                 var hMem = LoadResource(hLibrary, hResource);
+                if (hMem == IntPtr.Zero) return null;
 
                 var lpResourcePtr = LockResource(hMem);
                 var sz = SizeofResource(hLibrary, hResource);
                 var lpResource = new byte[sz];
                 Marshal.Copy(lpResourcePtr, lpResource, 0, (int)sz);
 
+                // Get the icon ID
                 var nId = LookupIconIdFromDirectoryEx(lpResource, true, size, size, 0x0000);
 
+                // Find and load the icon resource
                 hResource = FindResource(hLibrary, nId, RtIcon);
+                if (hResource == IntPtr.Zero) return null;
 
                 hMem = LoadResource(hLibrary, hResource);
+                if (hMem == IntPtr.Zero) return null;
 
                 lpResourcePtr = LockResource(hMem);
                 sz = SizeofResource(hLibrary, hResource);
                 lpResource = new byte[sz];
                 Marshal.Copy(lpResourcePtr, lpResource, 0, (int)sz);
 
+                // Create the icon from the resource
                 var hIcon = CreateIconFromResourceEx(lpResource, sz, true, 0x00030000, size, size, 0);
-
-                return Icon.FromHandle(hIcon);
+                if (hIcon != IntPtr.Zero)
+                {
+                    icon = Icon.FromHandle(hIcon);
+                }
+            }
+            finally
+            {
+                // Free the library
+                FreeLibrary(hLibrary);
             }
 
-            return null;
+            return icon;
         }
 
         /// <summary>

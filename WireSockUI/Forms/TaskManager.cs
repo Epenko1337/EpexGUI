@@ -15,13 +15,30 @@ namespace WireSockUI.Forms
         {
             InitializeComponent();
 
-            Icon = Resources.ico;
+            // Safely set the icon
+            if (Resources.ico != null)
+            {
+                Icon = Resources.ico;
+            }
 
-            btnRefresh.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.Refresh, 16).ToBitmap();
+            // Safely set the refresh button image
+            var refreshIcon = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.Refresh, 16);
+            if (refreshIcon != null)
+            {
+                btnRefresh.Image = refreshIcon.ToBitmap();
+            }
 
             // Ensure the process list rows fill the entire width, but no scrollbar appears
-            lstProcesses.Columns[0].Width = lstProcesses.Size.Width - 18;
-            txtSearch.SetCueBanner(Resources.ProcessesSearchCue);
+            if (lstProcesses != null && lstProcesses.Columns.Count > 0)
+            {
+                lstProcesses.Columns[0].Width = lstProcesses.Size.Width - 18;
+            }
+
+            // Safely set the cue banner text
+            if (txtSearch != null && Resources.ProcessesSearchCue != null)
+            {
+                txtSearch.SetCueBanner(Resources.ProcessesSearchCue);
+            }
 
             UpdateProcesses();
         }
@@ -35,22 +52,54 @@ namespace WireSockUI.Forms
 
             var currentUser = WindowsIdentity.GetCurrent().Name;
 
-            // Unique current user processes
-            var processes =
-                ProcessList.GetProcessList()
-                    .Where(p => p.User == currentUser)
-                    .Distinct(ProcessEntry.Comparer);
+            // Get unique processes for the current user
+            var processes = ProcessList.GetProcessList()
+                .Where(p => p.User == currentUser)
+                .Distinct(ProcessEntry.Comparer);
 
-            lstProcesses.Items.AddRange(
-                processes
-                    .Select(p =>
+            // Add a default icon to the list view's image list
+            const string defaultIconKey = "DefaultIcon";
+            var defaultIcon = Resources.ico; // Replace with the appropriate resource for the default icon
+            if (defaultIcon != null)
+            {
+                lstProcesses.SmallImageList.Images.Add(defaultIconKey, (Icon)defaultIcon.Clone());
+            }
+
+            // Add process items to the list view
+            foreach (var process in processes)
+            {
+                var displayName = Path.GetFileNameWithoutExtension(process.ImageName);
+                var iconKey = process.ProcessId.ToString();
+
+                // If the process's image file exists, extract its associated icon and add it to the list view's image list
+                if (File.Exists(process.ImageName))
+                {
+                    if (process.ImageName != null)
+                        using (var icon = Icon.ExtractAssociatedIcon(process.ImageName))
+                        {
+                            if (icon != null)
+                            {
+                                lstProcesses.SmallImageList.Images.Add(iconKey, (Icon)icon.Clone());
+                            }
+                            else
+                            {
+                                iconKey = defaultIconKey;
+                            }
+                        }
+                    else
                     {
-                        if (File.Exists(p.ImageName))
-                            lstProcesses.SmallImageList.Images.Add(p.ProcessId.ToString(),
-                                Icon.ExtractAssociatedIcon(p.ImageName));
+                            iconKey = defaultIconKey;
+                    }
+                }
+                else
+                {
+                    iconKey = defaultIconKey;
+                }
 
-                        return new ListViewItem(Path.GetFileNameWithoutExtension(p.ImageName), p.ProcessId.ToString());
-                    }).ToArray());
+                // Create a new list view item for the process and add it to the list view
+                var listViewItem = new ListViewItem(displayName, iconKey);
+                lstProcesses.Items.Add(listViewItem);
+            }
         }
 
         private void OnRefreshClick(object sender, EventArgs e)
