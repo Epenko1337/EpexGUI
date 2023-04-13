@@ -1,6 +1,4 @@
 ﻿using System;
-using System.Net;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
 
 namespace WireSockUI.Native
@@ -37,37 +35,20 @@ namespace WireSockUI.Native
         /// </remarks>
         public static bool IsValidCidr(string cidr)
         {
-            try
-            {
-                var parts = cidr.Split('/');
-                if (parts.Length != 2) return false;
+            var parts = cidr.Split('/');
+            if (parts.Length != 2) return false;
 
-                if (!IPAddress.TryParse(parts[0], out var ipAddress)) return false;
+            if (!int.TryParse(parts[1], out var prefixLength)) return false;
 
-                if (!int.TryParse(parts[1], out var prefixLength)) return false;
-
-                switch (ipAddress.AddressFamily)
-                {
-                    case AddressFamily.InterNetwork:
-                    {
-                        if (prefixLength < 0 || prefixLength > 32) return false;
-                        break;
-                    }
-                    case AddressFamily.InterNetworkV6:
-                    {
-                        if (prefixLength < 0 || prefixLength > 128) return false;
-                        break;
-                    }
-                    default:
-                        return false;
-                }
-
+            if (ParseNetworkString(parts[0], NetString.NetStringIpv4Address) == 0 &&
+                0 <= prefixLength && prefixLength <= 32)
                 return true;
-            }
-            catch (Exception)
-            {
-                return false;
-            }
+
+            if (ParseNetworkString(parts[0], NetString.NetStringIpv6Address) == 0 &&
+                0 <= prefixLength && prefixLength <= 128)
+                return true;
+
+            return false;
         }
 
         /// <summary>
