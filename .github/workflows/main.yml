@@ -10,6 +10,11 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+    strategy:
+      matrix:
+        platform:
+          - AnyCPU
+          - ARM64
     if: github.event_name == 'push'
     steps:
       - name: Checkout from GitHub
@@ -26,19 +31,19 @@ jobs:
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
       - name: Build
-        run: msbuild WireSockUI/WireSockUI.csproj -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Version=${{ env.VERSION }} -property:Repository=${{ github.repository }}
+        run: msbuild WireSockUI/WireSockUI.csproj -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=${{ matrix.platform }} -property:Version=${{ env.VERSION }} -property:Repository=${{ github.repository }}
 
       - name: Package Release
         uses: thedoctor0/zip-release@0.7.1
         with:
           type: 'zip'
-          filename: 'WireSockUI-${{ github.ref_name }}.zip'
-          directory: 'bin\exe\Release'
+          filename: 'WireSockUI-${{ github.ref_name }}-${{ matrix.platform }}.zip'
+          directory: 'bin\exe\${{ matrix.platform }}\Release'
           exclusions: '*.pdb'
 
       - name: Upload Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: 'bin\exe\Release\WireSockUI-${{ github.ref_name }}.zip'
-          name: 'WireSockUI-${{ github.ref_name }}'
+          artifacts: 'bin\exe\${{ matrix.platform }}\Release\WireSockUI-${{ github.ref_name }}-${{ matrix.platform }}.zip'
+          name: 'WireSockUI-${{ github.ref_name }}-${{ matrix.platform }}'
           token: ${{ secrets.GITHUB_TOKEN }}
