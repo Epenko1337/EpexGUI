@@ -6,7 +6,7 @@ on:
       - '*'
 
 jobs:
-  build-and-publish-release:
+  build-and-package:
     runs-on: windows-latest
     permissions:
       contents: write
@@ -40,11 +40,37 @@ jobs:
           filename: 'WireSockUI-${{ github.ref_name }}-${{ matrix.platform }}.zip'
           directory: 'bin\exe\${{ matrix.platform }}\Release'
           exclusions: '*.pdb'
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: ${{ matrix.platform }}-artifact
+          path: 'bin\exe\${{ matrix.platform }}\Release\WireSockUI-${{ github.ref_name }}-${{ matrix.platform }}.zip'
+
+  upload-release:
+    needs: build-and-package
+    runs-on: windows-latest
+    steps:
+      - name: Checkout from GitHub
+        uses: actions/checkout@v3
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v2
+        with:
+          path: 'artifacts'
+
+      - name: Parse Version
+        shell: bash
+        run: |
+          # Strip "v" prefix from tag name 
+          VERSION=$(echo ${{ github.ref_name }} | sed -e 's/^v//') 
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
       - name: Upload Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: 'bin\exe\${{ matrix.platform }}\Release\WireSockUI-${{ github.ref_name }}-${{ matrix.platform }}.zip'
-          name: 'WireSockUI-${{ github.ref_name }}-${{ matrix.platform }}'
-          tag_name: '${{ github.ref_name }}-${{ matrix.platform }}'
+          artifacts: 'artifacts/**/*.zip'
+          name: 'WireSockUI-${{ github.ref_name }}'
+          tag: ${{ github.ref_name }}
           token: ${{ secrets.GITHUB_TOKEN }}
+          skipIfReleaseExists: true
