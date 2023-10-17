@@ -245,6 +245,8 @@ namespace WireSockUI.Forms
                     btnActivate.Enabled = true;
                     imgStatus.Focus();
 
+                    this.cmiDeactivateTunnel.Enabled = true;
+
                     lstProfiles.Items[_wiresock.ProfileName].ImageKey = ConnectionState.Connecting.ToString();
 
                     trayIcon.Text = Resources.TrayActivating;
@@ -267,6 +269,8 @@ namespace WireSockUI.Forms
 
                     cmiAddresses.Text = txtAddresses.Text;
                     cmiAddresses.Visible = true;
+
+                    this.cmiDeactivateTunnel.Enabled = true;
 
                     foreach (ToolStripItem item in mnuContext.Items)
                         if (item is ToolStripMenuItem menuItem && Equals(menuItem.Tag, "tunnel"))
@@ -301,6 +305,8 @@ namespace WireSockUI.Forms
 
                     cmiAddresses.Text = string.Empty;
                     cmiAddresses.Visible = false;
+
+                    this.cmiDeactivateTunnel.Enabled = false;
 
                     foreach (ToolStripItem item in mnuContext.Items)
                         if (item is ToolStripMenuItem menuItem && Equals(menuItem.Tag, "tunnel"))
@@ -345,6 +351,11 @@ namespace WireSockUI.Forms
             else
                 MessageBox.Show(Resources.LastProfileNotFound, Resources.DialogAutoConnect, MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
+        }
+
+        private void OnDisconnectClick(object sender, EventArgs e)
+        {
+            UpdateState(ConnectionState.Disconnected);
         }
 
         private void OnExitClick(object sender, EventArgs e)

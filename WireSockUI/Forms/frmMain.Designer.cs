@@ -37,6 +37,7 @@ namespace WireSockUI.Forms
             this.cmiStatus = new System.Windows.Forms.ToolStripMenuItem();
             this.cmiAddresses = new System.Windows.Forms.ToolStripMenuItem();
             this.cmiSepTunnels = new System.Windows.Forms.ToolStripSeparator();
+            this.cmiDeactivateTunnel = new System.Windows.Forms.ToolStripMenuItem();
             this.cmiManageTunnels = new System.Windows.Forms.ToolStripMenuItem();
             this.cmiOpenTunnel = new System.Windows.Forms.ToolStripMenuItem();
             this.cmiSepBottom = new System.Windows.Forms.ToolStripSeparator();
@@ -101,6 +102,7 @@ namespace WireSockUI.Forms
             this.cmiStatus,
             this.cmiAddresses,
             this.cmiSepTunnels,
+            this.cmiDeactivateTunnel,
             this.cmiManageTunnels,
             this.cmiOpenTunnel,
             this.cmiSepBottom,
@@ -131,6 +133,15 @@ namespace WireSockUI.Forms
             this.cmiSepTunnels.Name = "cmiSepTunnels";
             this.resMenu.SetResourceKey(this.cmiSepTunnels, null);
             this.cmiSepTunnels.Size = new System.Drawing.Size(207, 6);
+            // 
+            // cmiDeactivateTunnel
+            // 
+            this.cmiDeactivateTunnel.Enabled = false;
+            this.cmiDeactivateTunnel.Name = "cmiDeactivateTunnel";
+            this.resMenu.SetResourceKey(this.cmiDeactivateTunnel, null);
+            this.cmiDeactivateTunnel.Size = new System.Drawing.Size(210, 22);
+            this.cmiDeactivateTunnel.Text = "Deactivate tunnel";
+            this.cmiDeactivateTunnel.Click += new System.EventHandler(this.OnDisconnectClick);
             // 
             // cmiManageTunnels
             // 
@@ -555,6 +566,7 @@ namespace WireSockUI.Forms
         private TableLayoutPanel layoutState;
         private ContextMenuStrip mnuContext;
         private ToolStripMenuItem cmiExit;
+        private ToolStripMenuItem cmiDeactivateTunnel;
         private ToolStripMenuItem cmiManageTunnels;
         private ToolStripSeparator cmiSepBottom;
         private ToolStripMenuItem cmiOpenTunnel;
