@@ -509,7 +509,7 @@ namespace WireSockUI.Forms
             else
             {
                 // Update the state to disconnected.
-                UpdateState(ConnectionState.Disconnected);
+                UpdateState(ConnectionState.Disconnected, false);
             }
 
             // Set the tunnel mode based on the application settings.
