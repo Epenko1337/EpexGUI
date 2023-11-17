@@ -124,7 +124,7 @@
     <value>Import error</value>
   </data>
   <data name="AppNoWireSockMessage" xml:space="preserve">
-    <value>WireSock needs to be installed for WireSockUI to function.</value>
+    <value>WireSock VPN Client needs to be installed for WireSockUI to function.</value>
   </data>
   <data name="AlreadyRunningTitle" xml:space="preserve">
     <value>Already Running</value>

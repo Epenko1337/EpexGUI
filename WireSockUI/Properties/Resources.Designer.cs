@@ -97,7 +97,7 @@ namespace WireSockUI.Properties {
         }
         
         /// <summary>
-        ///   Looks up a localized string similar to WireSock needs to be installed for WireSockUI to function..
+        ///   Looks up a localized string similar to WireSock VPN Client needs to be installed for WireSockUI to function..
         /// </summary>
         internal static string AppNoWireSockMessage {
             get {
@@ -881,6 +881,7 @@ namespace WireSockUI.Properties {
         ///; Local address in CIDR format
         ///Address = 172.16.0.2/32
         ///MTU = 1280
+        ///ListenPort = 49152
         ///DNS = 1.0.0.1, 1.1.1.1
         ///
         ///; Peer Definition
@@ -891,8 +892,7 @@ namespace WireSockUI.Properties {
         ///; Peer IPv4, IPv6 or DNS endpoint with port
         ///Endpoint = myserver.dyndns.org:51820
         ///AllowedIPs = 0.0.0.0/0, ::/0
-        ///; Optional: Send persistent keep alive packets every 5 minutes (900 sec)
-        ///Persisten [rest of string was truncated]&quot;;.
+        ///; Optional: Send persistent keep alive packets every 5 minutes  [rest of string was truncated]&quot;;.
         /// </summary>
         internal static string template_conf {
             get {

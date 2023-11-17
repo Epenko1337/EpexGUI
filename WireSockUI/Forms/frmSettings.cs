@@ -1,10 +1,9 @@
-﻿using Microsoft.Win32;
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Reflection;
 using System.Windows.Forms;
-using WireSockUI.Properties;
 using Microsoft.Win32.TaskScheduler;
+using WireSockUI.Properties;
 
 namespace WireSockUI.Forms
 {
@@ -58,16 +57,27 @@ namespace WireSockUI.Forms
                     td.Triggers.Add(new LogonTrigger()); // Trigger on logon
 
                     var appPath = Assembly.GetExecutingAssembly().Location;
-                    td.Actions.Add(new ExecAction(appPath, null, null)); // Path to the executable
+                    td.Actions.Add(new ExecAction(appPath)); // Path to the executable
+
+                    // Set power and idle options
+                    td.Settings.DisallowStartIfOnBatteries =
+                        false; // Allow the task to start if the computer is running on batteries
+                    td.Settings.StopIfGoingOnBatteries =
+                        false; // Do not stop the task if the computer switches to battery power
+                    td.Settings.WakeToRun = true; // Allow the task to wake the computer if needed
+                    td.Settings.IdleSettings.StopOnIdleEnd =
+                        false; // Do not stop the task when the computer ceases to be idle
 
                     ts.RootFolder.RegisterTaskDefinition(GetAppName(), td);
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error enabling autorun: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Error enabling autorun: " + ex.Message, "Error", MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
             }
         }
+
 
         private static void DisableAutoRun()
         {
@@ -80,7 +90,8 @@ namespace WireSockUI.Forms
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error disabling autorun: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Error disabling autorun: " + ex.Message, "Error", MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
             }
         }
 
