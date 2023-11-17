@@ -1,18 +1,15 @@
-﻿using System;
+﻿using Microsoft.Win32;
+using System;
 using System.Diagnostics;
-using System.IO;
 using System.Reflection;
 using System.Windows.Forms;
-using WireSockUI.Native;
 using WireSockUI.Properties;
+using Microsoft.Win32.TaskScheduler;
 
 namespace WireSockUI.Forms
 {
     public partial class FrmSettings : Form
     {
-        private static readonly string LinkFile =
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "WireSockUI.lnk");
-
         public FrmSettings()
         {
             InitializeComponent();
@@ -27,7 +24,7 @@ namespace WireSockUI.Forms
             ddlLogLevel.SelectedItem = Settings.Default.LogLevel;
 
             // If the shortcut exists, and the setting does not match update it to reflect the actual status
-            chkAutorun.Checked = File.Exists(LinkFile);
+            chkAutorun.Checked = IsAutoRunEnabled();
         }
 
         private void OnProfilesFolderClick(object sender, EventArgs e)
@@ -35,18 +32,66 @@ namespace WireSockUI.Forms
             Process.Start("explorer.exe", Global.MainFolder);
         }
 
+        private static string GetAppName()
+        {
+            return Assembly.GetExecutingAssembly().GetName().Name;
+        }
+
+        private static bool IsAutoRunEnabled()
+        {
+            using (var ts = new TaskService())
+            {
+                return ts.FindTask(GetAppName()) != null;
+            }
+        }
+
+        private static void EnableAutoRun()
+        {
+            try
+            {
+                using (var ts = new TaskService())
+                {
+                    var td = ts.NewTask();
+                    td.RegistrationInfo.Description = "Auto start for " + GetAppName();
+                    td.Principal.RunLevel = TaskRunLevel.Highest; // Run with the highest privileges
+
+                    td.Triggers.Add(new LogonTrigger()); // Trigger on logon
+
+                    var appPath = Assembly.GetExecutingAssembly().Location;
+                    td.Actions.Add(new ExecAction(appPath, null, null)); // Path to the executable
+
+                    ts.RootFolder.RegisterTaskDefinition(GetAppName(), td);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error enabling autorun: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private static void DisableAutoRun()
+        {
+            try
+            {
+                using (var ts = new TaskService())
+                {
+                    ts.RootFolder.DeleteTask(GetAppName(), false);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error disabling autorun: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
         private void OnSaveClick(object sender, EventArgs e)
         {
             if (Settings.Default.AutoRun != chkAutorun.Checked)
             {
-                if (!chkAutorun.Checked && File.Exists(LinkFile))
-                    File.Delete(LinkFile);
+                if (!chkAutorun.Checked)
+                    DisableAutoRun();
                 else
-                    using (var link = new ShellLink())
-                    {
-                        link.TargetPath = Assembly.GetExecutingAssembly().Location;
-                        link.Save(LinkFile);
-                    }
+                    EnableAutoRun();
 
                 Settings.Default.AutoRun = chkAutorun.Checked;
             }

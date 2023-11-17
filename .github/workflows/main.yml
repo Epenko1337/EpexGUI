@@ -32,6 +32,12 @@ jobs:
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@v1
 
+      - name: Install NuGet CLI
+        run: choco install nuget.commandline
+
+      - name: Restore NuGet Packages
+        run: nuget restore WireSockUI.sln
+
       - name: Parse Version
         shell: bash
         run: |
