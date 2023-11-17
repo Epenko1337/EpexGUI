@@ -9,7 +9,7 @@ using WireSockUI.Properties;
 
 namespace WireSockUI.Forms
 {
-    public partial class FrmEdit : Form
+    public sealed partial class FrmEdit : Form
     {
         private static readonly Regex ProfileMatch =
             new Regex(@"^\s*((?<comment>[;#].*)|(?<section>\[\w+\])|((?<key>[a-zA-Z0-9]+)[ \t]*=[ \t]*(?<value>.*?)))$",
@@ -219,7 +219,9 @@ namespace WireSockUI.Forms
                         {
                             foreach (Match e in MultiValueMatch.Matches(value))
                                 if (!string.IsNullOrWhiteSpace(e.Value) &&
-                                    !Regex.IsMatch(e.Value, @"^[a-z0-9_-]+$", RegexOptions.IgnoreCase))
+                                    !Regex.IsMatch(e.Value,
+                                        @"^(?:[a-zA-Z]:\\)?(?:[^<>:\\\""/\\|?*\n\r]+\\)*[^<>:\\\""/\\|?*\n\r]*$",
+                                        RegexOptions.IgnoreCase))
                                 {
                                     txtEditor.SelectionStart = m.Groups["value"].Index + e.Index;
                                     txtEditor.SelectionLength = e.Length;

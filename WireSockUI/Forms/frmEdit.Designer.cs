@@ -1,6 +1,6 @@
 ﻿namespace WireSockUI.Forms
 {
-    partial class FrmEdit
+    sealed partial class FrmEdit
     {
         /// <summary>
         /// Required designer variable.
