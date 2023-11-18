@@ -27,7 +27,12 @@ namespace WireSockUI.Forms
             Text = Resources.EditProfileTitleNew;
             txtEditor.Text = Resources.template_conf;
 
-            ApplySyntaxHighlighting();
+            var textChanged = ApplySyntaxHighlighting();
+            if (textChanged)
+            {
+                // Call it again to reapply highlighting
+                ApplySyntaxHighlighting();
+            }
         }
 
         public FrmEdit(string config)
@@ -39,17 +44,23 @@ namespace WireSockUI.Forms
             txtProfileName.Text = config.ToLowerInvariant();
             txtEditor.Text = File.ReadAllText(Path.Combine(Global.ConfigsFolder, config + ".conf"));
 
-            ApplySyntaxHighlighting();
+            var textChanged = ApplySyntaxHighlighting();
+            if (textChanged)
+            {
+                // Call it again to reapply highlighting
+                ApplySyntaxHighlighting();
+            }
         }
 
         public string ReturnValue { get; private set; }
 
-        private void ApplySyntaxHighlighting()
+        private bool ApplySyntaxHighlighting()
         {
-            if (_highlighting) return;
+            if (_highlighting) return false;
             _highlighting = true;
 
             var hasErrors = false;
+            var textChanged = false;
 
             // Saving the original settings
             var originalIndex = txtEditor.SelectionStart;
@@ -129,23 +140,50 @@ namespace WireSockUI.Forms
                     {
                         // base64 256-bit keys
                         case "privatekey":
+                        {
+                            if (string.IsNullOrEmpty(value))
+                            {
+                                // Generate a new private key
+                                var newPrivateKey = Curve25519.CreateRandomPrivateKey();
+                                var base64PrivateKey = Convert.ToBase64String(newPrivateKey);
+
+                                // Insert the new private key into the text editor
+                                txtEditor.SelectionStart = m.Groups["value"].Index;
+                                txtEditor.SelectionLength = m.Groups["value"].Length;
+                                txtEditor.SelectedText = base64PrivateKey;
+
+                                // Update the public key display
+                                txtPublicKey.Text = Convert.ToBase64String(Curve25519.GetPublicKey(newPrivateKey));
+                                textChanged = true; // Set flag to true as text is changed
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    var binaryKey = Convert.FromBase64String(value);
+                                    if (binaryKey.Length != 32)
+                                        throw new FormatException();
+
+                                    txtPublicKey.Text = Convert.ToBase64String(Curve25519.GetPublicKey(binaryKey));
+                                }
+                                catch (FormatException)
+                                {
+                                    txtEditor.UnderlineSelection();
+                                    hasErrors = true;
+                                }
+                            }
+                        }
+                            break;
                         case "publickey":
                         case "presharedkey":
                         {
                             if (!string.IsNullOrEmpty(value))
                                 try
                                 {
-                                    if (key == "privatekey")
-                                        txtPublicKey.Text = string.Empty;
-
                                     var binaryKey = Convert.FromBase64String(value);
 
                                     if (binaryKey.Length != 32)
                                         throw new FormatException();
-
-                                    // Convert Peer.PrivateKey into PublicKey for display
-                                    if (key == "privatekey")
-                                        txtPublicKey.Text = Convert.ToBase64String(Curve25519.GetPublicKey(binaryKey));
                                 }
                                 catch (FormatException)
                                 {
@@ -255,6 +293,7 @@ namespace WireSockUI.Forms
             btnSave.Enabled = !hasErrors;
 
             _highlighting = false;
+            return textChanged;
         }
 
         private void Initialize()
@@ -316,7 +355,12 @@ namespace WireSockUI.Forms
 
         private void OnProfileChanged(object sender, EventArgs e)
         {
-            ApplySyntaxHighlighting();
+            var textChanged = ApplySyntaxHighlighting();
+            if (textChanged)
+            {
+                // Call it again to reapply highlighting
+                ApplySyntaxHighlighting();
+            }
         }
     }
 }
