@@ -1,9 +1,9 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Management;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
-using System.Management;
 using WireSockUI.Config;
 using WireSockUI.Properties;
 using static WireSockUI.Native.WireguardBoosterExports;
@@ -226,18 +226,18 @@ namespace WireSockUI
         }
 
         /// <summary>
-        /// Changes the NetConnectionID of a network adapter identified by its friendly name.
+        ///     Changes the NetConnectionID of a network adapter identified by its friendly name.
         /// </summary>
         /// <remarks>
-        /// This function uses Windows Management Instrumentation (WMI) to locate a network adapter based on its friendly name.
-        /// Once found, it changes the adapter's NetConnectionID to the specified new name. This is particularly useful for
-        /// managing and identifying network connections programmatically. The function iterates through all matching network
-        /// adapters and updates their NetConnectionID, if it is not null or empty.
+        ///     This function uses Windows Management Instrumentation (WMI) to locate a network adapter based on its friendly name.
+        ///     Once found, it changes the adapter's NetConnectionID to the specified new name. This is particularly useful for
+        ///     managing and identifying network connections programmatically. The function iterates through all matching network
+        ///     adapters and updates their NetConnectionID, if it is not null or empty.
         /// </remarks>
         /// <param name="adapterFriendlyName">The friendly name of the network adapter whose NetConnectionID is to be changed.</param>
         /// <param name="newName">The new NetConnectionID to be assigned to the network adapter.</param>
         /// <example>
-        /// <code>
+        ///     <code>
         /// ChangeNetConnectionIdByAdapterName("Ethernet", "NewEthernetConnection");
         /// </code>
         /// </example>
@@ -285,11 +285,9 @@ namespace WireSockUI
                 _handle = IntPtr.Zero;
                 return false;
             }
-            
+
             if (TunnelMode == Mode.VirtualAdapter)
-            {
                 ChangeNetConnectionIdByAdapterName("Wiresock Virtual Adapter", profile);
-            }
 
             if (!_startTunnel(_handle))
             {

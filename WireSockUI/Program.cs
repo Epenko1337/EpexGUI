@@ -2,7 +2,6 @@
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
-using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using WireSockUI.Extensions;
@@ -21,13 +20,6 @@ namespace WireSockUI
 
             if (!Directory.Exists(Global.MainFolder)) Directory.CreateDirectory(Global.MainFolder);
             if (!Directory.Exists(Global.ConfigsFolder)) Directory.CreateDirectory(Global.ConfigsFolder);
-
-            if (IsApplicationAlreadyRunning())
-            {
-                MessageBox.Show(Resources.AlreadyRunningMessage, Resources.AlreadyRunningTitle, MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
-                Environment.Exit(1);
-            }
 
             if (!IsWireSockInstalled())
             {
@@ -124,32 +116,6 @@ namespace WireSockUI
 
                 return File.Exists(wiresockLocation);
             }
-        }
-
-        /// <summary>
-        ///     Determines if another instance of the current application is already running.
-        /// </summary>
-        /// <returns>
-        ///     A boolean value that is true if another instance of the application is already running,
-        ///     and false if the current instance is the only one running.
-        /// </returns>
-        /// <remarks>
-        ///     This function uses a named Mutex (a synchronization primitive) to check if it has been
-        ///     created before. If the Mutex is not new, that means another instance of the application
-        ///     is already running.
-        /// </remarks>
-        private static bool IsApplicationAlreadyRunning()
-        {
-            const string mutexName = "Global\\WiresockClientService";
-            Global.AlreadyRunning = new Mutex(true, mutexName, out var createdNew);
-
-            if (!createdNew)
-            {
-                Global.AlreadyRunning.Dispose();
-                return true;
-            }
-
-            return false;
         }
     }
 }

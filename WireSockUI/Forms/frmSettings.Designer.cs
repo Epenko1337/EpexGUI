@@ -36,8 +36,10 @@
             this.ddlLogLevel = new System.Windows.Forms.ComboBox();
             this.lblLogLevel = new System.Windows.Forms.Label();
             this.chkUseAdapter = new System.Windows.Forms.CheckBox();
-            this.resControls = new WireSockUI.Extensions.ControlTextExtender();
             this.chkAutoUpdate = new System.Windows.Forms.CheckBox();
+            this.chkNotify = new System.Windows.Forms.CheckBox();
+            this.resControls = new WireSockUI.Extensions.ControlTextExtender();
+            this.chkDisableAutoAdmin = new System.Windows.Forms.CheckBox();
             ((System.ComponentModel.ISupportInitialize)(this.resControls)).BeginInit();
             this.SuspendLayout();
             // 
@@ -52,11 +54,11 @@
             this.chkAutorun.Text = "Run when Windows starts";
             this.chkAutorun.UseVisualStyleBackColor = true;
             // 
-            // chkMinimizeTray
+            // chkAutoMinimize
             // 
             this.chkAutoMinimize.AutoSize = true;
             this.chkAutoMinimize.Location = new System.Drawing.Point(12, 38);
-            this.chkAutoMinimize.Name = "chkMinimizeTray";
+            this.chkAutoMinimize.Name = "chkAutoMinimize";
             this.resControls.SetResourceKey(this.chkAutoMinimize, "SettingsAutoMinimize");
             this.chkAutoMinimize.Size = new System.Drawing.Size(136, 17);
             this.chkAutoMinimize.TabIndex = 1;
@@ -76,7 +78,7 @@
             // 
             // btnSave
             // 
-            this.btnSave.Location = new System.Drawing.Point(12, 190);
+            this.btnSave.Location = new System.Drawing.Point(12, 254);
             this.btnSave.Name = "btnSave";
             this.resControls.SetResourceKey(this.btnSave, "SettingsSave");
             this.btnSave.Size = new System.Drawing.Size(75, 25);
@@ -87,7 +89,7 @@
             // 
             // btnOpenFolder
             // 
-            this.btnOpenFolder.Location = new System.Drawing.Point(93, 190);
+            this.btnOpenFolder.Location = new System.Drawing.Point(89, 254);
             this.btnOpenFolder.Name = "btnOpenFolder";
             this.resControls.SetResourceKey(this.btnOpenFolder, "SettingsProfiles");
             this.btnOpenFolder.Size = new System.Drawing.Size(121, 25);
@@ -105,7 +107,7 @@
             "Info",
             "Error",
             "All"});
-            this.ddlLogLevel.Location = new System.Drawing.Point(12, 157);
+            this.ddlLogLevel.Location = new System.Drawing.Point(12, 217);
             this.ddlLogLevel.Name = "ddlLogLevel";
             this.resControls.SetResourceKey(this.ddlLogLevel, null);
             this.ddlLogLevel.Size = new System.Drawing.Size(121, 21);
@@ -114,7 +116,7 @@
             // lblLogLevel
             // 
             this.lblLogLevel.AutoSize = true;
-            this.lblLogLevel.Location = new System.Drawing.Point(9, 141);
+            this.lblLogLevel.Location = new System.Drawing.Point(12, 201);
             this.lblLogLevel.Name = "lblLogLevel";
             this.resControls.SetResourceKey(this.lblLogLevel, "SettingsLogLevel");
             this.lblLogLevel.Size = new System.Drawing.Size(70, 13);
@@ -131,10 +133,6 @@
             this.chkUseAdapter.TabIndex = 6;
             this.chkUseAdapter.Text = "Virtual Network Adapter mode";
             // 
-            // resControls
-            // 
-            this.resControls.ResourceClassName = "WireSockUI.Properties.Resources";
-            // 
             // chkAutoUpdate
             // 
             this.chkAutoUpdate.AutoSize = true;
@@ -146,11 +144,39 @@
             this.chkAutoUpdate.Text = "Check online for updates";
             this.chkAutoUpdate.UseVisualStyleBackColor = true;
             // 
-            // frmSettings
+            // chkNotify
+            // 
+            this.chkNotify.AutoSize = true;
+            this.chkNotify.Checked = true;
+            this.chkNotify.CheckState = System.Windows.Forms.CheckState.Checked;
+            this.chkNotify.Location = new System.Drawing.Point(12, 142);
+            this.chkNotify.Name = "chkNotify";
+            this.resControls.SetResourceKey(this.chkNotify, null);
+            this.chkNotify.Size = new System.Drawing.Size(192, 17);
+            this.chkNotify.TabIndex = 10;
+            this.chkNotify.Text = "Show notifications on state change";
+            // 
+            // resControls
+            // 
+            this.resControls.ResourceClassName = "WireSockUI.Properties.Resources";
+            // 
+            // chkDisableAutoAdmin
+            // 
+            this.chkDisableAutoAdmin.AutoSize = true;
+            this.chkDisableAutoAdmin.Location = new System.Drawing.Point(12, 168);
+            this.chkDisableAutoAdmin.Name = "chkDisableAutoAdmin";
+            this.resControls.SetResourceKey(this.chkDisableAutoAdmin, null);
+            this.chkDisableAutoAdmin.Size = new System.Drawing.Size(165, 17);
+            this.chkDisableAutoAdmin.TabIndex = 11;
+            this.chkDisableAutoAdmin.Text = "Disable Auto-Admin Elevation";
+            // 
+            // FrmSettings
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(222, 222);
+            this.ClientSize = new System.Drawing.Size(222, 291);
+            this.Controls.Add(this.chkDisableAutoAdmin);
+            this.Controls.Add(this.chkNotify);
             this.Controls.Add(this.chkAutoUpdate);
             this.Controls.Add(this.lblLogLevel);
             this.Controls.Add(this.ddlLogLevel);
@@ -185,5 +211,7 @@
         private System.Windows.Forms.CheckBox chkUseAdapter;
         private Extensions.ControlTextExtender resControls;
         private System.Windows.Forms.CheckBox chkAutoUpdate;
+        private System.Windows.Forms.CheckBox chkNotify;
+        private System.Windows.Forms.CheckBox chkDisableAutoAdmin;
     }
 }

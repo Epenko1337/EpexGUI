@@ -19,11 +19,12 @@ namespace WireSockUI.Notifications
             // Write the icon to local appdata folder for toast notifications
             Icon = $@"{Global.MainFolder}\WireSock.ico";
 
-            if (!File.Exists(Icon))
-                using (var stream = new FileStream(Icon, FileMode.CreateNew))
-                {
-                    Resources.ico.Save(stream);
-                }
+            if (File.Exists(Icon)) return;
+
+            using (var stream = new FileStream(Icon, FileMode.CreateNew))
+            {
+                Resources.ico.Save(stream);
+            }
         }
 
         private static XmlDocument GetXml(string title, string body)

@@ -106,5 +106,35 @@ namespace WireSockUI.Properties {
                 this["UseAdapter"] = value;
             }
         }
+
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("True")]
+        public bool EnableNotifications
+        {
+            get
+            {
+                return ((bool)(this["EnableNotifications"]));
+            }
+            set
+            {
+                this["EnableNotifications"] = value;
+            }
+        }
+
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("False")]
+        public bool DisableAutoAdmin
+        {
+            get
+            {
+                return ((bool)(this["DisableAutoAdmin"]));
+            }
+            set
+            {
+                this["DisableAutoAdmin"] = value;
+            }
+        }
     }
 }

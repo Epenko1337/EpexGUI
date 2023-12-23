@@ -29,10 +29,8 @@ namespace WireSockUI.Forms
 
             var textChanged = ApplySyntaxHighlighting();
             if (textChanged)
-            {
                 // Call it again to reapply highlighting
                 ApplySyntaxHighlighting();
-            }
         }
 
         public FrmEdit(string config)
@@ -41,15 +39,13 @@ namespace WireSockUI.Forms
 
             Text = string.Format(Resources.EditProfileTitle, config);
 
-            txtProfileName.Text = config.ToLowerInvariant();
+            txtProfileName.Text = config; //.ToLowerInvariant();
             txtEditor.Text = File.ReadAllText(Path.Combine(Global.ConfigsFolder, config + ".conf"));
 
             var textChanged = ApplySyntaxHighlighting();
             if (textChanged)
-            {
                 // Call it again to reapply highlighting
                 ApplySyntaxHighlighting();
-            }
         }
 
         public string ReturnValue { get; private set; }
@@ -357,10 +353,8 @@ namespace WireSockUI.Forms
         {
             var textChanged = ApplySyntaxHighlighting();
             if (textChanged)
-            {
                 // Call it again to reapply highlighting
                 ApplySyntaxHighlighting();
-            }
         }
     }
 }

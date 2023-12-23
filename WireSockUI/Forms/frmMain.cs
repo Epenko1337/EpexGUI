@@ -1,9 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Security.Principal;
 using System.Threading;
 using System.Windows.Forms;
 using WireSockUI.Config;
@@ -43,6 +45,34 @@ namespace WireSockUI.Forms
         {
             InitializeComponent();
 
+            // Don't try to elevate when running under debugger
+            if (!Debugger.IsAttached)
+                if (!IsCurrentProcessElevated() && !Settings.Default.DisableAutoAdmin)
+                    try
+                    {
+                        var startInfo = new ProcessStartInfo
+                        {
+                            UseShellExecute = true,
+                            WorkingDirectory = Environment.CurrentDirectory,
+                            FileName = Application.ExecutablePath,
+                            Verb = "runas"
+                        };
+                        Process.Start(startInfo);
+                        Environment.Exit(1);
+                    }
+                    catch
+                    {
+                        // If the user refused the elevation, or an error occurred
+                        // MessageBox.Show("Unable to run as administrator. Continuing as normal user.");
+                    }
+
+            if (IsApplicationAlreadyRunning())
+            {
+                MessageBox.Show(Resources.AlreadyRunningMessage, Resources.AlreadyRunningTitle, MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                Environment.Exit(1);
+            }
+
             _tunnelConnectionWorker = InitializeTunnelConnectionWorker();
             _tunnelStateWorker = InitTunnelStateWorker();
 
@@ -77,6 +107,38 @@ namespace WireSockUI.Forms
             // Create a new WireSockManager instance, attached to the logging control
             _wiresock = new WireSockManager(OnWireSockLogMessage);
             _wiresock.LogLevel = _wiresock.LogLevelSetting;
+        }
+
+        private static bool IsCurrentProcessElevated()
+        {
+            using (var identity = WindowsIdentity.GetCurrent())
+            {
+                var principal = new WindowsPrincipal(identity);
+                return principal.IsInRole(WindowsBuiltInRole.Administrator);
+            }
+        }
+
+        /// <summary>
+        ///     Determines if another instance of the current application is already running.
+        /// </summary>
+        /// <returns>
+        ///     A boolean value that is true if another instance of the application is already running,
+        ///     and false if the current instance is the only one running.
+        /// </returns>
+        /// <remarks>
+        ///     This function uses a named Mutex (a synchronization primitive) to check if it has been
+        ///     created before. If the Mutex is not new, that means another instance of the application
+        ///     is already running.
+        /// </remarks>
+        private static bool IsApplicationAlreadyRunning()
+        {
+            const string mutexName = "Global\\WiresockClientService";
+            Global.AlreadyRunning = new Mutex(true, mutexName, out var createdNew);
+
+            if (createdNew) return false;
+
+            Global.AlreadyRunning.Dispose();
+            return true;
         }
 
         /// <summary>
@@ -141,22 +203,21 @@ namespace WireSockUI.Forms
 
             worker.ProgressChanged += (s, e) =>
             {
-                if (e.UserState is WgbStats stats)
-                {
-                    if (layoutState.Controls["txtHandshake"] is TextBox txtHandshake)
-                        txtHandshake.Text = stats.time_since_last_handshake.AsTimeAgo();
+                if (!(e.UserState is WgbStats stats)) return;
 
-                    if (layoutState.Controls["txtTransfer"] is TextBox txtTransfer)
-                        txtTransfer.Text = string.Format(Resources.StateTransferValue,
-                            stats.rx_bytes.AsHumanReadable(),
-                            stats.tx_bytes.AsHumanReadable());
+                if (layoutState.Controls["txtHandshake"] is TextBox txtHandshake)
+                    txtHandshake.Text = stats.time_since_last_handshake.AsTimeAgo();
 
-                    if (layoutState.Controls["txtRTT"] is TextBox txtRtt)
-                        txtRtt.Text = string.Format(Resources.StateRTTValue, stats.estimated_rtt);
+                if (layoutState.Controls["txtTransfer"] is TextBox txtTransfer)
+                    txtTransfer.Text = string.Format(Resources.StateTransferValue,
+                        stats.rx_bytes.AsHumanReadable(),
+                        stats.tx_bytes.AsHumanReadable());
 
-                    if (layoutState.Controls["txtLoss"] is TextBox txtLoss)
-                        txtLoss.Text = string.Format(Resources.StateLossValue, stats.estimated_loss * 100);
-                }
+                if (layoutState.Controls["txtRTT"] is TextBox txtRtt)
+                    txtRtt.Text = string.Format(Resources.StateRTTValue, stats.estimated_rtt);
+
+                if (layoutState.Controls["txtLoss"] is TextBox txtLoss)
+                    txtLoss.Text = string.Format(Resources.StateLossValue, stats.estimated_loss * 100);
             };
 
             return worker;
@@ -241,9 +302,13 @@ namespace WireSockUI.Forms
             switch (state)
             {
                 case ConnectionState.Connecting:
-                    btnActivate.Text = Resources.ButtonActivating;
-                    btnActivate.Enabled = true;
-                    imgStatus.Focus();
+                    if (btnActivate != null)
+                    {
+                        btnActivate.Text = Resources.ButtonActivating;
+                        btnActivate.Enabled = true;
+                    }
+
+                    imgStatus?.Focus();
 
                     cmiDeactivateTunnel.Enabled = true;
 
@@ -255,19 +320,26 @@ namespace WireSockUI.Forms
                         _tunnelConnectionWorker.RunWorkerAsync();
                     break;
                 case ConnectionState.Connected:
-                    btnActivate.Text = Resources.ButtonActive;
-                    btnActivate.Enabled = true;
+                    if (btnActivate != null)
+                    {
+                        btnActivate.Text = Resources.ButtonActive;
+                        btnActivate.Enabled = true;
+                    }
 
-                    imgStatus.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.Activated, 16).ToBitmap();
-                    txtStatus.Text = Resources.InterfaceStatusActive;
+                    if (imgStatus != null)
+                    {
+                        imgStatus.Image = WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.Activated, 16).ToBitmap();
+                        if (txtStatus != null) txtStatus.Text = Resources.InterfaceStatusActive;
 
-                    trayIcon.Icon = Resources.ico.SuperImpose(64, WindowsIcons.Icons.Activated, 48, 24);
-                    trayIcon.Text = Resources.TrayActive;
+                        trayIcon.Icon = Resources.ico.SuperImpose(64, WindowsIcons.Icons.Activated, 48, 24);
+                        trayIcon.Text = Resources.TrayActive;
 
-                    cmiStatus.Image = imgStatus.Image;
+                        cmiStatus.Image = imgStatus.Image;
+                    }
+
                     cmiStatus.Text = Resources.ContextMenuActive;
 
-                    cmiAddresses.Text = txtAddresses.Text;
+                    if (txtAddresses != null) cmiAddresses.Text = txtAddresses.Text;
                     cmiAddresses.Visible = true;
 
                     cmiDeactivateTunnel.Enabled = true;
@@ -286,21 +358,28 @@ namespace WireSockUI.Forms
                     if (!_tunnelStateWorker.IsBusy)
                         _tunnelStateWorker.RunWorkerAsync();
 
-                    if (notify)
+                    if (notify && Settings.Default.EnableNotifications)
                         Notifications.Notifications.Notify(Resources.ToastActiveTitle,
                             string.Format(Resources.ToastActiveMessage, _wiresock.ProfileName));
                     break;
                 case ConnectionState.Disconnected:
-                    btnActivate.Text = Resources.ButtonInactive;
-                    btnActivate.Enabled = true;
+                    if (btnActivate != null)
+                    {
+                        btnActivate.Text = Resources.ButtonInactive;
+                        btnActivate.Enabled = true;
+                    }
 
-                    imgStatus.Image = BitmapExtensions.DrawCircle(16, 15, Brushes.DarkGray);
-                    txtStatus.Text = Resources.InterfaceStatusInactive;
+                    if (imgStatus != null)
+                    {
+                        imgStatus.Image = BitmapExtensions.DrawCircle(16, 15, Brushes.DarkGray);
+                        if (txtStatus != null) txtStatus.Text = Resources.InterfaceStatusInactive;
 
-                    trayIcon.Icon = Resources.ico;
-                    trayIcon.Text = Resources.TrayInactive;
+                        trayIcon.Icon = Resources.ico;
+                        trayIcon.Text = Resources.TrayInactive;
 
-                    cmiStatus.Image = imgStatus.Image;
+                        cmiStatus.Image = imgStatus.Image;
+                    }
+
                     cmiStatus.Text = Resources.ContextMenuInactive;
 
                     cmiAddresses.Text = string.Empty;
@@ -318,7 +397,7 @@ namespace WireSockUI.Forms
                     gbxState.Visible = false;
                     _tunnelStateWorker.CancelAsync();
 
-                    if (notify)
+                    if (notify && Settings.Default.EnableNotifications)
                         Notifications.Notifications.Notify(Resources.ToastInactiveTitle,
                             string.Format(Resources.ToastInactiveMessage, _wiresock.ProfileName));
 
@@ -435,13 +514,12 @@ namespace WireSockUI.Forms
 
             using (var form = new FrmEdit(profile))
             {
-                if (form.ShowDialog() == DialogResult.OK)
-                {
-                    LoadProfiles(form.ReturnValue);
+                if (form.ShowDialog() != DialogResult.OK) return;
 
-                    if (_wiresock.Connected && _wiresock.ProfileName == profile)
-                        OnProfileClick(lstProfiles, EventArgs.Empty);
-                }
+                LoadProfiles(form.ReturnValue);
+
+                if (_wiresock.Connected && _wiresock.ProfileName == profile)
+                    OnProfileClick(lstProfiles, EventArgs.Empty);
             }
         }
 
@@ -511,10 +589,13 @@ namespace WireSockUI.Forms
                 UpdateState(ConnectionState.Disconnected, false);
             }
 
-            // Set the tunnel mode based on the application settings.
-            _wiresock.TunnelMode = Settings.Default.UseAdapter
-                ? WireSockManager.Mode.VirtualAdapter
-                : WireSockManager.Mode.Transparent;
+            if (IsCurrentProcessElevated())
+                // Set the tunnel mode based on the application settings.
+                _wiresock.TunnelMode = Settings.Default.UseAdapter
+                    ? WireSockManager.Mode.VirtualAdapter
+                    : WireSockManager.Mode.Transparent;
+            else
+                _wiresock.TunnelMode = WireSockManager.Mode.Transparent;
 
             // Get the selected profile.
             var profile = lstProfiles.SelectedItems[0].Text;
@@ -575,7 +656,7 @@ namespace WireSockUI.Forms
                         AutoSizeMode = AutoSizeMode.GrowAndShrink,
                         Dock = DockStyle.Left,
                         Name = "btnActivate",
-                        Text = "Activate"
+                        Text = Resources.ButtonInactive
                     };
 
                     btnActivate.Click += OnProfileClick;
@@ -650,11 +731,10 @@ namespace WireSockUI.Forms
             btnEdit.Enabled = e.IsSelected;
             return;
 
-            TextBox AddRow(TableLayoutPanel container, string name, string key, string value, bool isOptional = false,
+            void AddRow(TableLayoutPanel container, string name, string key, string value, bool isOptional = false,
                 Bitmap icon = null)
             {
-                if (isOptional && string.IsNullOrWhiteSpace(value))
-                    return null;
+                if (isOptional && string.IsNullOrWhiteSpace(value)) return;
 
                 container.RowStyles.Add(new RowStyle(SizeType.AutoSize));
                 container.RowCount = container.RowStyles.Count;
@@ -667,7 +747,7 @@ namespace WireSockUI.Forms
                     Margin = new Padding(0, 0, 0, 0),
                     Padding = new Padding(0),
                     TextAlign = ContentAlignment.TopRight,
-                    Text = $"{key}:"
+                    Text = $@"{key}:"
                 };
 
                 container.Controls.Add(label, 0, container.RowCount - 1);
@@ -733,8 +813,6 @@ namespace WireSockUI.Forms
 
                     container.Controls.Add(textBox, 1, container.RowCount - 1);
                 }
-
-                return null;
             }
 
             // Helper function to truncate long strings
@@ -763,14 +841,13 @@ namespace WireSockUI.Forms
         private void OnLayoutPanelResize(object sender, EventArgs e)
         {
             var panel = sender as TableLayoutPanel;
-            if (panel.Width > 0)
+            if (panel != null && panel.Width > 0)
                 panel.ColumnStyles[1].Width = panel.Width - panel.ColumnStyles[0].Width;
 
+            if (panel == null) return;
             foreach (Control control in panel.Controls)
-                if (control is TextBox)
+                if (control is TextBox textBox)
                 {
-                    var textBox = control as TextBox;
-
                     var textHeight = TextRenderer.MeasureText(
                         textBox.Text,
                         textBox.Font,

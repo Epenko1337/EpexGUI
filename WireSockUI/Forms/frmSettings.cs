@@ -1,8 +1,11 @@
 ﻿using System;
 using System.Diagnostics;
+using System.IO;
 using System.Reflection;
+using System.Security.Principal;
 using System.Windows.Forms;
 using Microsoft.Win32.TaskScheduler;
+using WireSockUI.Native;
 using WireSockUI.Properties;
 
 namespace WireSockUI.Forms
@@ -20,10 +23,27 @@ namespace WireSockUI.Forms
             chkAutoConnect.Checked = Settings.Default.AutoConnect;
             chkAutoUpdate.Checked = Settings.Default.AutoUpdate;
             chkUseAdapter.Checked = Settings.Default.UseAdapter;
+            chkNotify.Checked = Settings.Default.EnableNotifications;
+            chkDisableAutoAdmin.Checked = Settings.Default.DisableAutoAdmin;
             ddlLogLevel.SelectedItem = Settings.Default.LogLevel;
 
-            // If the shortcut exists, and the setting does not match update it to reflect the actual status
-            chkAutorun.Checked = IsAutoRunEnabled();
+            if (!IsCurrentProcessElevated())
+            {
+                chkUseAdapter.Enabled = false;
+                chkUseAdapter.Checked = false;
+            }
+
+            chkAutorun.Checked = IsCurrentProcessElevated() ? IsAutoRunEnabled() : IsAutoRunForNonAdminEnabled();
+            Settings.Default.AutoRun = chkAutorun.Checked;
+        }
+
+        private static bool IsCurrentProcessElevated()
+        {
+            using (var identity = WindowsIdentity.GetCurrent())
+            {
+                var principal = new WindowsPrincipal(identity);
+                return principal.IsInRole(WindowsBuiltInRole.Administrator);
+            }
         }
 
         private void OnProfilesFolderClick(object sender, EventArgs e)
@@ -44,6 +64,23 @@ namespace WireSockUI.Forms
             }
         }
 
+        private static bool IsAutoRunForNonAdminEnabled()
+        {
+            try
+            {
+                var startupFolderPath = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+                var shortcutPath = Path.Combine(startupFolderPath, GetAppName() + ".lnk");
+
+                return File.Exists(shortcutPath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error checking auto-run status: " + ex.Message, "Error", MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return false;
+            }
+        }
+
         private static void EnableAutoRun()
         {
             try
@@ -52,6 +89,7 @@ namespace WireSockUI.Forms
                 {
                     var td = ts.NewTask();
                     td.RegistrationInfo.Description = "Auto start for " + GetAppName();
+
                     td.Principal.RunLevel = TaskRunLevel.Highest; // Run with the highest privileges
 
                     td.Triggers.Add(new LogonTrigger()); // Trigger on logon
@@ -78,7 +116,6 @@ namespace WireSockUI.Forms
             }
         }
 
-
         private static void DisableAutoRun()
         {
             try
@@ -95,14 +132,78 @@ namespace WireSockUI.Forms
             }
         }
 
+        private static void EnableAutoRunForNonAdmin()
+        {
+            try
+            {
+                var appPath = Assembly.GetExecutingAssembly().Location;
+                var startupFolderPath = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+                var shortcutPath = Path.Combine(startupFolderPath, GetAppName() + ".lnk");
+
+                using (var link = new ShellLink())
+                {
+                    link.TargetPath = appPath;
+                    // Optionally set other properties like arguments, working directory, etc.
+                    // link.Arguments = "<YourArguments>";
+                    // link.WorkingDirectory = "<YourWorkingDirectory>";
+
+                    link.Save(shortcutPath);
+                }
+
+                MessageBox.Show("Auto-run enabled successfully.", "Success", MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error enabling auto-run: " + ex.Message, "Error", MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private static void DisableAutoRunForNonAdmin()
+        {
+            try
+            {
+                var startupFolderPath = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+                var shortcutPath = Path.Combine(startupFolderPath, GetAppName() + ".lnk");
+
+                if (File.Exists(shortcutPath))
+                {
+                    File.Delete(shortcutPath);
+                    MessageBox.Show("Auto-run disabled successfully.", "Success", MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+                else
+                {
+                    MessageBox.Show("Auto-run shortcut not found.", "Info", MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error disabling auto-run: " + ex.Message, "Error", MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
         private void OnSaveClick(object sender, EventArgs e)
         {
             if (Settings.Default.AutoRun != chkAutorun.Checked)
             {
                 if (!chkAutorun.Checked)
-                    DisableAutoRun();
+                {
+                    if (IsCurrentProcessElevated())
+                        DisableAutoRun();
+                    else
+                        DisableAutoRunForNonAdmin();
+                }
                 else
-                    EnableAutoRun();
+                {
+                    if (IsCurrentProcessElevated())
+                        EnableAutoRun();
+                    else
+                        EnableAutoRunForNonAdmin();
+                }
 
                 Settings.Default.AutoRun = chkAutorun.Checked;
             }
@@ -111,6 +212,8 @@ namespace WireSockUI.Forms
             Settings.Default.AutoMinimize = chkAutoMinimize.Checked;
             Settings.Default.AutoUpdate = chkAutoUpdate.Checked;
             Settings.Default.UseAdapter = chkUseAdapter.Checked;
+            Settings.Default.EnableNotifications = chkNotify.Checked;
+            Settings.Default.DisableAutoAdmin = chkDisableAutoAdmin.Checked;
             Settings.Default.LogLevel = ddlLogLevel.SelectedItem as string;
 
             Settings.Default.Save();
