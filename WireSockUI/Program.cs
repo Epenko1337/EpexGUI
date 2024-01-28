@@ -4,6 +4,7 @@ using System.IO;
 using System.Reflection;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using WireSockUI.Extensions;
 using WireSockUI.Forms;
 using WireSockUI.Properties;
 

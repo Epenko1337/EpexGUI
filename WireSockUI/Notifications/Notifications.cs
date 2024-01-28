@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows.Forms;
 using System.Xml.Linq;
+using Windows.Data.Xml.Dom;
+using Windows.UI.Notifications;
 using WireSockUI.Native;
 using WireSockUI.Properties;
 
