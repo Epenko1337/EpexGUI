@@ -69,8 +69,11 @@ namespace WireSockUI.Forms
             txtEditor.SelectionStart = 0;
             txtEditor.SelectionLength = txtEditor.Text.Length;
             txtEditor.SelectionColor = originalColor;
-            txtEditor.SelectionFont = new Font(txtEditor.SelectionFont, FontStyle.Regular);
 
+            txtEditor.SelectionFont = txtEditor.SelectionFont != null ? new Font(txtEditor.SelectionFont, FontStyle.Regular) :
+                // Handle the null case, e.g., set to a default font
+                new Font("Courier New", 10, FontStyle.Regular);
+          
             foreach (Match m in ProfileMatch.Matches(txtEditor.Text))
             {
                 if (m.Groups["comment"].Success)
