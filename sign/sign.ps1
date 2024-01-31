@@ -20,6 +20,15 @@ foreach ($file in $files) {
     & signtool sign /fd sha1 /t http://timestamp.digicert.com /n "IP SMIRNOV VADIM VALERIEVICH" $exePath
     & signtool sign /as /td sha256 /fd sha256 /tr http://timestamp.digicert.com /n "IP SMIRNOV VADIM VALERIEVICH" $exePath
 
-    $zipPath = $extractPath + ".zip"
-    Compress-Archive -Path $extractPath -DestinationPath $zipPath -Force
+    # Change to the directory of the folder to be zipped
+    Push-Location $extractPath
+
+    # Get all items in the current directory (the extracted folder)
+    $items = Get-ChildItem
+
+    $zipPath = "../" + $folderName + ".zip"
+    Compress-Archive -Path $items -DestinationPath $zipPath -Force
+
+    # Return to the original directory
+    Pop-Location
 }
