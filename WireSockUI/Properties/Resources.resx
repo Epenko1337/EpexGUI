@@ -1,0 +1,463 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <!-- 
+    Microsoft ResX Schema 
+    
+    Version 2.0
+    
+    The primary goals of this format is to allow a simple XML format 
+    that is mostly human readable. The generation and parsing of the 
+    various data types are done through the TypeConverter classes 
+    associated with the data types.
+    
+    Example:
+    
+    ... ado.net/XML headers & schema ...
+    <resheader name="resmimetype">text/microsoft-resx</resheader>
+    <resheader name="version">2.0</resheader>
+    <resheader name="reader">System.Resources.ResXResourceReader, System.Windows.Forms, ...</resheader>
+    <resheader name="writer">System.Resources.ResXResourceWriter, System.Windows.Forms, ...</resheader>
+    <data name="Name1"><value>this is my long string</value><comment>this is a comment</comment></data>
+    <data name="Color1" type="System.Drawing.Color, System.Drawing">Blue</data>
+    <data name="Bitmap1" mimetype="application/x-microsoft.net.object.binary.base64">
+        <value>[base64 mime encoded serialized .NET Framework object]</value>
+    </data>
+    <data name="Icon1" type="System.Drawing.Icon, System.Drawing" mimetype="application/x-microsoft.net.object.bytearray.base64">
+        <value>[base64 mime encoded string representing a byte array form of the .NET Framework object]</value>
+        <comment>This is a comment</comment>
+    </data>
+                
+    There are any number of "resheader" rows that contain simple 
+    name/value pairs.
+    
+    Each data row contains a name, and value. The row also contains a 
+    type or mimetype. Type corresponds to a .NET class that support 
+    text/value conversion through the TypeConverter architecture. 
+    Classes that don't support this are serialized and stored with the 
+    mimetype set.
+    
+    The mimetype is used for serialized objects, and tells the 
+    ResXResourceReader how to depersist the object. This is currently not 
+    extensible. For a given mimetype the value must be set accordingly:
+    
+    Note - application/x-microsoft.net.object.binary.base64 is the format 
+    that the ResXResourceWriter will generate, however the reader can 
+    read any of the formats listed below.
+    
+    mimetype: application/x-microsoft.net.object.binary.base64
+    value   : The object must be serialized with 
+            : System.Runtime.Serialization.Formatters.Binary.BinaryFormatter
+            : and then encoded with base64 encoding.
+    
+    mimetype: application/x-microsoft.net.object.soap.base64
+    value   : The object must be serialized with 
+            : System.Runtime.Serialization.Formatters.Soap.SoapFormatter
+            : and then encoded with base64 encoding.
+
+    mimetype: application/x-microsoft.net.object.bytearray.base64
+    value   : The object must be serialized into a byte array 
+            : using a System.ComponentModel.TypeConverter
+            : and then encoded with base64 encoding.
+    -->
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="metadata">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" />
+              </xsd:sequence>
+              <xsd:attribute name="name" use="required" type="xsd:string" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="mimetype" type="xsd:string" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="assembly">
+            <xsd:complexType>
+              <xsd:attribute name="alias" type="xsd:string" />
+              <xsd:attribute name="name" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="resheader">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="AddProfileExistsMsg" xml:space="preserve">
+    <value>A profile named "{0}" already exists.</value>
+  </data>
+  <data name="AddProfileExistsTitle" xml:space="preserve">
+    <value>Import error</value>
+  </data>
+  <data name="AppNoWireSockMessage" xml:space="preserve">
+    <value>WireSock VPN Client needs to be installed for WireSockUI to function.</value>
+  </data>
+  <data name="AlreadyRunningTitle" xml:space="preserve">
+    <value>Already Running</value>
+  </data>
+  <data name="AlreadyRunningMessage" xml:space="preserve">
+    <value>Another instance of WireSockUI or Wiresock VPN Client Service is already running.</value>
+  </data>
+  <data name="AppNoWireSockTitle" xml:space="preserve">
+    <value>WireSock not found</value>
+  </data>
+  <data name="AppUpdateMessage" xml:space="preserve">
+    <value>A newer WireSockUI client is available for download.</value>
+  </data>
+  <data name="AppUpdateTitle" xml:space="preserve">
+    <value>New version</value>
+  </data>
+  <data name="AppWireSockURL" xml:space="preserve">
+    <value>https://www.wiresock.net/</value>
+  </data>
+  <data name="ButtonActivating" xml:space="preserve">
+    <value>Activating... Click to Cancel</value>
+  </data>
+  <data name="ButtonActive" xml:space="preserve">
+    <value>Deactivate</value>
+  </data>
+  <data name="ButtonEdit" xml:space="preserve">
+    <value>Edit</value>
+  </data>
+  <data name="ButtonInactive" xml:space="preserve">
+    <value>Activate</value>
+  </data>
+  <data name="ContextMenuActive" xml:space="preserve">
+    <value>Status: Active</value>
+  </data>
+  <data name="ContextMenuInactive" xml:space="preserve">
+    <value>Status: Inactive</value>
+  </data>
+  <data name="DeleteProfileConfirmMsg" xml:space="preserve">
+    <value>Do you really want to remove profile "{0}"?</value>
+  </data>
+  <data name="DeleteProfileConfirmTitle" xml:space="preserve">
+    <value>Confirmation</value>
+  </data>
+  <data name="DialogAutoConnect" xml:space="preserve">
+    <value>Connect on start</value>
+  </data>
+  <data name="DialogOpenFileFilter" xml:space="preserve">
+    <value>Wireguard configuration files (*.conf)|*.conf</value>
+  </data>
+  <data name="DialogOpenFileTitle" xml:space="preserve">
+    <value>Select configuration file</value>
+  </data>
+  <data name="EditCancel" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="EditName" xml:space="preserve">
+    <value>Name:</value>
+  </data>
+  <data name="EditProcesses" xml:space="preserve">
+    <value>Processes...</value>
+  </data>
+  <data name="EditProfileCue" xml:space="preserve">
+    <value>Enter profile name...</value>
+  </data>
+  <data name="EditProfileError" xml:space="preserve">
+    <value>Save error</value>
+  </data>
+  <data name="EditProfileNameError" xml:space="preserve">
+    <value>Profile name missing or invalid</value>
+  </data>
+  <data name="EditProfileTitle" xml:space="preserve">
+    <value>Editing configuration {0}</value>
+  </data>
+  <data name="EditProfileTitleNew" xml:space="preserve">
+    <value>New configuration</value>
+  </data>
+  <data name="EditPublicKey" xml:space="preserve">
+    <value>Public key:</value>
+  </data>
+  <data name="EditSave" xml:space="preserve">
+    <value>Save</value>
+  </data>
+  <data name="FormMain" xml:space="preserve">
+    <value>WireSock UI</value>
+  </data>
+  <data name="FormSettings" xml:space="preserve">
+    <value>Settings</value>
+  </data>
+  <data name="FormTaskManager" xml:space="preserve">
+    <value>Select process</value>
+  </data>
+  <assembly alias="System.Windows.Forms" name="System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089" />
+  <data name="ico" type="System.Resources.ResXFileRef, System.Windows.Forms">
+    <value>..\Resources\wiresock.ico;System.Drawing.Icon, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</value>
+  </data>
+  <data name="InterfaceAddresses" xml:space="preserve">
+    <value>Addresses</value>
+  </data>
+  <data name="InterfaceMTU" xml:space="preserve">
+    <value>MTU</value>
+  </data>
+  <data name="InterfaceListenPort" xml:space="preserve">
+    <value>ListenPort</value>
+  </data>
+  <data name="InterfacePublicKey" xml:space="preserve">
+    <value>Public key</value>
+  </data>
+  <data name="InterfaceStatus" xml:space="preserve">
+    <value>Status</value>
+  </data>
+  <data name="InterfaceStatusActive" xml:space="preserve">
+    <value>Active</value>
+  </data>
+  <data name="InterfaceStatusInactive" xml:space="preserve">
+    <value>Inactive</value>
+  </data>
+  <data name="InterfaceTitle" xml:space="preserve">
+    <value>Interface: {0}</value>
+  </data>
+  <data name="LastProfileNotFound" xml:space="preserve">
+    <value>Last saved config not found.</value>
+  </data>
+  <data name="LogTimestampFormat" xml:space="preserve">
+    <value>yyyy-MM-dd HH:mm:ss.fff</value>
+  </data>
+  <data name="MenuAddTunnel" xml:space="preserve">
+    <value>Add Tunnel</value>
+  </data>
+  <data name="MenuDeleteTunnel" xml:space="preserve">
+    <value>Delete Tunnel</value>
+  </data>
+  <data name="MenuEmptyTunnel" xml:space="preserve">
+    <value>Add empty tunnel...</value>
+  </data>
+  <data name="MenuImportTunnel" xml:space="preserve">
+    <value>Import tunnel from file...</value>
+  </data>
+  <data name="MenuSettings" xml:space="preserve">
+    <value>Settings</value>
+  </data>
+  <data name="PanelPeer" xml:space="preserve">
+    <value>Peer</value>
+  </data>
+  <data name="PanelState" xml:space="preserve">
+    <value>State</value>
+  </data>
+  <data name="PeerAllowedApps" xml:space="preserve">
+    <value>Allowed apps</value>
+  </data>
+  <data name="PeerAllowedIPs" xml:space="preserve">
+    <value>Allowed IPs</value>
+  </data>
+  <data name="PeerDisallowedApps" xml:space="preserve">
+    <value>Disallowed apps</value>
+  </data>
+  <data name="PeerDisallowedIPs" xml:space="preserve">
+    <value>Disallowed IPs</value>
+  </data>
+  <data name="PeerEndpoint" xml:space="preserve">
+    <value>Endpoint</value>
+  </data>
+  <data name="PeerPersistentKeepAlive" xml:space="preserve">
+    <value>Persistent keepalive</value>
+  </data>
+  <data name="PeerPresharedKey" xml:space="preserve">
+    <value>Preshared key</value>
+  </data>
+  <data name="PeerPresharedKeyValue" xml:space="preserve">
+    <value>enabled</value>
+  </data>
+  <data name="PeerPublicKey" xml:space="preserve">
+    <value>Public key</value>
+  </data>
+  <data name="PeerSocks5Password" xml:space="preserve">
+    <value>SOCKS5 password</value>
+  </data>
+  <data name="PeerSocks5PasswordValue" xml:space="preserve">
+    <value>configured</value>
+  </data>
+  <data name="PeerSocks5Proxy" xml:space="preserve">
+    <value>SOCKS5 proxy</value>
+  </data>
+  <data name="PeerSocks5Username" xml:space="preserve">
+    <value>SOCKS5 Username</value>
+  </data>
+  <data name="ProcessesSearchCue" xml:space="preserve">
+    <value>Type to search...</value>
+  </data>
+  <data name="ProfileError" xml:space="preserve">
+    <value>Profile error</value>
+  </data>
+  <data name="SettingsAdapterMode" xml:space="preserve">
+    <value>Virtual Network Adapter mode</value>
+  </data>
+  <data name="SettingsAutoConnect" xml:space="preserve">
+    <value>Automatically connect on start</value>
+  </data>
+  <data name="SettingsAutoMinimize" xml:space="preserve">
+    <value>Minimize to tray on start</value>
+  </data>
+  <data name="SettingsAutoRun" xml:space="preserve">
+    <value>Run when Windows starts</value>
+  </data>
+  <data name="SettingsAutoUpdate" xml:space="preserve">
+    <value>Check online for updates</value>
+  </data>
+  <data name="SettingsLogLevel" xml:space="preserve">
+    <value>Log level</value>
+  </data>
+  <data name="SettingsProfiles" xml:space="preserve">
+    <value>Open profiles folder</value>
+  </data>
+  <data name="SettingsSave" xml:space="preserve">
+    <value>Save</value>
+  </data>
+  <data name="SizeBytes" xml:space="preserve">
+    <value>Bytes</value>
+  </data>
+  <data name="SizeFormat" xml:space="preserve">
+    <value>{0:f2} {1}</value>
+  </data>
+  <data name="SizeGB" xml:space="preserve">
+    <value>GiB</value>
+  </data>
+  <data name="SizeKB" xml:space="preserve">
+    <value>KiB</value>
+  </data>
+  <data name="SizeMB" xml:space="preserve">
+    <value>MiB</value>
+  </data>
+  <data name="SizePB" xml:space="preserve">
+    <value>PiB</value>
+  </data>
+  <data name="SizeTB" xml:space="preserve">
+    <value>TiB</value>
+  </data>
+  <data name="StateHandshake" xml:space="preserve">
+    <value>Latest handshake</value>
+  </data>
+  <data name="StateLoss" xml:space="preserve">
+    <value>Estimated loss</value>
+  </data>
+  <data name="StateLossValue" xml:space="preserve">
+    <value>{0}%</value>
+  </data>
+  <data name="StateRTT" xml:space="preserve">
+    <value>Round-trip time</value>
+  </data>
+  <data name="StateRTTValue" xml:space="preserve">
+    <value>{0} ms</value>
+  </data>
+  <data name="StateTransfer" xml:space="preserve">
+    <value>Transfer</value>
+  </data>
+  <data name="StateTransferValue" xml:space="preserve">
+    <value>{0} received, {1} sent</value>
+  </data>
+  <data name="TabPageLog" xml:space="preserve">
+    <value>Log</value>
+  </data>
+  <data name="TabPageTunnels" xml:space="preserve">
+    <value>Tunnels</value>
+  </data>
+  <data name="template.conf" type="System.Resources.ResXFileRef, System.Windows.Forms">
+    <value>..\Resources\template.conf;System.String, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="TimeLapseDay" xml:space="preserve">
+    <value>yesterday</value>
+  </data>
+  <data name="TimeLapseDays" xml:space="preserve">
+    <value> days ago</value>
+  </data>
+  <data name="TimeLapseHour" xml:space="preserve">
+    <value>an hour ago</value>
+  </data>
+  <data name="TimeLapseHours" xml:space="preserve">
+    <value> hours ago</value>
+  </data>
+  <data name="TimeLapseMinute" xml:space="preserve">
+    <value>a minute ago</value>
+  </data>
+  <data name="TimeLapseMinutes" xml:space="preserve">
+    <value> minutes ago</value>
+  </data>
+  <data name="TimeLapseMonth" xml:space="preserve">
+    <value>one month ago</value>
+  </data>
+  <data name="TimeLapseMonths" xml:space="preserve">
+    <value> months ago</value>
+  </data>
+  <data name="TimeLapseSecond" xml:space="preserve">
+    <value>one second ago</value>
+  </data>
+  <data name="TimeLapseSeconds" xml:space="preserve">
+    <value> seconds ago</value>
+  </data>
+  <data name="TimeLapseYear" xml:space="preserve">
+    <value>one year ago</value>
+  </data>
+  <data name="TimeLapseYears" xml:space="preserve">
+    <value> years ago</value>
+  </data>
+  <data name="ToastActiveMessage" xml:space="preserve">
+    <value>The {0} tunnel has been activated.</value>
+  </data>
+  <data name="ToastActiveTitle" xml:space="preserve">
+    <value>WireSock Activated</value>
+  </data>
+  <data name="ToastInactiveMessage" xml:space="preserve">
+    <value>The {0} tunnel has been deactivated.</value>
+  </data>
+  <data name="ToastInactiveTitle" xml:space="preserve">
+    <value>WireSock Deactivated</value>
+  </data>
+  <data name="TrayActivating" xml:space="preserve">
+    <value>WireSock: Activating</value>
+  </data>
+  <data name="TrayActive" xml:space="preserve">
+    <value>WireSock: Active</value>
+  </data>
+  <data name="TrayInactive" xml:space="preserve">
+    <value>WireSock: Inactive</value>
+  </data>
+  <data name="TunnelErrorCreate" xml:space="preserve">
+    <value>Failed to create the tunnel from the provided configuration. Please check log.</value>
+  </data>
+  <data name="TunnelErrorManager" xml:space="preserve">
+    <value>Failed to connect to tunnel manager. Please check log.</value>
+  </data>
+  <data name="TunnelErrorStart" xml:space="preserve">
+    <value>Tunnel has failed to start. Please check log.</value>
+  </data>
+  <data name="TunnelErrorTitle" xml:space="preserve">
+    <value>Error</value>
+  </data>
+</root>
