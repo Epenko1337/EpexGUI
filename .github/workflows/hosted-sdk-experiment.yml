@@ -1,0 +1,103 @@
+name: Hosted WireSock SDK experiment
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: hosted-sdk-experiment-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  authorize:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    outputs:
+      trusted_sha: ${{ steps.authorize.outputs.trusted_sha }}
+    steps:
+      - name: Checkout candidate revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Authorize protected default-branch revision
+        id: authorize
+        shell: pwsh
+        env:
+          DEFAULT_BRANCH: main
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne 'wiresock/WireSockUI') {
+            throw "The hosted SDK experiment may run only for wiresock/WireSockUI, not '$env:GITHUB_REPOSITORY'."
+          }
+          if ($env:EVENT_NAME -notin @('push', 'schedule', 'workflow_dispatch')) {
+            throw "Unsupported hosted SDK experiment event '$env:EVENT_NAME'."
+          }
+          $expectedRef = "refs/heads/$env:DEFAULT_BRANCH"
+          if ($env:WORKFLOW_REF -cne $expectedRef) {
+            throw "The hosted SDK experiment may run only from $expectedRef, not '$env:WORKFLOW_REF'."
+          }
+
+          git fetch --no-tags origin "+refs/heads/${env:DEFAULT_BRANCH}:refs/remotes/origin/$env:DEFAULT_BRANCH"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch the protected branch '$env:DEFAULT_BRANCH'."
+          }
+
+          $trustedSha = (git rev-parse 'HEAD^{commit}').Trim()
+          $defaultBranchSha = (
+            git rev-parse "refs/remotes/origin/$env:DEFAULT_BRANCH"
+          ).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $trustedSha -cnotmatch '\A[0-9a-f]{40}\z' -or
+              $defaultBranchSha -cnotmatch '\A[0-9a-f]{40}\z' -or
+              $trustedSha -cne $defaultBranchSha) {
+            throw "The hosted SDK experiment refuses stale revision '$trustedSha'; the protected tip is '$defaultBranchSha'."
+          }
+
+          "trusted_sha=$trustedSha" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Report authorized architecture matrix
+        shell: pwsh
+        env:
+          TRUSTED_SHA: ${{ steps.authorize.outputs.trusted_sha }}
+        run: Write-Host "Authorized x64 and ARM64 hosted SDK validation for protected revision '$env:TRUSTED_SHA'."
+
+  hosted-sdk:
+    name: hosted-sdk (${{ matrix.platform }})
+    needs: authorize
+    runs-on: ${{ matrix.platform == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ['x64', 'ARM64']
+    steps:
+      - name: Checkout authorized experiment revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.authorize.outputs.trusted_sha }}
+          persist-credentials: false
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          global-json-file: global.json
+
+      - name: Install SDK, install WireSockUI, and run lifecycle smoke
+        shell: pwsh
+        timeout-minutes: 45
+        env:
+          TEST_PLATFORM: ${{ matrix.platform }}
+        run: ./scripts/Invoke-HostedSdkExperiment.ps1 -Platform $env:TEST_PLATFORM

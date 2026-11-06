@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directories:
+      - /WireSockUI
+      - /WireSockUI.Tests
+      - /WireSockUI.Installer
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:17"
+      timezone: Europe/Belgrade
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:47"
+      timezone: Europe/Belgrade
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies

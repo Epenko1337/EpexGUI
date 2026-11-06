@@ -1,0 +1,300 @@
+name: WireSock SDK Integration
+
+on:
+  workflow_call:
+    inputs:
+      require_sdk_validation:
+        description: Fail when real-SDK validation is not configured.
+        required: false
+        type: boolean
+        default: false
+      sdk_workflow_sha:
+        description: Full commit SHA used to load this reusable workflow.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  configuration:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    outputs:
+      trusted_sha: ${{ steps.authorize.outputs.trusted_sha }}
+      trusted_tag_oid: ${{ steps.authorize.outputs.trusted_tag_oid }}
+    steps:
+      - name: Checkout candidate revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Authorize trusted candidate revision
+        id: authorize
+        shell: pwsh
+        env:
+          CALLER_REF: ${{ github.ref }}
+          CALLER_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: main
+          EVENT_NAME: ${{ github.event_name }}
+          LOADED_WORKFLOW_FILE_PATH: ${{ job.workflow_file_path }}
+          LOADED_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          LOADED_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          REQUESTED_WORKFLOW_SHA: ${{ inputs.sdk_workflow_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne 'wiresock/WireSockUI' -or
+              $env:LOADED_WORKFLOW_REPOSITORY -cne 'wiresock/WireSockUI' -or
+              $env:LOADED_WORKFLOW_FILE_PATH -cne '.github/workflows/sdk-integration.yml') {
+            throw "SDK integration may run only for wiresock/WireSockUI, not '$env:GITHUB_REPOSITORY'."
+          }
+
+          if ($env:CALLER_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or
+              $env:LOADED_WORKFLOW_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or
+              $env:REQUESTED_WORKFLOW_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or
+              $env:REQUESTED_WORKFLOW_SHA -cne $env:LOADED_WORKFLOW_SHA) {
+            throw 'The caller and reusable-workflow revisions must be exact, matching full lowercase commit IDs.'
+          }
+          if ($env:EVENT_NAME -notin @('push', 'schedule', 'workflow_call')) {
+            throw "Unsupported SDK integration event '$env:EVENT_NAME'."
+          }
+
+          $defaultRef = "refs/heads/$env:DEFAULT_BRANCH"
+          $isDefaultBranchRun = $env:CALLER_REF -ceq $defaultRef
+          $isReleaseRun = $env:CALLER_REF -match '\Arefs/tags/release-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z'
+          if (-not ($isDefaultBranchRun -or $isReleaseRun)) {
+            throw 'SDK integration is allowed only for the protected default branch or a strict semver release tag.'
+          }
+          git fetch --no-tags origin "+refs/heads/${env:DEFAULT_BRANCH}:refs/remotes/origin/$env:DEFAULT_BRANCH"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch the protected branch '$env:DEFAULT_BRANCH'."
+          }
+
+          $trustedSha = (git rev-parse 'HEAD^{commit}').Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $trustedSha -notmatch '\A[0-9a-f]{40}\z' -or
+              $trustedSha -cne $env:CALLER_SHA) {
+            throw 'Unable to resolve the checked-out workflow revision.'
+          }
+
+          $defaultBranchSha = (
+            git rev-parse "refs/remotes/origin/$env:DEFAULT_BRANCH"
+          ).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $defaultBranchSha -notmatch '\A[0-9a-f]{40}\z') {
+            throw "Unable to resolve the protected branch '$env:DEFAULT_BRANCH'."
+          }
+
+          if ($isDefaultBranchRun) {
+            if ($trustedSha -cne $defaultBranchSha) {
+              throw "Default-branch SDK validation refuses stale revision $trustedSha; the current protected tip is $defaultBranchSha."
+            }
+          }
+          else {
+            if ($trustedSha -cne $defaultBranchSha) {
+              throw "Release revision $trustedSha must equal the current protected '$env:DEFAULT_BRANCH' tip $defaultBranchSha."
+            }
+          }
+
+          if ($isReleaseRun) {
+            $tagName = $env:CALLER_REF.Substring('refs/tags/'.Length)
+            $headers = @{
+              Accept = 'application/vnd.github+json'
+              Authorization = "Bearer $env:GH_TOKEN"
+              'X-GitHub-Api-Version' = '2026-03-10'
+            }
+            $tagRef = Invoke-RestMethod `
+              -Method Get `
+              -Headers $headers `
+              -TimeoutSec 30 `
+              -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tagName"
+            if ($tagRef.object.type -ne 'tag') {
+              throw "Release tag '$tagName' must be an annotated, cryptographically signed tag."
+            }
+            $trustedTagOid = [string]$tagRef.object.sha
+            if ($trustedTagOid -notmatch '\A[0-9a-f]{40}\z') {
+              throw "Release tag '$tagName' resolved to an invalid annotated-tag object ID."
+            }
+
+            $tagObject = Invoke-RestMethod `
+              -Method Get `
+              -Headers $headers `
+              -TimeoutSec 30 `
+              -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/git/tags/$trustedTagOid"
+            if ([string]$tagObject.sha -cne $trustedTagOid -or
+                [string]$tagObject.tag -cne $tagName -or
+                -not $tagObject.verification.verified -or
+                $tagObject.object.type -ne 'commit') {
+              throw "Release tag '$tagName' does not have a GitHub-verified cryptographic signature."
+            }
+            if ([string]$tagObject.object.sha -cne $trustedSha) {
+              throw "Release tag '$tagName' resolves to $($tagObject.object.sha), not checked-out revision $trustedSha."
+            }
+          }
+          else {
+            $trustedTagOid = ''
+          }
+
+          "trusted_sha=$trustedSha" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "trusted_tag_oid=$trustedTagOid" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Report SDK validation status
+        shell: pwsh
+        env:
+          SDK_INTEGRATION_ENABLED: ${{ vars.WIRESOCKUI_SDK_INTEGRATION_ENABLED }}
+          SDK_INTEGRATION_REQUIRED: ${{ inputs.require_sdk_validation == true }}
+        run: |
+          if ($env:SDK_INTEGRATION_REQUIRED -eq 'true' -and $env:SDK_INTEGRATION_ENABLED -ne 'true') {
+            throw 'Real-SDK validation is required. Register all three SDK runner pools and set WIRESOCKUI_SDK_INTEGRATION_ENABLED=true.'
+          }
+
+          if ($env:SDK_INTEGRATION_ENABLED -eq 'true') {
+            Write-Host 'Real-SDK validation is enabled.'
+          }
+          else {
+            Write-Warning 'Real-SDK validation is unavailable because WIRESOCKUI_SDK_INTEGRATION_ENABLED is not true.'
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '### Real-SDK validation unavailable'
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'The elevated wgbooster/driver smoke jobs were skipped because `WIRESOCKUI_SDK_INTEGRATION_ENABLED` is not `true`.'
+          }
+
+  runner-policy:
+    needs: configuration
+    if: vars.WIRESOCKUI_SDK_INTEGRATION_ENABLED == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    environment: wiresock-sdk
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted runner-policy tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .trusted-sdk-tooling
+          persist-credentials: false
+
+      - name: Verify trusted runner-policy tooling checkout
+        shell: pwsh
+        env:
+          LOADED_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          $tooling = Get-Item -LiteralPath .trusted-sdk-tooling -Force
+          $linkType = $tooling.PSObject.Properties['LinkType']
+          if (-not $tooling.PSIsContainer -or
+              ($tooling.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+              ($null -ne $linkType -and
+               -not [string]::IsNullOrEmpty([string]$linkType.Value))) {
+            throw 'Trusted SDK runner-policy tooling must be an ordinary directory.'
+          }
+          $toolingSha = (
+            git -C $tooling.FullName rev-parse 'HEAD^{commit}'
+          ).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $toolingSha -cnotmatch '\A[0-9a-f]{40}\z' -or
+              $toolingSha -cne $env:LOADED_WORKFLOW_SHA) {
+            throw "Trusted SDK runner-policy tooling '$toolingSha' does not match loaded workflow revision '$env:LOADED_WORKFLOW_SHA'."
+          }
+
+      - name: Validate pinned reusable-workflow SHA
+        shell: pwsh
+        env:
+          LOADED_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          SDK_WORKFLOW_SHA: ${{ inputs.sdk_workflow_sha }}
+        run: |
+          if ($env:SDK_WORKFLOW_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or
+              $env:LOADED_WORKFLOW_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or
+              $env:SDK_WORKFLOW_SHA -cne $env:LOADED_WORKFLOW_SHA) {
+            throw 'sdk_workflow_sha must exactly match the loaded reusable-workflow commit ID.'
+          }
+
+      - name: Create short-lived organization runner-policy token
+        id: runner-policy-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.WIRESOCK_SDK_RUNNER_POLICY_CLIENT_ID }}
+          private-key: ${{ secrets.WIRESOCK_SDK_RUNNER_POLICY_PRIVATE_KEY }}
+          owner: wiresock
+          repositories: WireSockUI
+          permission-organization-self-hosted-runners: read
+
+      - name: Verify exact SDK runner-group policy
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.runner-policy-token.outputs.token }}
+          SDK_API_URL: ${{ github.api_url }}
+          SDK_REPOSITORY: ${{ github.repository }}
+          SDK_WORKFLOW_SHA: ${{ inputs.sdk_workflow_sha }}
+        run: >
+          ./.trusted-sdk-tooling/scripts/Test-SdkRunnerPolicy.ps1
+          -Repository $env:SDK_REPOSITORY
+          -GitHubApiUrl $env:SDK_API_URL
+          -WorkflowSha $env:SDK_WORKFLOW_SHA
+
+  elevated-sdk-smoke:
+    needs:
+      - configuration
+      - runner-policy
+    # The configuration job pins the candidate to a commit reachable from the
+    # protected default branch before a privileged runner is allocated.
+    if: vars.WIRESOCKUI_SDK_INTEGRATION_ENABLED == 'true'
+    environment: wiresock-sdk
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86
+            hardware_label: X64
+            routing_label: wiresock-sdk-x86
+          - platform: x64
+            hardware_label: X64
+            routing_label: wiresock-sdk-x64
+          - platform: ARM64
+            hardware_label: ARM64
+            routing_label: wiresock-sdk-arm64
+    runs-on:
+      group: wiresock-sdk
+      labels:
+        - self-hosted
+        - windows
+        - ${{ matrix.hardware_label }}
+        - wiresock-sdk
+        - ${{ matrix.routing_label }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.configuration.outputs.trusted_sha }}
+          persist-credentials: false
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        env:
+          TEST_PLATFORM: ${{ matrix.platform }}
+        run: dotnet restore WireSockUI.sln /p:Platform=$env:TEST_PLATFORM --locked-mode -m:1
+
+      - name: Run elevated real-SDK lifecycle smoke test
+        env:
+          TEST_PLATFORM: ${{ matrix.platform }}
+          WIRESOCKUI_WGBOOSTER_PATH: ${{ matrix.platform == 'x86' && vars.WIRESOCKUI_WGBOOSTER_PATH_X86 || matrix.platform == 'ARM64' && vars.WIRESOCKUI_WGBOOSTER_PATH_ARM64 || vars.WIRESOCKUI_WGBOOSTER_PATH_X64 }}
+          WIRESOCKUI_TEST_PROFILE: ${{ vars.WIRESOCKUI_TEST_PROFILE }}
+          WIRESOCKUI_TEST_PROFILE_TRANSPARENT: ${{ vars.WIRESOCKUI_TEST_PROFILE_TRANSPARENT }}
+          WIRESOCKUI_TEST_PROFILE_VIRTUAL_ADAPTER: ${{ vars.WIRESOCKUI_TEST_PROFILE_VIRTUAL_ADAPTER }}
+          WIRESOCKUI_TEST_PROFILE_AMNEZIA: ${{ vars.WIRESOCKUI_TEST_PROFILE_AMNEZIA }}
+        run: >
+          dotnet run --project WireSockUI.Tests/WireSockUI.Tests.csproj
+          --configuration Release
+          --framework net472-windows
+          --no-restore
+          /p:Platform=$env:TEST_PLATFORM
+          /p:UseSharedCompilation=false
+          --
+          --sdk-integration

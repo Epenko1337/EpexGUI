@@ -1,0 +1,381 @@
+name: Unsigned internal release candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: unsigned-internal-rc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    outputs:
+      trusted_sha: ${{ steps.authorize.outputs.trusted_sha }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Authorize current protected main tip and green prerequisites
+        id: authorize
+        shell: pwsh
+        env:
+          CI_WORKFLOW: ci.yml
+          EVENT_NAME: ${{ github.event_name }}
+          HOSTED_SDK_WORKFLOW: hosted-sdk-experiment.yml
+          RELEASE_API_URL: ${{ github.api_url }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_REPOSITORY -cne 'wiresock/WireSockUI') {
+            throw "Unsigned candidates may run only for wiresock/WireSockUI, not '$env:RELEASE_REPOSITORY'."
+          }
+          if ($env:EVENT_NAME -cne 'workflow_dispatch') {
+            throw "Unsupported unsigned-candidate event '$env:EVENT_NAME'."
+          }
+          if ($env:RELEASE_REF -cne 'refs/heads/main') {
+            throw "Unsigned candidates may run only from refs/heads/main, not '$env:RELEASE_REF'."
+          }
+          if ($env:RELEASE_SHA -cnotmatch '\A[0-9a-f]{40}\z') {
+            throw 'The candidate commit ID is malformed.'
+          }
+          $headers = @{
+            Accept = 'application/vnd.github+json'
+            Authorization = "Bearer $env:GH_TOKEN"
+            'X-GitHub-Api-Version' = '2026-03-10'
+          }
+          $branch = Invoke-RestMethod `
+            -Method Get `
+            -Headers $headers `
+            -TimeoutSec 30 `
+            -Uri "$env:RELEASE_API_URL/repos/$env:RELEASE_REPOSITORY/branches/main"
+          if (-not $branch.protected -or
+              [string]$branch.commit.sha -cne $env:RELEASE_SHA) {
+            throw "Candidate $env:RELEASE_SHA is not the current protected main tip."
+          }
+
+          foreach ($workflow in @($env:CI_WORKFLOW, $env:HOSTED_SDK_WORKFLOW)) {
+            $runsUri = "$env:RELEASE_API_URL/repos/$env:RELEASE_REPOSITORY/actions/workflows/$workflow/runs" +
+              "?branch=main&event=push&status=success&head_sha=$env:RELEASE_SHA&per_page=1"
+            $runs = Invoke-RestMethod `
+              -Method Get `
+              -Headers $headers `
+              -TimeoutSec 30 `
+              -Uri $runsUri
+            if ([int]$runs.total_count -lt 1 -or
+                @($runs.workflow_runs).Count -ne 1 -or
+                [string]$runs.workflow_runs[0].head_sha -cne $env:RELEASE_SHA -or
+                [string]$runs.workflow_runs[0].conclusion -cne 'success') {
+              throw "Current main tip $env:RELEASE_SHA has no successful $workflow push run."
+            }
+          }
+
+          "trusted_sha=$env:RELEASE_SHA" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Checkout authorized main history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.authorize.outputs.trusted_sha }}
+          persist-credentials: false
+
+      - name: Resolve authorized build version
+        id: version
+        shell: pwsh
+        run: |
+          $version = ./scripts/Resolve-BuildVersion.ps1
+          "version=$version" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Report unsigned internal-only boundary
+        shell: pwsh
+        env:
+          RC_VERSION: ${{ steps.version.outputs.version }}
+          TRUSTED_SHA: ${{ steps.authorize.outputs.trusted_sha }}
+        run: |
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '### Unsigned internal release candidate'
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Version: $env:RC_VERSION"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Commit: $env:TRUSTED_SHA"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '**Not signed, not published, and not supported for distribution.**'
+
+  build:
+    name: build (${{ matrix.configuration }}, ${{ matrix.platform }})
+    needs: authorize
+    runs-on: windows-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration:
+          - Release
+          - Release UWP
+        platform:
+          - ARM64
+          - x86
+          - x64
+        include:
+          - configuration: Release
+            installer_flavor: no-uwp
+          - configuration: Release UWP
+            installer_flavor: uwp
+    steps:
+      - name: Checkout authorized main revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.authorize.outputs.trusted_sha }}
+          persist-credentials: false
+
+      - name: Setup pinned dotnet SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          global-json-file: global.json
+
+      - name: Restore locked and audited toolchains
+        shell: pwsh
+        env:
+          BUILD_PLATFORM: ${{ matrix.platform }}
+        run: |
+          dotnet restore WireSockUI/WireSockUI.csproj `
+            /p:Platform=$env:BUILD_PLATFORM `
+            --locked-mode `
+            -p:NuGetAudit=true `
+            -p:NuGetAuditMode=all `
+            '-warnaserror:NU1901;NU1902;NU1903;NU1904'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Application restore or dependency audit failed.'
+          }
+          dotnet restore WireSockUI.Installer/WireSockUI.Installer.wixproj `
+            --locked-mode `
+            -p:NuGetAudit=true `
+            -p:NuGetAuditMode=all `
+            '-warnaserror:NU1901;NU1902;NU1903;NU1904'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Installer restore or dependency audit failed.'
+          }
+
+      - name: Publish versioned application payload
+        env:
+          BUILD_CONFIGURATION: ${{ matrix.configuration }}
+          BUILD_PLATFORM: ${{ matrix.platform }}
+          RC_VERSION: ${{ needs.authorize.outputs.version }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: >
+          dotnet publish WireSockUI/WireSockUI.csproj
+          --configuration "$env:BUILD_CONFIGURATION"
+          --framework net472-windows
+          --no-self-contained
+          --no-restore
+          /p:Platform="$env:BUILD_PLATFORM"
+          /p:UseSharedCompilation=false
+          /p:Version="$env:RC_VERSION"
+          /p:Repository="$env:SOURCE_REPOSITORY"
+          /p:RestoreLockedMode=true
+          -m:1
+
+      - name: Build and validate explicitly unsigned MSI
+        shell: pwsh
+        env:
+          BUILD_CONFIGURATION: ${{ matrix.configuration }}
+          BUILD_PLATFORM: ${{ matrix.platform }}
+          INSTALLER_FLAVOR: ${{ matrix.installer_flavor }}
+          RC_VERSION: ${{ needs.authorize.outputs.version }}
+        run: |
+          $output = Join-Path $env:GITHUB_WORKSPACE 'unsigned-internal-rc'
+          ./scripts/Build-Msi.ps1 `
+            -Platform $env:BUILD_PLATFORM `
+            -Version $env:RC_VERSION `
+            -Flavor $env:INSTALLER_FLAVOR `
+            -PayloadDirectory "./bin/$env:BUILD_PLATFORM/$env:BUILD_CONFIGURATION/net472-windows/publish" `
+            -OutputDirectory $output `
+            -NoRestore
+
+          $warning = @(
+            'UNSIGNED INTERNAL RELEASE CANDIDATE',
+            '',
+            'This package is not an official WireSockUI release.',
+            'It is not code-signed and Windows will not identify a trusted publisher.',
+            'Use only on disposable test systems. Do not redistribute.'
+          )
+          Set-Content `
+            -LiteralPath (Join-Path $output 'UNSIGNED-INTERNAL-ONLY.txt') `
+            -Value $warning `
+            -Encoding utf8
+
+      - name: Upload matrix MSI for validation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: 'UNSIGNED-INTERNAL-RC-MATRIX-${{ matrix.platform }}-${{ matrix.installer_flavor }}'
+          path: unsigned-internal-rc
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  install-smoke:
+    name: install-smoke (${{ matrix.platform }})
+    needs:
+      - authorize
+      - build
+    runs-on: ${{ matrix.platform == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - ARM64
+          - x86
+          - x64
+    steps:
+      - name: Checkout authorized validation tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.authorize.outputs.trusted_sha }}
+          persist-credentials: false
+
+      - name: Setup pinned dotnet SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          global-json-file: global.json
+
+      - name: Restore locked installer toolchain
+        run: dotnet restore WireSockUI.Installer/WireSockUI.Installer.wixproj --locked-mode
+
+      - name: Download architecture-matched no-UWP candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: 'UNSIGNED-INTERNAL-RC-MATRIX-${{ matrix.platform }}-no-uwp'
+          path: unsigned-internal-rc
+
+      - name: Install, launch-check, repair, and uninstall candidate
+        shell: pwsh
+        env:
+          MSI_PLATFORM: ${{ matrix.platform }}
+        run: |
+          $msis = @(Get-ChildItem -LiteralPath unsigned-internal-rc -File -Filter '*.msi')
+          if ($msis.Count -ne 1) {
+            throw "Expected one $env:MSI_PLATFORM MSI, found $($msis.Count)."
+          }
+          ./scripts/Test-MsiInstallation.ps1 `
+            -MsiPath $msis[0].FullName `
+            -ValidationMetadataPath "$($msis[0].FullName).validation.json" `
+            -EphemeralMachine
+
+  bundle:
+    needs:
+      - authorize
+      - build
+      - install-smoke
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout authorized validation tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.authorize.outputs.trusted_sha }}
+          persist-credentials: false
+
+      - name: Setup pinned dotnet SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          global-json-file: global.json
+
+      - name: Restore locked installer validation toolchain
+        shell: pwsh
+        run: |
+          dotnet restore WireSockUI.Installer/WireSockUI.Installer.wixproj `
+            --locked-mode `
+            -p:NuGetAudit=true `
+            -p:NuGetAuditMode=all `
+            '-warnaserror:NU1901;NU1902;NU1903;NU1904'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Installer validation toolchain restore or dependency audit failed.'
+          }
+
+      - name: Download all matrix candidates
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: UNSIGNED-INTERNAL-RC-MATRIX-*
+          path: unsigned-internal-rc
+          merge-multiple: true
+
+      - name: Revalidate exact candidate set and create checksums
+        shell: pwsh
+        env:
+          RC_VERSION: ${{ needs.authorize.outputs.version }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+          RELEASE_SERVER_URL: ${{ github.server_url }}
+          TRUSTED_SHA: ${{ needs.authorize.outputs.trusted_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path -LiteralPath unsigned-internal-rc).Path
+          $msis = @(Get-ChildItem -LiteralPath $root -File -Filter '*.msi' | Sort-Object Name)
+          if ($msis.Count -ne 6) {
+            throw "Expected six unsigned MSI packages, found $($msis.Count)."
+          }
+          $expected = @(
+            foreach ($platform in @('arm64', 'x64', 'x86')) {
+              foreach ($flavor in @('no-uwp', 'uwp')) {
+                "WireSockUI-$env:RC_VERSION-win-$platform-$flavor.msi"
+              }
+            }
+          ) | Sort-Object
+          if ([string]::Join("`n", @($msis.Name)) -cne [string]::Join("`n", $expected)) {
+            throw 'The unsigned candidate MSI inventory is incomplete or unexpected.'
+          }
+
+          foreach ($msi in $msis) {
+            if ($msi.Name -notmatch '\AWireSockUI-[0-9]+\.[0-9]+\.[0-9]+-win-(?<platform>x86|x64|arm64)-(?<flavor>no-uwp|uwp)\.msi\z') {
+              throw "Unexpected candidate name '$($msi.Name)'."
+            }
+            ./scripts/Test-MsiPackage.ps1 `
+              -MsiPath $msi.FullName `
+              -ExpectedArchitecture $Matches.platform `
+              -ExpectedVersion $env:RC_VERSION `
+              -ExpectedFlavor $Matches.flavor `
+              -ValidationMetadataPath "$($msi.FullName).validation.json"
+          }
+          ./scripts/Test-MsiArchitectureIsolation.ps1 -MsiPath $msis.FullName
+          ./scripts/Test-MsiArchitectureIsolation.Tests.ps1 -MsiPath $msis.FullName
+
+          $checksumLines = @(
+            Get-ChildItem -LiteralPath $root -File |
+              Where-Object { $_.Name -match '\.(?:msi|json)$' } |
+              Sort-Object Name |
+              ForEach-Object {
+                $digest = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                "$digest  $($_.Name)"
+              }
+          )
+          Set-Content `
+            -LiteralPath (Join-Path $root 'SHA256SUMS.txt') `
+            -Value $checksumLines `
+            -Encoding ascii
+
+          $provenance = @(
+            "Repository=$env:RELEASE_REPOSITORY",
+            "Commit=$env:TRUSTED_SHA",
+            "Version=$env:RC_VERSION",
+            "WorkflowRun=$env:RELEASE_SERVER_URL/$env:RELEASE_REPOSITORY/actions/runs/$env:RELEASE_RUN_ID",
+            'Signed=false',
+            'Published=false'
+          )
+          Set-Content `
+            -LiteralPath (Join-Path $root 'INTERNAL-RC-PROVENANCE.txt') `
+            -Value $provenance `
+            -Encoding ascii
+
+      - name: Upload 14-day unsigned internal bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: 'UNSIGNED-INTERNAL-RC-WireSockUI-v${{ needs.authorize.outputs.version }}'
+          path: unsigned-internal-rc
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14

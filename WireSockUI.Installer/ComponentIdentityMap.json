@@ -1,0 +1,1031 @@
+{
+  "Schema": "WireSockUI-Msi-Component-Identity-v1",
+  "Entries": [
+    {
+      "Architecture": "arm64",
+      "Resource": "component:ApplicationDirectorySecurity",
+      "Guid": "{F799A5DA-6659-598F-9607-FD1D230A491E}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "component:DesktopShortcutComponent",
+      "Guid": "{FDEE3821-19F5-5EB5-BB5C-88FE2007425E}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "component:StartMenuShortcutComponent",
+      "Guid": "{272197E4-0E49-52BD-9BA8-EC476FE43A4D}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "directory:de",
+      "Guid": "{82FCAE1E-3203-508D-A973-ABCA9F0BE246}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "directory:es",
+      "Guid": "{8E003EA2-3A7B-5152-B18B-B78F2DE739F8}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "directory:fr",
+      "Guid": "{45DA892B-6EA6-58E3-99B2-79522AB90E8B}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "directory:it",
+      "Guid": "{B08D0287-AD6B-5DDD-A346-8AB25B0C6751}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "directory:ja",
+      "Guid": "{6B2B0664-ABE3-561E-96F3-A2B5729D1D10}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "directory:pl",
+      "Guid": "{54890F6E-77A0-5CBA-89DE-AF0377056FFE}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "directory:ru",
+      "Guid": "{D7BD4DD4-C39C-5883-9460-9BFFD437587A}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "directory:sv",
+      "Guid": "{BF564C6E-AB48-53F6-A95A-C878E978FDFC}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "directory:tr",
+      "Guid": "{CBC21CA8-15A3-59C4-AE5F-84AFD575EF4C}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "directory:zh-CN",
+      "Guid": "{8B5D743E-D2CB-5C2C-B003-60B86B5BCAC5}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "directory:zh-Hant",
+      "Guid": "{86B96ACF-66E1-5B5B-AFC8-35E70BBFAE89}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Microsoft.Bcl.HashCode.dll",
+      "Guid": "{638CE502-B978-5844-8F17-9FDE1B9AC259}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Microsoft.Win32.TaskScheduler.dll",
+      "Guid": "{D0576F82-64D3-54C9-B5EE-5F40C8D737CE}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:System.Buffers.dll",
+      "Guid": "{16E0C2DE-4DD4-5F9C-87E8-288040704055}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:System.Collections.Immutable.dll",
+      "Guid": "{EADB4719-B37F-5F92-B413-0185F16CE64A}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:System.Formats.Nrbf.dll",
+      "Guid": "{3478C89C-712D-58E1-9051-1FD003CD82D4}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:System.Memory.dll",
+      "Guid": "{48F079F9-CD5F-5640-AF70-DB303529EB44}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:System.Numerics.Vectors.dll",
+      "Guid": "{3EDA9D97-7C6D-59F3-B7B7-9C98F4656ECF}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:System.Reflection.Metadata.dll",
+      "Guid": "{F1AB5A22-3068-5B36-B7EC-150AE6D6E140}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:System.Resources.Extensions.dll",
+      "Guid": "{CA47E1D5-706A-514A-87D6-5C6384402AF7}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:System.Runtime.CompilerServices.Unsafe.dll",
+      "Guid": "{18484FA2-AE09-58F4-A79A-CFF21E8F881B}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.ApplicationModel.winmd",
+      "Guid": "{23BCF1D7-2C04-5C83-BE82-7E6D414B56F0}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Data.winmd",
+      "Guid": "{DF6AB138-27B1-59FC-85DE-A4BDEFDA1E19}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Devices.winmd",
+      "Guid": "{367020FF-FB81-5A9F-9BDA-5E35C794425A}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Foundation.winmd",
+      "Guid": "{651C71B5-6954-5DC2-BFC0-34B4C32E6143}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Gaming.winmd",
+      "Guid": "{1F24C3BE-BBF5-527A-B20C-078EC800D9B1}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Globalization.winmd",
+      "Guid": "{C6FF1A4F-8931-5175-9050-9387406AD414}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Graphics.winmd",
+      "Guid": "{A88B535B-9379-5D55-925C-C3B94EF44A0A}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Management.winmd",
+      "Guid": "{05ABC2B2-60F2-5B27-B710-1E4DF61ED94E}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Media.winmd",
+      "Guid": "{607C9738-F236-5E04-9A99-61082B333954}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Networking.winmd",
+      "Guid": "{333E4DA8-E39C-519A-9A9D-5C9C3AD28752}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Perception.winmd",
+      "Guid": "{B21EFB31-90F1-5D27-B27A-0756DD1EB196}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Security.winmd",
+      "Guid": "{B566B353-AAEA-5780-BFCD-ADD1EDD20A47}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Services.winmd",
+      "Guid": "{93EF57F1-6605-5522-B861-BF63792DE579}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Storage.winmd",
+      "Guid": "{E6C4907D-6352-5E4C-AF6D-9FA45BF0CFDC}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.System.winmd",
+      "Guid": "{ED1EDE2B-A766-5BA3-9C68-A1BAC6F0B74A}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.UI.Xaml.winmd",
+      "Guid": "{BAC95E32-7BAD-5DCB-B701-F0D57E709081}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.UI.winmd",
+      "Guid": "{549200C2-8EDB-5DD2-9150-0E76C9651A16}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:Windows.Web.winmd",
+      "Guid": "{42341052-AF16-5920-B16B-176D3F9411F6}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:WireSockUI.Managed.dll",
+      "Guid": "{5F5EE5CF-EBB3-5686-AAB8-DDFC7968CC29}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:WireSockUI.Managed.dll.config",
+      "Guid": "{C9BF4E82-47BF-54C3-B5CB-7BA05A5544E1}",
+      "State": "retired"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:WireSockUI.exe",
+      "Guid": "{2A2D6FC0-4137-543C-B696-443DC46A2821}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:WireSockUI.exe.config",
+      "Guid": "{2A2D6FC0-4137-543C-B696-443DC46A2821}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:de/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{41B9251F-20DF-51E3-A8D7-8AAD818D2EA6}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:es/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{2071E467-4860-5B2C-8CE7-653BE4FA9BC7}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:fr/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{A5050DFD-C7F9-52A9-897C-FD8D187D8038}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:it/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{2943D5CE-12C2-564F-8F53-299C8AE8EB06}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:ja/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{5083E0A2-1C6B-5C57-8575-D746A5A0A42A}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:pl/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{7061394E-C62D-55A6-AF42-A16BCBABC83C}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:ru/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{85FF29EF-514D-5C89-8F42-D472BB8CA78D}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:sv/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{E4FEF860-7284-530F-A75F-2CAF19041863}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:tr/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{97E9917A-E9DF-5763-83EF-F6AC13B83F85}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:zh-CN/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{675559E2-E946-53B0-958F-0877248D6186}",
+      "State": "active"
+    },
+    {
+      "Architecture": "arm64",
+      "Resource": "file:zh-Hant/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{6EB99F9D-6018-5A8E-8D39-3C85C95C7F76}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "component:ApplicationDirectorySecurity",
+      "Guid": "{BD904007-9DBD-55C6-8BBB-0FA7D621BD06}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "component:DesktopShortcutComponent",
+      "Guid": "{F7CB31FD-E0FF-54B8-939B-2D2799D54FFE}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "component:StartMenuShortcutComponent",
+      "Guid": "{C92A8606-F0ED-5516-9E4E-0262273EAEF3}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "directory:de",
+      "Guid": "{39D7A9BC-7847-50CC-A979-CC64834EA8F8}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "directory:es",
+      "Guid": "{F99E9EC8-F2EA-5590-9B6C-5391B69ADDB2}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "directory:fr",
+      "Guid": "{CB95EF4D-2E4E-5A42-8C60-FDCB144C8E08}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "directory:it",
+      "Guid": "{90270312-3B96-5FE9-A5DD-E434D0407735}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "directory:ja",
+      "Guid": "{FAF2C11A-0AD8-5E45-9FBA-276839654C27}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "directory:pl",
+      "Guid": "{240BE4F2-D69B-551C-B900-2ECEF478927C}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "directory:ru",
+      "Guid": "{2055C8E8-B855-5B59-B1BE-B76921EE277E}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "directory:sv",
+      "Guid": "{89594603-87FC-5F29-A761-E86D3014DBC0}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "directory:tr",
+      "Guid": "{05FCE1E8-E385-5606-A0B8-0AD00701D26E}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "directory:zh-CN",
+      "Guid": "{BFAD47B6-038F-5E30-86B4-0AD3B133A9F7}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "directory:zh-Hant",
+      "Guid": "{557E1CA1-47D9-51CE-B1F9-1C5981550653}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Microsoft.Bcl.HashCode.dll",
+      "Guid": "{34A6E71D-B1C4-59D9-A134-64C5001FFC25}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Microsoft.Win32.TaskScheduler.dll",
+      "Guid": "{E5929623-5795-5385-B528-B445364F1728}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:System.Buffers.dll",
+      "Guid": "{1A1DEA70-9B60-5530-9759-DBC714EFB96C}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:System.Collections.Immutable.dll",
+      "Guid": "{DD788DBB-687F-50EA-9F33-BAFC81FC72A2}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:System.Formats.Nrbf.dll",
+      "Guid": "{01266EFF-31C7-52CA-BB1D-0277AD56C009}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:System.Memory.dll",
+      "Guid": "{88E3BEE0-572E-5DF3-8C98-253D98C0767B}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:System.Numerics.Vectors.dll",
+      "Guid": "{A5461AC8-8057-5373-B391-7BE3127D4AE5}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:System.Reflection.Metadata.dll",
+      "Guid": "{FA04F638-FBD3-5B88-B6F3-2C94F0ED574D}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:System.Resources.Extensions.dll",
+      "Guid": "{04578EEB-26BF-55F1-8530-E3545144E73D}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:System.Runtime.CompilerServices.Unsafe.dll",
+      "Guid": "{20DF83F8-A8E3-541E-9DF6-CC5105473942}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.ApplicationModel.winmd",
+      "Guid": "{E07D96B8-6BAC-53C8-841E-D5202A1B3771}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Data.winmd",
+      "Guid": "{71424454-5F4A-56AC-B2E1-6AD62B5E12B0}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Devices.winmd",
+      "Guid": "{F5F303AA-21E0-5FF5-B39C-90A8585D375B}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Foundation.winmd",
+      "Guid": "{F4B49AEB-8307-53A5-9399-D75FBB3D4A88}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Gaming.winmd",
+      "Guid": "{E381C07F-6A31-58AB-85CF-6623A30F677F}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Globalization.winmd",
+      "Guid": "{24746D6A-8E48-5A56-8424-D82027F78593}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Graphics.winmd",
+      "Guid": "{43848B9B-DCB2-59A4-AD23-63D8CDDDF0F6}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Management.winmd",
+      "Guid": "{58672C36-9C97-5784-9877-DD06B7D45BF9}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Media.winmd",
+      "Guid": "{459EB96A-D1DD-56B9-9D39-FD10CBA8CB4F}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Networking.winmd",
+      "Guid": "{085106CF-80D7-5049-8EFC-11E1609BF7B5}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Perception.winmd",
+      "Guid": "{9B786096-39B1-53FB-ACBC-B2760EA35395}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Security.winmd",
+      "Guid": "{64154807-4D22-5BA3-873A-42FEC6B1A05F}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Services.winmd",
+      "Guid": "{F71B294D-2168-51E7-B7F7-89C5DCB6E7B3}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Storage.winmd",
+      "Guid": "{CDA75C9C-31DF-5AAD-B480-5B09D2A5DA69}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.System.winmd",
+      "Guid": "{ECB3804C-CD3C-5860-9AC5-FEA093E83B94}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.UI.Xaml.winmd",
+      "Guid": "{4E1782D6-11BE-59D2-8972-BA3DC429717E}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.UI.winmd",
+      "Guid": "{FF11D74F-6FC9-58BF-B7CC-A2C777DFEB48}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:Windows.Web.winmd",
+      "Guid": "{F26B6134-DACF-569B-B827-A2B57D94F24D}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:WireSockUI.Managed.dll",
+      "Guid": "{9A788202-BA94-527D-90AD-DA7D681DC2DE}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:WireSockUI.Managed.dll.config",
+      "Guid": "{BA45AF78-28CF-514C-9F08-A9234A0CBB6C}",
+      "State": "retired"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:WireSockUI.exe",
+      "Guid": "{2FBA3AB8-0510-5628-AA36-867838C4A883}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:WireSockUI.exe.config",
+      "Guid": "{2FBA3AB8-0510-5628-AA36-867838C4A883}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:de/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{BC5A1B35-642D-55B7-A817-CA3A0772417B}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:es/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{95C5D33D-6B32-5429-A935-9381AC775480}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:fr/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{D2CB4083-C53E-5A8D-AB37-7E240B302028}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:it/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{87123A9D-74E3-5BB3-BAEB-EB6BAFDB0A9A}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:ja/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{0C4F5749-91A8-5AD7-A6B3-DAEDA79C909A}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:pl/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{1805408D-2E41-5CB8-9EA8-A67789E35E34}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:ru/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{12045034-A9C6-5B97-BDAF-546A84210E93}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:sv/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{7B2482AC-0F05-56BC-8720-FF40CB0D45DB}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:tr/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{3C096176-97A6-5FFF-A205-6E47DBA10C3E}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:zh-CN/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{A0A62648-064B-51AC-8D09-11A356D19CFC}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x64",
+      "Resource": "file:zh-Hant/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{D5D5F198-1858-527C-9A44-0C8C88AB0402}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "component:ApplicationDirectorySecurity",
+      "Guid": "{18F1AF0C-39C1-530F-9BE2-1CFD4C1B1523}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "component:DesktopShortcutComponent",
+      "Guid": "{B587763B-9A27-5AB6-B203-2638DB25DFC8}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "component:StartMenuShortcutComponent",
+      "Guid": "{BFA1C08B-7D5C-5843-BE44-8A5D1A81B4A9}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "directory:de",
+      "Guid": "{84D3397E-A657-5C6A-A741-0116EDCBBEC5}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "directory:es",
+      "Guid": "{E00B8680-F6AA-528E-9A37-61F7517EB202}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "directory:fr",
+      "Guid": "{F256B4A9-381D-57EF-A02A-90B0B871A132}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "directory:it",
+      "Guid": "{160AA42C-9351-5A84-ADF3-EAA012C2107E}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "directory:ja",
+      "Guid": "{0344E401-1090-54E1-8C43-43DCCCA6183C}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "directory:pl",
+      "Guid": "{400ED81A-6BD7-5D62-8814-802957244F9D}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "directory:ru",
+      "Guid": "{6E30D0D8-8F52-5BA3-9843-E46F455698C5}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "directory:sv",
+      "Guid": "{B5C4E339-5BFE-5836-AB8F-D2806BA06F79}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "directory:tr",
+      "Guid": "{D43773C6-C71C-5F90-A006-F446EC65D641}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "directory:zh-CN",
+      "Guid": "{8BAF370C-A4A6-5853-A846-A28333311B2C}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "directory:zh-Hant",
+      "Guid": "{2441C147-E72F-5AA0-97AC-3E1CAF8F3BD9}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Microsoft.Bcl.HashCode.dll",
+      "Guid": "{BD983696-C92E-5737-B7C4-50482B290E57}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Microsoft.Win32.TaskScheduler.dll",
+      "Guid": "{64FCA6F0-3D19-576D-AE33-FCC4693A3208}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:System.Buffers.dll",
+      "Guid": "{11E47245-8F30-5914-BBD7-C1AFA092972C}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:System.Collections.Immutable.dll",
+      "Guid": "{B60D11C3-6D31-57E8-8ACE-04C99D10B6B9}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:System.Formats.Nrbf.dll",
+      "Guid": "{195208C2-59A7-596A-AF8C-AEF357290251}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:System.Memory.dll",
+      "Guid": "{9341FB1F-1076-56AC-8267-4C5CC022863B}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:System.Numerics.Vectors.dll",
+      "Guid": "{EC4BC49D-9128-5C63-AAAA-2CBA0F3CE318}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:System.Reflection.Metadata.dll",
+      "Guid": "{4A953BF6-FBE3-5EB4-B9D7-8ACCF10A43DA}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:System.Resources.Extensions.dll",
+      "Guid": "{52963293-1897-5CD9-A9FD-B99E0D96A96A}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:System.Runtime.CompilerServices.Unsafe.dll",
+      "Guid": "{DC96F33D-FACB-5E14-BC24-44BCBD4F9552}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.ApplicationModel.winmd",
+      "Guid": "{D00D8274-68E1-5E1A-994A-33E61407C9CD}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Data.winmd",
+      "Guid": "{510BF338-7240-56B9-88E8-7DAB657CD774}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Devices.winmd",
+      "Guid": "{6CE6832A-8914-5C8E-A33E-C918C0C5972C}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Foundation.winmd",
+      "Guid": "{2DF30F93-890F-5281-B3FC-B738BE74D4DF}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Gaming.winmd",
+      "Guid": "{71A149B8-5EA4-5E72-AE5C-265F177E0DFE}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Globalization.winmd",
+      "Guid": "{4EEC8693-CF55-5437-85CD-1D3EF2CBB386}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Graphics.winmd",
+      "Guid": "{D195B35E-1F95-5CD7-9DF9-F8C61C3A23E9}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Management.winmd",
+      "Guid": "{82F29BB1-6CE7-567F-9BC8-223E54CBA7CE}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Media.winmd",
+      "Guid": "{880C617E-7DD5-5618-B01E-76E18971DC37}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Networking.winmd",
+      "Guid": "{73D643F6-90D6-550B-9962-E37DD3EDA618}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Perception.winmd",
+      "Guid": "{E9CF9CE1-02E1-50CC-BA0E-9EB6CF232409}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Security.winmd",
+      "Guid": "{5C839123-F52B-591A-A648-E37F1152EDAE}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Services.winmd",
+      "Guid": "{615F4154-4CD6-525C-8EF3-90AD70513B97}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Storage.winmd",
+      "Guid": "{961CE85F-E5C3-528C-B41C-8B2594C270EE}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.System.winmd",
+      "Guid": "{57F2FCC1-F67E-5F3C-A541-0F9BC2A5BE80}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.UI.Xaml.winmd",
+      "Guid": "{12B228C9-0572-5F48-8B39-70EFA9F08420}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.UI.winmd",
+      "Guid": "{7F922026-B793-55F1-BA18-6FCF73364964}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:Windows.Web.winmd",
+      "Guid": "{84A2D68C-589E-5321-8970-8BEAF5524172}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:WireSockUI.Managed.dll",
+      "Guid": "{F6FB9B9F-28CB-5313-9D95-00E3356C3F13}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:WireSockUI.Managed.dll.config",
+      "Guid": "{4C179E7C-FDD1-5364-A17B-EBAB1414B2BF}",
+      "State": "retired"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:WireSockUI.exe",
+      "Guid": "{3701CC05-CA09-5AAF-B792-99AB85CB6174}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:WireSockUI.exe.config",
+      "Guid": "{3701CC05-CA09-5AAF-B792-99AB85CB6174}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:de/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{1A7835D2-53D7-5CF7-9878-54FEACD004B5}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:es/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{463AD1BE-4DA0-559A-81BC-CAD861AEC47C}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:fr/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{CBBD2791-1ED4-5808-AD54-C489E54D6149}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:it/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{94DD41DC-DE48-5EC0-B6A2-DECEFF9AE4D2}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:ja/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{26E119A7-CBBA-5E1C-B4FD-92D791600B35}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:pl/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{85D5BB5A-A1EC-5BD8-ABA9-4D7A8915B44D}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:ru/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{51CB8F73-1C9C-524C-AE5D-DBA7A63D68C4}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:sv/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{AE5EE276-D3DB-5B20-8772-BE01BE06CA1B}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:tr/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{D6683D93-5262-5E2D-BC9F-4092CE504606}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:zh-CN/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{D96B889F-CC00-5E37-AFBC-13052B1A7AEB}",
+      "State": "active"
+    },
+    {
+      "Architecture": "x86",
+      "Resource": "file:zh-Hant/Microsoft.Win32.TaskScheduler.resources.dll",
+      "Guid": "{9BEEB92B-60D4-5DEA-8A87-1C962CF0FC61}",
+      "State": "active"
+    }
+  ]
+}

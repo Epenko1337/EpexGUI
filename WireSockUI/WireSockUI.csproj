@@ -1,0 +1,253 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <ProjectGuid>{C309F359-DAFF-42D0-8379-70ECC9688943}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <Configurations>Debug;Release;Debug UWP;Release UWP</Configurations>
+    <Platforms>AnyCPU;x86;x64;ARM64</Platforms>
+    <TargetFrameworks>net472-windows</TargetFrameworks>
+    <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWindowsForms>true</UseWindowsForms>
+    <GenerateResourceUsePreserializedResources>true</GenerateResourceUsePreserializedResources>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
+    <RootNamespace>WireSockUI</RootNamespace>
+    <WarningLevel>4</WarningLevel>
+    <Prefer32Bit>false</Prefer32Bit>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" $(Configuration.StartsWith('Debug')) ">
+    <DebugType>portable</DebugType>
+    <OutputPath>..\bin\$(Platform)\$(Configuration)\</OutputPath>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" $(Configuration.StartsWith('Release')) ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <Deterministic>true</Deterministic>
+    <OutputPath>..\bin\$(Platform)\$(Configuration)\</OutputPath>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Platform)' != 'AnyCPU' and '$(Platform)' != 'Any CPU'">
+    <StartAction>Program</StartAction>
+    <StartProgram>$(TargetDir)WireSockUI.exe</StartProgram>
+    <StartWorkingDirectory>$(TargetDir)</StartWorkingDirectory>
+  </PropertyGroup>
+
+  <!-- Set up assembly metadata -->
+  <PropertyGroup>
+    <DefineConstants Condition=" $(Configuration.Contains('UWP')) ">$(DefineConstants);WIRESOCKUI_ENABLE_UWP</DefineConstants>
+    <WireSockUIVersionWasDefaulted Condition=" '$(Version)' == '' ">true</WireSockUIVersionWasDefaulted>
+    <Version Condition=" '$(Version)' == '' ">0.0.0</Version>
+
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <AssemblyName>WireSockUI.Managed</AssemblyName>
+    <AssemblyTitle>WireSockUI</AssemblyTitle>
+    <FileVersion>$(Version)</FileVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <Product>WireSock UI</Product>
+    <Copyright>Copyright %A9 2023-2026</Copyright>
+    <NativeBootstrapDevelopmentArgument Condition="$(Configuration.StartsWith('Debug'))">-DevelopmentBuild</NativeBootstrapDevelopmentArgument>
+  </PropertyGroup>
+
+  <Target Name="RequireExplicitReleaseVersion"
+          BeforeTargets="PrepareForBuild"
+          Condition="$(Configuration.StartsWith('Release')) and '$(WireSockUIVersionWasDefaulted)' == 'true' and '$(WireSockUIAllowManagedOnlyBuild)' != 'true' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <Error Text="Release builds require an explicit /p:Version from scripts/Resolve-BuildVersion.ps1." />
+  </Target>
+
+  <ItemGroup>
+    <AssemblyAttributes Include="AssemblyMetadata">
+      <_Parameter1>Repository</_Parameter1>
+      <_Parameter2>$(Repository)</_Parameter2>
+    </AssemblyAttributes>
+  </ItemGroup>
+
+  <!-- Dependencies when targeting .NET Framework -->
+  <ItemGroup Condition=" $(TargetFramework.StartsWith('net472')) ">
+    <PackageReference Include="System.Resources.Extensions" Version="10.0.10" />
+    <PackageReference Include="TaskScheduler" Version="2.12.2" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System" />
+    <Reference Include="System.Configuration" />
+    <Reference Include="System.Design" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.Management" />
+    <Reference Include="System.Xml" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Runtime" />
+    <Reference Include="System.Runtime.InteropServices.WindowsRuntime" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Condition=" $(Configuration.Contains('UWP')) " Include="Windows.Data">
+      <HintPath>$(SystemRoot)\System32\WinMetadata\Windows.Data.winmd</HintPath>
+    </Reference>
+    <Reference Condition=" $(Configuration.Contains('UWP')) " Include="Windows.Foundation">
+      <HintPath>$(SystemRoot)\System32\WinMetadata\Windows.Foundation.winmd</HintPath>
+    </Reference>
+    <Reference Condition=" $(Configuration.Contains('UWP')) " Include="Windows.UI">
+      <HintPath>$(SystemRoot)\System32\WinMetadata\Windows.UI.winmd</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Conditional UWP support -->
+  <ItemGroup Condition=" !$(Configuration.Contains('UWP')) ">
+    <Compile Remove="Notifications\Notifications.cs" />
+    <Content Include="Notifications\Notifications.cs" />
+    <Compile Remove="Extensions\GitHubExtensions.cs" />
+    <Content Include="Extensions\GitHubExtensions.cs" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <ApplicationIcon>Resources\wiresock.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Update="Extensions\MenuTextExtender.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Extensions\ControlTextExtender.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Forms\frmEdit.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\frmEdit.Designer.cs">
+      <DependentUpon>frmEdit.cs</DependentUpon>
+    </Compile>
+    <Compile Update="Forms\frmMain.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\frmMain.Designer.cs">
+      <DependentUpon>frmMain.cs</DependentUpon>
+    </Compile>
+    <Compile Update="Forms\frmSettings.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\frmSettings.Designer.cs">
+      <DependentUpon>frmSettings.cs</DependentUpon>
+    </Compile>
+    <Compile Update="Forms\TaskManager.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TaskManager.Designer.cs">
+      <DependentUpon>TaskManager.cs</DependentUpon>
+    </Compile>
+    <Compile Update="Properties\Resources.Designer.cs">
+      <AutoGen>True</AutoGen>
+      <DesignTime>True</DesignTime>
+      <DependentUpon>Resources.resx</DependentUpon>
+    </Compile>
+    <EmbeddedResource Update="Forms\frmEdit.resx">
+      <DependentUpon>frmEdit.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Forms\frmMain.resx">
+      <DependentUpon>frmMain.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Forms\frmSettings.resx">
+      <DependentUpon>frmSettings.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Forms\TaskManager.resx">
+      <DependentUpon>TaskManager.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Properties\Resources.resx">
+      <Generator>ResXFileCodeGenerator</Generator>
+      <SubType>Designer</SubType>
+      <LastGenOutput>Resources.Designer.cs</LastGenOutput>
+    </EmbeddedResource>
+    <None Include="Properties\Settings.settings">
+      <Generator>SettingsSingleFileGenerator</Generator>
+      <LastGenOutput>Settings.Designer.cs</LastGenOutput>
+    </None>
+    <Compile Update="Properties\Settings.Designer.cs">
+      <AutoGen>True</AutoGen>
+      <DependentUpon>Settings.settings</DependentUpon>
+      <DesignTimeSharedInput>True</DesignTimeSharedInput>
+    </Compile>
+    <Content Include="Resources\template.conf" />
+    <Content Include="Resources\wiresock.ico" />
+    <None Include="..\WireSockUI.Bootstrap\bootstrap.cpp" Link="Bootstrap\bootstrap.cpp" />
+    <None Include="..\WireSockUI.Bootstrap\bootstrap.manifest" Link="Bootstrap\bootstrap.manifest" />
+  </ItemGroup>
+
+  <Target Name="RejectUnsupportedApplicationPlatform"
+          BeforeTargets="Build"
+          Condition="('$(Platform)' == 'AnyCPU' or '$(Platform)' == 'Any CPU') and '$(WireSockUIAllowManagedOnlyBuild)' != 'true' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <Error Text="WireSock UI application builds require an explicit x86, x64, or ARM64 platform so the native security boundary matches the managed payload. Managed-only builds are reserved for the test project." />
+  </Target>
+
+  <Target Name="RemoveLegacyManagedExecutable"
+          BeforeTargets="Build"
+          Condition="'$(WireSockUIAllowManagedOnlyBuild)' != 'true' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <Delete Files="$(TargetDir)WireSockUI.Managed.exe;$(TargetDir)WireSockUI.Managed.exe.config"
+            TreatErrorsAsWarnings="false" />
+  </Target>
+
+  <Target Name="RemovePublishIntermediateNativeBootstrap"
+          BeforeTargets="PrepareForPublish"
+          Condition="'$(WireSockUIAllowManagedOnlyBuild)' != 'true' and '$(Platform)' != 'AnyCPU' and '$(Platform)' != 'Any CPU' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true' and '$(_IsPublishing)' == 'true'">
+    <!--
+      A publish builds the managed TargetDir first, then creates and validates
+      the only runnable launcher in PublishDir. Remove any stale TargetDir
+      launcher on the publish graph so normal and no-build retries cannot
+      leave an old, misleading executable beside the reserved publish subtree.
+    -->
+    <Delete Files="$(TargetDir)WireSockUI.exe"
+            TreatErrorsAsWarnings="false" />
+  </Target>
+
+  <Target Name="BuildNativeBootstrap"
+          AfterTargets="Build"
+          Condition="'$(WireSockUIAllowManagedOnlyBuild)' != 'true' and '$(Platform)' != 'AnyCPU' and '$(Platform)' != 'Any CPU' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true' and '$(_IsPublishing)' != 'true'">
+    <Error Condition="!Exists('$(TargetPath).config')"
+           Text="The generated managed configuration with binding redirects was not produced." />
+    <Exec Command="powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\scripts\Remove-AuthenticodeSignatures.ps1&quot; -Path &quot;$(TargetDir).&quot;" />
+    <Copy SourceFiles="$(TargetPath).config"
+          DestinationFiles="$(TargetDir)WireSockUI.exe.config" />
+    <ItemGroup>
+      <_NativeBuildPayloadRelativePath Include="$(TargetFileName)" />
+      <_NativeBuildPayloadRelativePath Include="$(TargetFileName).config" />
+      <_NativeBuildPayloadRelativePath Include="WireSockUI.exe.config" />
+      <_NativeBuildPayloadRelativePath Include="@(ReferenceCopyLocalPaths->'%(DestinationSubDirectory)%(Filename)%(Extension)')" />
+    </ItemGroup>
+    <WriteLinesToFile
+      File="$(IntermediateOutputPath)native-bootstrap-payload.txt"
+      Lines="@(_NativeBuildPayloadRelativePath)"
+      Overwrite="true"
+      Encoding="UTF-8" />
+    <Exec Command="powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\scripts\Build-NativeBootstrap.ps1&quot; -Platform &quot;$(Platform)&quot; -Version &quot;$(Version)&quot; -PayloadDirectory &quot;$(TargetDir).&quot; -ExpectedPayloadListPath &quot;$(IntermediateOutputPath)native-bootstrap-payload.txt&quot; -OutputPath &quot;$(TargetDir)WireSockUI.exe&quot; $(NativeBootstrapDevelopmentArgument)" />
+  </Target>
+
+  <Target Name="PublishNativeBootstrap"
+          AfterTargets="Publish"
+          Condition="'$(WireSockUIAllowManagedOnlyBuild)' != 'true' and '$(Platform)' != 'AnyCPU' and '$(Platform)' != 'Any CPU' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <Error Condition="!Exists('$(PublishDir)WireSockUI.Managed.dll.config') and !Exists('$(TargetPath).config')"
+           Text="The generated managed configuration with binding redirects was not produced." />
+    <Copy SourceFiles="$(PublishDir)WireSockUI.Managed.dll.config"
+          DestinationFiles="$(PublishDir)WireSockUI.exe.config"
+          Condition="Exists('$(PublishDir)WireSockUI.Managed.dll.config')" />
+    <Copy SourceFiles="$(TargetPath).config"
+          DestinationFiles="$(PublishDir)WireSockUI.exe.config"
+          Condition="!Exists('$(PublishDir)WireSockUI.Managed.dll.config') and Exists('$(TargetPath).config')" />
+    <!--
+      The CLR host consumes WireSockUI.exe.config. Keeping the identical
+      library-named copy would create a standalone unversioned MSI file that
+      ordinary Windows Installer repair is allowed to preserve after tampering.
+    -->
+    <Delete Files="$(PublishDir)WireSockUI.Managed.dll.config"
+            TreatErrorsAsWarnings="false" />
+    <Exec Command="powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\scripts\Remove-AuthenticodeSignatures.ps1&quot; -Path &quot;$(PublishDir).&quot;" />
+    <ItemGroup>
+      <_NativePublishPayloadRelativePath Include="@(ResolvedFileToPublish->'%(RelativePath)')" />
+      <_NativePublishPayloadRelativePath Remove="WireSockUI.Managed.dll.config" />
+      <_NativePublishPayloadRelativePath Include="WireSockUI.exe.config" />
+    </ItemGroup>
+    <WriteLinesToFile
+      File="$(IntermediateOutputPath)native-bootstrap-publish-payload.txt"
+      Lines="@(_NativePublishPayloadRelativePath)"
+      Overwrite="true"
+      Encoding="UTF-8" />
+    <Exec Command="powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\scripts\Build-NativeBootstrap.ps1&quot; -Platform &quot;$(Platform)&quot; -Version &quot;$(Version)&quot; -PayloadDirectory &quot;$(PublishDir).&quot; -ExpectedPayloadListPath &quot;$(IntermediateOutputPath)native-bootstrap-publish-payload.txt&quot; -OutputPath &quot;$(PublishDir)WireSockUI.exe&quot; -PackagingPayload $(NativeBootstrapDevelopmentArgument)" />
+  </Target>
+</Project>

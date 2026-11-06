@@ -1,0 +1,775 @@
+﻿using System;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
+using WireSockUI.Config;
+using WireSockUI.Native;
+using WireSockUI.Properties;
+
+namespace WireSockUI.Forms
+{
+    public sealed partial class FrmEdit : Form
+    {
+        // RichEdit applies each formatting span synchronously. Keep interactive highlighting bounded;
+        // complete profile validation still runs when the user saves.
+        internal const int MaximumSyntaxHighlightCharacters = 64 * 1024;
+
+        private static readonly Regex ProfileMatch =
+            new Regex(
+                @"^\s*((?<comment>[;#](?!(?-i:@ws:)).*)|(?<section>\[[^\]\r\n]+\])|(?:(?<prefix>(?-i:#@ws:))\s*)?(?<key>[a-zA-Z0-9]+)[ \t]*=[ \t]*(?<value>.*?))\s*$",
+                RegexOptions.Multiline | RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        private static readonly Regex MultiValueMatch =
+            new Regex(@"[^,]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private volatile bool _highlighting;
+
+        private Font _editorBoldFont;
+        private Font _editorItalicFont;
+        private Font _editorRegularFont;
+        private Image _processMenuImage;
+        private Image _directoryMenuImage;
+        private Image _fileMenuImage;
+        private Timer _highlightTimer;
+        private readonly string _originalProfileName;
+        private string _targetConfigurationKeyName;
+        private bool _managedResourcesDisposed;
+        private bool _hasSyntaxDiagnostics;
+
+        public FrmEdit() : this(null)
+        {
+        }
+
+        public FrmEdit(string config) : this(config, null)
+        {
+        }
+
+        internal FrmEdit(string config, string sourcePath)
+        {
+            Initialize();
+
+            ShowInTaskbar = false;
+            txtProfileName.MaxLength = Profile.MaxProfileNameLength;
+            txtEditor.MaxLength = checked((int)Profile.MaxProfileSizeBytes);
+            _originalProfileName = sourcePath == null ? config : null;
+
+            if (string.IsNullOrEmpty(config))
+            {
+                Text = Resources.EditProfileTitleNew;
+                txtEditor.Text = Resources.template_conf;
+                GenerateMissingPrivateKey();
+            }
+            else
+            {
+                Text = string.Format(Resources.EditProfileTitle, config);
+
+                txtProfileName.Text = config;
+                var profilePath = sourcePath ?? Profile.GetProfilePath(config);
+                if (sourcePath == null)
+                {
+                    Profile.EnsureRegularProfileFile(profilePath);
+                    txtEditor.Text = SecureFileSystem.ReadAllText(profilePath, Profile.MaxProfileSizeBytes);
+                }
+                else
+                {
+                    txtEditor.Text = SecureFileSystem.ReadAllText(profilePath, Profile.MaxProfileSizeBytes);
+                }
+            }
+
+            UpdateDerivedPublicKey();
+        }
+
+        public string ReturnValue { get; private set; }
+
+        private void GenerateMissingPrivateKey()
+        {
+            foreach (Match m in ProfileMatch.Matches(txtEditor.Text))
+            {
+                if (!m.Groups["key"].Success ||
+                    !string.Equals(m.Groups["key"].Value, "privatekey", StringComparison.OrdinalIgnoreCase) ||
+                    !m.Groups["value"].Success ||
+                    !string.IsNullOrEmpty(m.Groups["value"].Value))
+                    continue;
+
+                var newPrivateKey = Curve25519.CreateRandomPrivateKey();
+                var base64PrivateKey = Convert.ToBase64String(newPrivateKey);
+                txtEditor.Text = txtEditor.Text
+                    .Remove(m.Groups["value"].Index, m.Groups["value"].Length)
+                    .Insert(m.Groups["value"].Index, base64PrivateKey);
+                return;
+            }
+        }
+
+        internal void UpdateDerivedPublicKey()
+        {
+            txtPublicKey.Text = DeriveInterfacePublicKey(txtEditor.Text) ?? string.Empty;
+        }
+
+        internal static string DeriveInterfacePublicKey(string profileText)
+        {
+            if (string.IsNullOrEmpty(profileText))
+                return null;
+
+            string currentSection = null;
+            string privateKey = null;
+            foreach (Match match in ProfileMatch.Matches(profileText))
+            {
+                if (match.Groups["section"].Success)
+                {
+                    var sectionToken = match.Groups["section"].Value;
+                    currentSection = sectionToken.Substring(1, sectionToken.Length - 2).Trim();
+
+                    // The SDK resets a repeated section, so only the final canonical
+                    // Interface section contributes the displayed derived key.
+                    if (string.Equals(currentSection, "Interface", StringComparison.Ordinal))
+                        privateKey = null;
+                    continue;
+                }
+
+                if (!string.Equals(currentSection, "Interface", StringComparison.Ordinal) ||
+                    !match.Groups["key"].Success ||
+                    !string.Equals(match.Groups["key"].Value, "PrivateKey",
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                privateKey = match.Groups["value"].Success
+                    ? match.Groups["value"].Value
+                    : null;
+            }
+
+            if (string.IsNullOrWhiteSpace(privateKey))
+                return null;
+
+            byte[] binaryKey = null;
+            try
+            {
+                binaryKey = Convert.FromBase64String(privateKey);
+                if (binaryKey.Length != 32)
+                    return null;
+
+                return Convert.ToBase64String(Curve25519.GetPublicKey(binaryKey));
+            }
+            catch (FormatException)
+            {
+                return null;
+            }
+            finally
+            {
+                if (binaryKey != null)
+                    Array.Clear(binaryKey, 0, binaryKey.Length);
+            }
+        }
+
+        private void ApplySyntaxHighlighting()
+        {
+            if (_highlighting) return;
+            if (!ShouldApplySyntaxHighlighting(txtEditor.TextLength))
+            {
+                btnSave.Enabled = true;
+                return;
+            }
+
+            _highlighting = true;
+
+            var hasErrors = false;
+            string currentSection = null;
+
+            // Saving the original settings
+            var originalIndex = txtEditor.SelectionStart;
+            var originalLength = txtEditor.SelectionLength;
+            var originalColor = Color.Black;
+            var editorHadFocus = txtEditor.Focused;
+            var profileText = txtEditor.Text;
+
+            using (txtEditor.SuspendRedraw())
+            {
+                try
+                {
+
+                    // removes any previous highlighting
+                    txtEditor.SelectionStart = 0;
+                    txtEditor.SelectionLength = profileText.Length;
+                    txtEditor.SelectionColor = originalColor;
+
+                    txtEditor.SelectionFont = _editorRegularFont ?? txtEditor.Font;
+
+                    foreach (Match m in ProfileMatch.Matches(profileText))
+                    {
+                        if (m.Groups["comment"].Success)
+                        {
+                            txtEditor.SelectionStart = m.Groups["comment"].Index;
+                            txtEditor.SelectionLength = m.Groups["comment"].Length;
+                            txtEditor.SelectionFont =
+                                _editorItalicFont ?? _editorRegularFont ?? txtEditor.Font;
+
+                            switch (m.Groups["comment"].Value[0])
+                            {
+                                case '#':
+                                    txtEditor.SelectionColor = Color.LightSlateGray;
+                                    break;
+                                case ';':
+                                    txtEditor.SelectionColor = Color.SaddleBrown;
+                                    break;
+                            }
+
+                            continue;
+                        }
+
+                        if (m.Groups["section"].Success)
+                        {
+                            txtEditor.SelectionStart = m.Groups["section"].Index;
+                            txtEditor.SelectionLength = m.Groups["section"].Length;
+                            txtEditor.SelectionColor = Color.DarkBlue;
+                            txtEditor.SelectionFont =
+                                _editorBoldFont ?? _editorRegularFont ?? txtEditor.Font;
+
+                            var sectionToken = m.Groups["section"].Value;
+                            currentSection = sectionToken.Substring(1, sectionToken.Length - 2).Trim();
+                            if (!Profile.IsCanonicalSectionName(currentSection))
+                            {
+                                txtEditor.UnderlineSelection();
+                                hasErrors = true;
+                            }
+
+                            continue;
+                        }
+
+                        if (m.Groups["key"].Success)
+                        {
+                            txtEditor.SelectionStart = m.Groups["key"].Index;
+                            txtEditor.SelectionLength = m.Groups["key"].Length;
+                            txtEditor.SelectionColor = Color.Navy;
+
+                            var enteredKey = m.Groups["key"].Value;
+                            var supportedKey = Profile.TryGetCanonicalKey(
+                                currentSection,
+                                enteredKey,
+                                out var canonicalKey);
+                            if (!supportedKey ||
+                                !string.Equals(enteredKey, canonicalKey, StringComparison.Ordinal))
+                            {
+                                txtEditor.UnderlineSelection();
+                                hasErrors = true;
+                            }
+
+                            var key = (canonicalKey ?? enteredKey).ToLowerInvariant();
+                            var value = string.Empty;
+
+                            if (m.Groups["value"].Success)
+                            {
+                                txtEditor.SelectionStart = m.Groups["value"].Index;
+                                txtEditor.SelectionLength = m.Groups["value"].Length;
+                                txtEditor.SelectionColor = Color.DarkGreen;
+
+                                value = m.Groups["value"].Value;
+                            }
+
+                            if (!supportedKey)
+                                continue;
+
+                            if (string.Equals(currentSection, "Interface", StringComparison.Ordinal) &&
+                                ConfigValueValidator.TryGetInterfaceExtensionRule(
+                                    canonicalKey,
+                                    out var interfaceExtensionRule))
+                            {
+                                if (!interfaceExtensionRule.IsValid(value))
+                                {
+                                    txtEditor.UnderlineSelection();
+                                    hasErrors = true;
+                                }
+
+                                continue;
+                            }
+
+                            switch (key)
+                            {
+                                // base64 256-bit keys
+                                case "privatekey":
+                                    {
+                                        if (string.IsNullOrEmpty(value))
+                                        {
+                                            txtEditor.UnderlineSelection();
+                                            hasErrors = true;
+                                        }
+                                        else
+                                        {
+                                            try
+                                            {
+                                                var binaryKey = Convert.FromBase64String(value);
+                                                if (binaryKey.Length != 32)
+                                                    throw new FormatException();
+                                            }
+                                            catch (FormatException)
+                                            {
+                                                txtEditor.UnderlineSelection();
+                                                hasErrors = true;
+                                            }
+                                        }
+                                    }
+                                    break;
+                                case "publickey":
+                                case "presharedkey":
+                                    {
+                                        if (key == "publickey" && string.IsNullOrWhiteSpace(value))
+                                        {
+                                            txtEditor.UnderlineSelection();
+                                            hasErrors = true;
+                                        }
+                                        else if (!string.IsNullOrEmpty(value))
+                                            try
+                                            {
+                                                var binaryKey = Convert.FromBase64String(value);
+
+                                                if (binaryKey.Length != 32)
+                                                    throw new FormatException();
+                                            }
+                                            catch (FormatException)
+                                            {
+                                                txtEditor.UnderlineSelection();
+                                                hasErrors = true;
+                                            }
+                                    }
+                                    break;
+                                // IPv4/IPv6 CIDR notation values
+                                case "address":
+                                case "allowedips":
+                                case "disallowedips":
+                                    {
+                                        if (key != "disallowedips" && string.IsNullOrWhiteSpace(value))
+                                        {
+                                            txtEditor.UnderlineSelection();
+                                            hasErrors = true;
+                                        }
+
+                                        foreach (Match e in MultiValueMatch.Matches(value))
+                                            if (!string.IsNullOrWhiteSpace(e.Value) &&
+                                                !IpHelper.IsValidSubnetOrSingleIpAddress(e.Value.Trim()))
+                                            {
+                                                txtEditor.SelectionStart = m.Groups["value"].Index + e.Index;
+                                                txtEditor.SelectionLength = e.Length;
+                                                txtEditor.UnderlineSelection();
+                                                hasErrors = true;
+                                            }
+                                    }
+                                    break;
+                                // IPv4/IPv6 values
+                                case "dns":
+                                    {
+                                        foreach (Match e in MultiValueMatch.Matches(value))
+                                            if (!string.IsNullOrWhiteSpace(e.Value) && !IpHelper.IsValidIpAddress(e.Value.Trim()))
+                                            {
+                                                txtEditor.SelectionStart = m.Groups["value"].Index + e.Index;
+                                                txtEditor.SelectionLength = e.Length;
+                                                txtEditor.UnderlineSelection();
+                                                hasErrors = true;
+                                            }
+                                    }
+
+                                    break;
+                                // IPv4, IPv6 or DNS value
+                                case "endpoint":
+                                    if (!IpHelper.IsValidAddress(value.Trim()))
+                                    {
+                                        txtEditor.UnderlineSelection();
+                                        hasErrors = true;
+                                    }
+
+                                    break;
+                                case "socks5proxy":
+                                    if (!string.IsNullOrWhiteSpace(value) && !IpHelper.IsValidAddress(value.Trim()))
+                                    {
+                                        txtEditor.UnderlineSelection();
+                                        hasErrors = true;
+                                    }
+
+                                    break;
+                                // Numerical values
+                                case "mtu":
+                                    if (!ConfigValueValidator.IsUIntDecimalInRange(value, 576, ushort.MaxValue))
+                                    {
+                                        txtEditor.UnderlineSelection();
+                                        hasErrors = true;
+                                    }
+                                    break;
+                                case "listenport":
+                                    if (!ConfigValueValidator.IsUIntDecimalInRange(value, 0, ushort.MaxValue))
+                                    {
+                                        txtEditor.UnderlineSelection();
+                                        hasErrors = true;
+                                    }
+                                    break;
+                                case "persistentkeepalive":
+                                case "scriptexectimeout":
+                                    if (!ConfigValueValidator.IsUIntDecimalInRange(value, 0, uint.MaxValue))
+                                    {
+                                        txtEditor.UnderlineSelection();
+                                        hasErrors = true;
+                                    }
+                                    break;
+                                // Comma-delimited string values
+                                case "allowedapps":
+                                case "disallowedapps":
+                                    {
+                                        foreach (Match e in MultiValueMatch.Matches(value))
+                                            if (!string.IsNullOrWhiteSpace(e.Value) &&
+                                                !Regex.IsMatch(e.Value.Trim(),
+                                                    @"^(?:[a-zA-Z]:\\)?(?:[^<>:\\\""/\\|?*\n\r]+\\)*[^<>:\\\""/\\|?*\n\r]*$",
+                                                    RegexOptions.IgnoreCase))
+                                            {
+                                                txtEditor.SelectionStart = m.Groups["value"].Index + e.Index;
+                                                txtEditor.SelectionLength = e.Length;
+                                                txtEditor.UnderlineSelection();
+                                                hasErrors = true;
+                                            }
+                                    }
+                                    break;
+                                // Boolean values
+                                case "bypasslantraffic":
+                                case "virtualadaptermode":
+                                case "socks5proxyalltraffic":
+                                    if (!ConfigValueValidator.IsBool(value))
+                                    {
+                                        txtEditor.UnderlineSelection();
+                                        hasErrors = true;
+                                    }
+                                    break;
+                                case "enabledefaultgateway":
+                                    if (!string.Equals(value.Trim(), "true", StringComparison.Ordinal) &&
+                                        !string.Equals(value.Trim(), "false", StringComparison.Ordinal))
+                                    {
+                                        txtEditor.UnderlineSelection();
+                                        hasErrors = true;
+                                    }
+                                    break;
+                                // Known free-form or WireGuard-managed values
+                                case "table":
+                                    break;
+                                case "i1":
+                                case "i2":
+                                case "i3":
+                                case "i4":
+                                case "i5":
+                                    break;
+                                // String values
+                                case "socks5proxyusername":
+                                case "socks5proxypassword":
+                                case "preup":
+                                case "postup":
+                                case "predown":
+                                case "postdown":
+                                    break;
+                                // Unrecognized keys
+                                default:
+                                    break;
+                            }
+                        }
+                    }
+
+                    // Highlighting is advisory. The authoritative bounded parser runs on save
+                    // and supplies the actionable diagnostic; never strand users behind a
+                    // heuristic false positive (for example, an overwritten earlier section).
+                    _hasSyntaxDiagnostics = hasErrors;
+                    btnSave.Enabled = true;
+                }
+                finally
+                {
+                    try
+                    {
+                        // restoring the original settings
+                        txtEditor.SelectionStart = Math.Min(originalIndex, txtEditor.TextLength);
+                        txtEditor.SelectionLength =
+                            Math.Min(originalLength, txtEditor.TextLength - txtEditor.SelectionStart);
+                        txtEditor.SelectionColor = originalColor;
+                        if (editorHadFocus)
+                            txtEditor.Focus();
+                    }
+                    catch (Exception ex)
+                    {
+                        Trace.TraceWarning($"Failed to restore editor selection after highlighting: {ex.Message}");
+                    }
+
+                    _highlighting = false;
+                }
+            }
+        }
+
+        internal static bool ShouldApplySyntaxHighlighting(int textLength)
+        {
+            return textLength >= 0 && textLength <= MaximumSyntaxHighlightCharacters;
+        }
+
+        private void InsertOrAppendConfigurationValue(string key, string value)
+        {
+            if (!ProfileConfigurationEditor.TryInsertOrAppendPeerValue(
+                    txtEditor.Text,
+                    key,
+                    value,
+                    out var updatedConfiguration,
+                    out var selectionIndex,
+                    out var diagnostic))
+            {
+                MessageBox.Show(diagnostic, Resources.EditProfileError, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            txtEditor.Text = updatedConfiguration;
+            txtEditor.SelectionStart = Math.Min(selectionIndex, txtEditor.TextLength);
+            txtEditor.SelectionLength = 0;
+        }
+
+        private void Initialize()
+        {
+            InitializeComponent();
+            UiFonts.TryApplyMessageBoxFont(messageBoxFont => Font = messageBoxFont);
+            if (!UiFonts.TryCreateFont("Consolas", 10F, out _editorRegularFont))
+                UiFonts.TryCreateFont(txtEditor.Font, FontStyle.Regular, out _editorRegularFont);
+            if (_editorRegularFont != null)
+                txtEditor.Font = _editorRegularFont;
+            UiFonts.TryCreateFont(txtEditor.Font, FontStyle.Italic, out _editorItalicFont);
+            UiFonts.TryCreateFont(txtEditor.Font, FontStyle.Bold, out _editorBoldFont);
+            _highlightTimer = new Timer { Interval = 150 };
+            _highlightTimer.Tick += OnHighlightTimerTick;
+
+            Icon = Resources.ico;
+            txtProfileName.SetCueBanner(Resources.EditProfileCue);
+            _processMenuImage = GetWindowsIconBitmap(WindowsIcons.Icons.ProcessList, 16);
+            _directoryMenuImage = GetWindowsIconBitmap(WindowsIcons.Icons.OpenTunnel, 16);
+            _fileMenuImage = GetWindowsIconBitmap(WindowsIcons.Icons.NewTunnel, 16);
+            toolStripMenuItemByProcName.Image = _processMenuImage;
+            toolStripMenuItemByDirPath.Image = _directoryMenuImage;
+            toolStripMenuItemByFilePath.Image = _fileMenuImage;
+        }
+
+        private void OnSaveClick(object sender, EventArgs e)
+        {
+            if (!ValidateEditorBeforeSave())
+            {
+                DialogResult = DialogResult.None;
+                return;
+            }
+
+            string tmpProfile = null;
+            Profile profile;
+
+            try
+            {
+                tmpProfile = ProfileFileTransaction.WriteTemporaryProfile(txtEditor.Text);
+                profile = new Profile(tmpProfile);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, Resources.EditProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                TryDeleteTemporaryProfile(tmpProfile);
+
+                DialogResult = DialogResult.None;
+                return;
+            }
+
+            var requestedProfileName = txtProfileName.Text;
+            if (!Profile.IsValidProfileName(requestedProfileName))
+            {
+                MessageBox.Show(Resources.EditProfileNameError, Resources.EditProfileError, MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                TryDeleteTemporaryProfile(tmpProfile);
+
+                DialogResult = DialogResult.None;
+                return;
+            }
+
+            string profilePath;
+            try
+            {
+                profilePath = Profile.GetProfilePath(requestedProfileName);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, Resources.EditProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                TryDeleteTemporaryProfile(tmpProfile);
+
+                DialogResult = DialogResult.None;
+                return;
+            }
+
+            var isExistingProfile = !string.IsNullOrEmpty(_originalProfileName);
+            var isRename = isExistingProfile &&
+                           !string.Equals(_originalProfileName, requestedProfileName,
+                               StringComparison.Ordinal);
+            var destinationExists = Profile.ProfilePathExists(profilePath);
+            var destinationIsOriginal = false;
+            try
+            {
+                destinationIsOriginal = isExistingProfile && destinationExists &&
+                                        SecureFileSystem.ReferToSameFile(
+                                            Profile.GetProfilePath(_originalProfileName), profilePath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, Resources.EditProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                TryDeleteTemporaryProfile(tmpProfile);
+
+                DialogResult = DialogResult.None;
+                return;
+            }
+
+            if (destinationExists && (!isExistingProfile || !destinationIsOriginal))
+            {
+                var message = Profile.IsRegularProfileFile(profilePath, out var diagnostic)
+                    ? string.Format(Resources.AddProfileExistsMsg, requestedProfileName)
+                    : diagnostic;
+
+                MessageBox.Show(message,
+                    Resources.EditProfileError,
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                TryDeleteTemporaryProfile(tmpProfile);
+
+                DialogResult = DialogResult.None;
+                return;
+            }
+
+            if (!ProfileScriptWarning.ConfirmIfProfileHasScriptHooks(this, profile))
+            {
+                TryDeleteTemporaryProfile(tmpProfile);
+
+                DialogResult = DialogResult.None;
+                return;
+            }
+
+            try
+            {
+                var originalProfilePath = isExistingProfile ? Profile.GetProfilePath(_originalProfileName) : null;
+                ProfileFileTransaction.Commit(tmpProfile, profilePath, originalProfilePath);
+                tmpProfile = null;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, Resources.EditProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                TryDeleteTemporaryProfile(tmpProfile);
+
+                DialogResult = DialogResult.None;
+                return;
+            }
+
+            ReturnValue = requestedProfileName;
+
+            Close();
+        }
+
+        private bool ValidateEditorBeforeSave()
+        {
+            if (_highlightTimer != null)
+                _highlightTimer.Stop();
+
+            UpdateDerivedPublicKey();
+            ApplySyntaxHighlighting();
+            // Profile construction below is the authoritative SDK-compatible validation
+            // boundary and produces the error shown to the user.
+            return true;
+        }
+
+        private static void TryDeleteTemporaryProfile(string tmpProfile)
+        {
+            ProfileFileTransaction.TryDeleteTemporaryProfile(tmpProfile);
+        }
+
+        private void OnProfileChanged(object sender, EventArgs e)
+        {
+            ScheduleSyntaxHighlighting();
+        }
+
+        private void ScheduleSyntaxHighlighting()
+        {
+            if (_highlighting || _highlightTimer == null)
+                return;
+
+            _highlightTimer.Stop();
+            _highlightTimer.Start();
+        }
+
+        private void OnHighlightTimerTick(object sender, EventArgs e)
+        {
+            _highlightTimer.Stop();
+            UpdateDerivedPublicKey();
+            ApplySyntaxHighlighting();
+        }
+
+        private void OnAddAllowedAppClick(object sender, EventArgs e)
+        {
+            _targetConfigurationKeyName = "AllowedApps";
+            contextMenuStripAllow.Show(btnAddAllowedApp, new Point(0, btnAddAllowedApp.Height));
+        }
+
+        private void OnAddDisallowedAppClick(object sender, EventArgs e)
+        {
+            _targetConfigurationKeyName = "DisallowedApps";
+            contextMenuStripAllow.Show(btnAddDisallowedApp, new Point(0, btnAddDisallowedApp.Height));
+        }
+
+        private void OnAllowAppByProcessNameClick(object sender, EventArgs e)
+        {
+            using (var taskManager = new TaskManager())
+            {
+                if (taskManager.ShowDialog() != DialogResult.OK) return;
+                InsertOrAppendConfigurationValue(_targetConfigurationKeyName, taskManager.ReturnValue);
+            }
+        }
+
+        private void OnAllowAppByDirPathClick(object sender, EventArgs e)
+        {
+            using (var openFolderDialog = new FolderBrowserDialog())
+            {
+                if (openFolderDialog.ShowDialog() != DialogResult.OK) return;
+                openFolderDialog.SelectedPath += Path.DirectorySeparatorChar;
+
+                InsertOrAppendConfigurationValue(_targetConfigurationKeyName, openFolderDialog.SelectedPath);
+            }
+        }
+
+        private void OnAllowAppByFileNameClick(object sender, EventArgs e)
+        {
+            using (var openFileDialog = new OpenFileDialog())
+            {
+                if (openFileDialog.ShowDialog() != DialogResult.OK) return;
+                InsertOrAppendConfigurationValue(_targetConfigurationKeyName, openFileDialog.FileName);
+            }
+        }
+
+        private void DisposeManagedResources()
+        {
+            if (_managedResourcesDisposed)
+                return;
+
+            _managedResourcesDisposed = true;
+            if (_highlightTimer != null)
+            {
+                _highlightTimer.Stop();
+                _highlightTimer.Tick -= OnHighlightTimerTick;
+                _highlightTimer.Dispose();
+                _highlightTimer = null;
+            }
+
+            _editorRegularFont?.Dispose();
+            _editorItalicFont?.Dispose();
+            _editorBoldFont?.Dispose();
+            _editorRegularFont = null;
+            _editorItalicFont = null;
+            _editorBoldFont = null;
+
+            toolStripMenuItemByProcName.Image = null;
+            toolStripMenuItemByDirPath.Image = null;
+            toolStripMenuItemByFilePath.Image = null;
+            _processMenuImage?.Dispose();
+            _directoryMenuImage?.Dispose();
+            _fileMenuImage?.Dispose();
+            _processMenuImage = null;
+            _directoryMenuImage = null;
+            _fileMenuImage = null;
+        }
+
+        private static Bitmap GetWindowsIconBitmap(WindowsIcons.Icons icon, int size)
+        {
+            return WindowsIcons.GetWindowsIconBitmap(icon, size);
+        }
+    }
+}

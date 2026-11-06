@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     RequiredVersion="6.0.0">
+  <Package
+      Name="WireSock UI"
+      Manufacturer="WireSock Foundation"
+      Version="$(ProductVersion)"
+      ProductCode="$(ProductCode)"
+      UpgradeCode="{5C1DDAE5-6681-41BF-B153-AB2952AA6DF1}"
+      Scope="perMachine"
+      InstallerVersion="500"
+      Compressed="yes"
+      UpgradeStrategy="majorUpgrade">
+
+    <SummaryInformation
+        Description="WireSock UI per-machine installer"
+        Comments="Installs the architecture-specific WireSock UI runtime payload." />
+
+    <!--
+      Removing the previous package inside the transaction removes files that no
+      longer belong to the product, while rollback restores the previous version.
+      Same-version detection is intentional so an architecture transition cannot
+      install two packages into the shared, stable application directory.
+    -->
+    <MajorUpgrade
+        AllowDowngrades="no"
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+        IgnoreRemoveFailure="no"
+        MigrateFeatures="yes"
+        Schedule="afterInstallInitialize" />
+
+    <Property Id="NETFRAMEWORK472RELEASE" Secure="yes">
+      <RegistrySearch
+          Id="NetFramework472ReleaseSearch"
+          Root="HKLM"
+          Key="SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full"
+          Name="Release"
+          Type="raw"
+          Bitness="always32" />
+    </Property>
+    <!--
+      .NET Framework 4.7.2 supports Windows 7 SP1 and Windows 8.1, but not
+      Windows 8. VersionNT is 601, 602, and 603 respectively; modern Windows
+      Installer compatibility views report at least 603. Keep Installed as an
+      escape hatch for maintenance and uninstall.
+    -->
+    <?if $(var.ProductFlavor) = uwp ?>
+      <Launch
+          Condition="Installed OR VersionNT &gt;= 603"
+          Message="WireSock UI UWP requires Windows 8.1 or later." />
+    <?else?>
+      <Launch
+          Condition="Installed OR VersionNT &gt;= 603 OR (VersionNT = 601 AND ServicePackLevel &gt;= 1)"
+          Message="WireSock UI requires Windows 7 SP1, Windows 8.1, or later." />
+    <?endif?>
+    <?if $(var.ProductArchitecture) = arm64 ?>
+      <!-- .NET Framework did not gain native ARM64 CLR support until 4.8.1. -->
+      <Launch
+          Condition="Installed OR NETFRAMEWORK472RELEASE &gt;= &quot;#533320&quot;"
+          Message="WireSock UI for ARM64 requires Microsoft .NET Framework 4.8.1 or later." />
+    <?else?>
+      <Launch
+          Condition="Installed OR NETFRAMEWORK472RELEASE &gt;= &quot;#461808&quot;"
+          Message="WireSock UI requires Microsoft .NET Framework 4.7.2 or later." />
+    <?endif?>
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Property Id="WIRESOCKUIARCHITECTURE" Value="$(ProductArchitecture)" />
+    <Property Id="WIRESOCKUIFLAVOR" Value="$(ProductFlavor)" />
+    <Property Id="ARPPRODUCTICON" Value="WireSockUI.ico" />
+    <Icon Id="WireSockUI.ico" SourceFile="..\WireSockUI\Resources\wiresock.ico" />
+
+    <!--
+      The mixed-case identifier is deliberately private. Callers cannot redirect
+      this elevated package to a user-writable directory with an MSI property.
+      Windows Installer creates the directory through its per-machine service.
+      MSI 5 processes the MsiLockPermissionsEx table from the CreateFolders and
+      InstallFiles standard actions, without executable custom-action code.
+    -->
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <!--
+        This new single-leaf namespace intentionally does not reuse the legacy
+        Program Files\WireSock UI path or introduce an intermediate vendor
+        directory. A weak pre-existing path can be prepared as a junction or
+        with hard links before elevation; ACL repair after traversal is too late.
+      -->
+      <Directory
+          Id="WireSockInstallFolder"
+          Name="WireSock Foundation WireSock UI"
+          ComponentGuidGenerationSeed="$(FileComponentGuidSeed)">
+        <Component
+            Id="ApplicationDirectorySecurity"
+            Guid="$(SecurityComponentGuid)"
+            Feature="CoreFeature">
+          <CreateFolder>
+            <PermissionEx
+                Id="ApplicationDirectoryPermission"
+              Sddl="O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)" />
+          </CreateFolder>
+        </Component>
+        <!--
+          The CLR configuration is product-owned rather than user data. Making
+          it a companion of the versioned native launcher lets Windows
+          Installer's normal "omus" repair mode replace a modified copy instead
+          of applying the preserve-user-data rule for unversioned key files.
+        -->
+        <Component
+            Id="WireSockRuntimeHostFile"
+            Guid="$(RuntimeHostComponentGuid)"
+            Feature="CoreFeature">
+          <File
+              Id="WireSockRuntimeHostFile"
+              Source="!(bindpath.Payload)\WireSockUI.exe"
+              KeyPath="yes">
+            <PermissionEx
+                Id="WireSockRuntimeHostPermission"
+                Sddl="O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;BU)" />
+          </File>
+          <File
+              Id="WireSockRuntimeConfigFile"
+              Source="!(bindpath.Payload)\WireSockUI.exe.config"
+              CompanionFile="WireSockRuntimeHostFile">
+            <PermissionEx
+                Id="WireSockRuntimeConfigPermission"
+                Sddl="O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;BU)" />
+          </File>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- ProgramMenuFolder resolves to the all-users Programs folder for ALLUSERS=1. -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component
+          Id="StartMenuShortcutComponent"
+          Guid="$(ShortcutComponentGuid)"
+          Feature="StartMenuShortcutFeature">
+        <Shortcut
+            Id="WireSockStartMenuShortcut"
+            Name="WireSock UI"
+            Description="WireSock UI"
+            Target="[WireSockInstallFolder]WireSockUI.exe"
+            WorkingDirectory="WireSockInstallFolder"
+            Advertise="no"
+            Icon="WireSockUI.ico"
+            IconIndex="0">
+          <ShortcutProperty
+              Key="System.AppUserModel.ID"
+              Value="WireSock.Foundation.WireSock.UI" />
+        </Shortcut>
+        <RegistryValue
+            Root="HKLM"
+            Key="Software\WireSock Foundation\WireSock UI"
+            Name="StartMenuShortcut"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- DesktopFolder resolves to the shared desktop for this per-machine package. -->
+    <StandardDirectory Id="DesktopFolder">
+      <Component
+          Id="DesktopShortcutComponent"
+          Guid="$(DesktopShortcutComponentGuid)"
+          Feature="DesktopShortcutFeature">
+        <Shortcut
+            Id="WireSockDesktopShortcut"
+            Name="WireSock UI"
+            Description="WireSock UI"
+            Target="[WireSockInstallFolder]WireSockUI.exe"
+            WorkingDirectory="WireSockInstallFolder"
+            Advertise="no"
+            Icon="WireSockUI.ico"
+            IconIndex="0" />
+        <RegistryValue
+            Root="HKLM"
+            Key="Software\WireSock Foundation\WireSock UI"
+            Name="DesktopShortcut"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!--
+      Build-Msi.ps1 generates one explicit component per manifest-bound file.
+      Guid="*" plus the directory seed preserves WiX's installed-path component
+      GUIDs, while per-file and per-directory PermissionEx rows make
+      force-all repair normalize ACLs that were changed after installation.
+    -->
+    <?include $(var.PayloadAuthoringPath) ?>
+
+    <!--
+      Only shortcut placement is configurable. The application feature and its
+      protected installation directory remain mandatory and non-configurable.
+    -->
+    <Feature
+        Id="CoreFeature"
+        Title="WireSock UI"
+        Description="WireSock UI application files"
+        Display="expand"
+        Level="1"
+        AllowAbsent="no"
+        AllowAdvertise="no">
+      <Feature
+          Id="StartMenuShortcutFeature"
+          Title="Start menu shortcut"
+          Description="Add WireSock UI to the Start menu and enable notifications"
+          Level="1"
+          AllowAdvertise="no" />
+      <Feature
+          Id="DesktopShortcutFeature"
+          Title="Desktop shortcut"
+          Description="Create a WireSock UI shortcut on the desktop"
+          Level="1"
+          AllowAdvertise="no" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_FeatureTree" />
+    <WixVariable
+        Id="WixUILicenseRtf"
+        Value="License.rtf" />
+  </Package>
+</Wix>

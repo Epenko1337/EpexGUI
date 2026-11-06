@@ -1,0 +1,9627 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Configuration;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Security.Principal;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using System.Xml;
+using System.Xml.Linq;
+using WireSockUI;
+using WireSockUI.Config;
+using WireSockUI.Diagnostics;
+using WireSockUI.Extensions;
+using WireSockUI.Forms;
+using WireSockUI.Native;
+
+namespace WireSockUI.Tests
+{
+    internal static partial class Program
+    {
+        private static readonly string PrivateKey = Convert.ToBase64String(Enumerable.Repeat((byte)1, 32).ToArray());
+        private static readonly string PublicKey = Convert.ToBase64String(Enumerable.Repeat((byte)2, 32).ToArray());
+        private const int SymbolicLinkFlagFile = 0;
+        private const int SymbolicLinkFlagAllowUnprivilegedCreate = 2;
+        private const int TestTimeoutMilliseconds = 120000;
+        private const int MoveFileWriteThrough = 0x8;
+        private const string WinFormsFontFallbackHelperSwitch =
+            "--winforms-font-fallback-helper";
+
+        private sealed class TestExecutionResult
+        {
+            private TestExecutionResult(bool timedOut, Exception exception)
+            {
+                TimedOut = timedOut;
+                Exception = exception;
+            }
+
+            internal bool TimedOut { get; }
+            internal Exception Exception { get; }
+
+            internal static TestExecutionResult Success()
+            {
+                return new TestExecutionResult(false, null);
+            }
+
+            internal static TestExecutionResult Timeout()
+            {
+                return new TestExecutionResult(true, null);
+            }
+
+            internal static TestExecutionResult Failure(Exception exception)
+            {
+                return new TestExecutionResult(false,
+                    exception ?? throw new ArgumentNullException(nameof(exception)));
+            }
+        }
+
+        private sealed class TestSkippedException : Exception
+        {
+            internal TestSkippedException(string message) : base(message)
+            {
+            }
+        }
+
+        private static bool TestKillSwitch
+        {
+            get => PrivilegedSettingsStore.EnableKillSwitch;
+            set
+            {
+                var current = PrivilegedSettingsStore.Capture();
+                PrivilegedSettingsStore.SetForTests(new PrivilegedSettingsSnapshot(
+                    current.AutoConnect,
+                    current.LastProfile,
+                    current.UseAdapter,
+                    value));
+            }
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        private static extern bool CreateSymbolicLink(
+            string lpSymlinkFileName,
+            string lpTargetFileName,
+            int dwFlags);
+
+        [DllImport("kernel32.dll", EntryPoint = "SetLastError", SetLastError = true)]
+        private static extern void SetLastErrorForTest(uint errorCode);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateHardLink(string newFileName, string existingFileName,
+            IntPtr securityAttributes);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool MoveFileEx(string existingFileName, string newFileName, int flags);
+
+        private static int Main(string[] args)
+        {
+            if (TryRunWinFormsFontFallbackTestHelper(args, out var fontFallbackHelperExitCode))
+                return fontFallbackHelperExitCode;
+
+            if (TryRunAutoRunServiceTestHelper(args, out var autoRunHelperExitCode))
+                return autoRunHelperExitCode;
+
+            var sdkIntegrationRequested = args?.Any(arg => string.Equals(
+                arg, "--sdk-integration", StringComparison.OrdinalIgnoreCase)) == true;
+            var syntheticSdkIntegrationRequested = args?.Any(arg => string.Equals(
+                arg, "--sdk-synthetic-integration", StringComparison.OrdinalIgnoreCase)) == true;
+            if (sdkIntegrationRequested && syntheticSdkIntegrationRequested)
+            {
+                Console.WriteLine("FAIL --sdk-integration and --sdk-synthetic-integration are mutually exclusive.");
+                return 64;
+            }
+            if (sdkIntegrationRequested || syntheticSdkIntegrationRequested)
+                return RunSdkIntegrationSmoke(!syntheticSdkIntegrationRequested);
+
+            var tests = new Dictionary<string, Action>
+            {
+                { "Profile rejects empty required values", ProfileRejectsEmptyRequiredValues },
+                { "Profile matches SDK blank routing list handling", ProfileMatchesSdkBlankRoutingListHandling },
+                { "IP validation rejects malformed values safely", IpValidationRejectsMalformedValuesSafely },
+                { "Profile validates Windows-safe profile names", ProfileValidatesWindowsSafeNames },
+                { "Profile path rejects unsafe names", ProfilePathRejectsUnsafeNames },
+                { "Profile reports configured script hooks", ProfileReportsConfiguredScriptHooks },
+                { "Script hook warning preserves and escapes complete commands", ScriptHookWarningPreservesAndEscapesCompleteCommands },
+                { "Profile enumeration accepts uppercase conf extension", ProfileEnumerationAcceptsUppercaseConfExtension },
+                { "Profile enumeration creates missing overridden config folder", ProfileEnumerationCreatesMissingOverriddenConfigFolder },
+                { "Profile enumeration rejects oversized folders", ProfileEnumerationRejectsOversizedFolders },
+                { "Profile catalog reports enumeration failures without replacing data", ProfileCatalogReportsEnumerationFailures },
+                { "Profile catalog rejects case-insensitive duplicates", ProfileCatalogRejectsCaseInsensitiveDuplicates },
+                { "Profile creation rejects case-insensitive collisions", ProfileCreationRejectsCaseInsensitiveCollisions },
+                { "Profile rejects oversized installed files", ProfileRejectsOversizedInstalledFiles },
+                { "Profile rejects directory profile paths", ProfileRejectsDirectoryProfilePaths },
+                { "Profile rejects reparse point profile files", ProfileRejectsReparsePointProfileFiles },
+                { "Profile reports missing profile paths clearly", ProfileReportsMissingProfilePathsClearly },
+                { "Profile reports malformed profile paths consistently", ProfileReportsMalformedProfilePathsConsistently },
+                { "Parser accepts only exact WireSock directive prefixes", ParserAcceptsOnlyExactWireSockDirectivePrefixes },
+                { "Parser matches SDK casing", ParserMatchesSdkCasing },
+                { "Parser matches SDK last-section-wins behavior", ParserMatchesSdkLastSectionWinsBehavior },
+                { "Parser rejects malformed lines", ParserRejectsMalformedLines },
+                { "Parser matches SDK duplicate-key projection", ParserMatchesSdkDuplicateKeyProjection },
+                { "Parser accepts SDK UTF-8 BOM and rejects incompatible encodings", ParserAcceptsSdkUtf8BomAndRejectsIncompatibleEncodings },
+                { "Parser rejects malformed UTF-8", ParserRejectsMalformedUtf8 },
+                { "Parser rejects keys before sections", ParserRejectsKeysBeforeSections },
+                { "Parser rejects empty section names", ParserRejectsEmptySectionNames },
+                { "Parser trims section names", ParserTrimsSectionNames },
+                { "Profile accepts Amnezia passthrough options", ProfileAcceptsAmneziaPassthroughOptions },
+                { "Profile rejects invalid Amnezia passthrough options", ProfileRejectsInvalidAmneziaPassthroughOptions },
+                { "Profile validates Amnezia option groups", ProfileValidatesAmneziaOptionGroups },
+                { "Profile validates protocol imitation combinations", ProfileValidatesProtocolImitationCombinations },
+                { "Profile validates current SDK numeric ranges", ProfileValidatesCurrentSdkNumericRanges },
+                { "Profile rejects SDK casing mismatches", ProfileRejectsSdkCasingMismatches },
+                { "Profile rejects unsupported direct-DLL directives", ProfileRejectsUnsupportedDirectDllDirectives },
+                { "Profile rejects unknown native directives", ProfileRejectsUnknownNativeDirectives },
+                { "Interface extension validation rules are shared", InterfaceExtensionValidationRulesAreShared },
+                { "Stats formatting handles extreme values", StatsFormattingHandlesExtremeValues },
+                { "Stats formatting handles missing handshakes", StatsFormattingHandlesMissingHandshakes },
+                { "Time formatting uses plural hours", TimeFormattingUsesPluralHours },
+                { "Time formatting uses singular hour for partial second hour", TimeFormattingUsesSingularHourForPartialSecondHour },
+                { "Time formatting handles future values", TimeFormattingHandlesFutureValues },
+                { "Time formatting uses localized day text", TimeFormattingUsesLocalizedDayText },
+                { "Global config folder containment handles drive roots", GlobalConfigFolderContainmentHandlesDriveRoots },
+                { "Global rejects unavailable or relative special folders", GlobalRejectsInvalidSpecialFolderRoots },
+                { "Global permits redirected legacy ApplicationData only", GlobalPermitsRedirectedLegacyApplicationDataOnly },
+                { "Global prefers trusted ProgramData storage", GlobalPrefersTrustedProgramDataStorage },
+                { "Global resolves architecture-stable Program Files storage", GlobalResolvesArchitectureStableProgramFilesStorage },
+                { "Global falls back to protected Program Files storage", GlobalFallsBackToProtectedProgramFilesStorage },
+                { "Global keeps an existing trusted fallback", GlobalKeepsExistingTrustedFallback },
+                { "Global rejects an unsafe existing fallback", GlobalRejectsUnsafeExistingFallback },
+                { "Global does not launder an unsafe fallback ACL", GlobalDoesNotLaunderUnsafeFallbackAcl },
+                { "Global does not bypass an unsafe existing preferred tree", GlobalDoesNotBypassUnsafeExistingPreferredTree },
+                { "Global rebases every secure storage path", GlobalRebasesEverySecureStoragePath },
+                { "Global rejects unavailable preferred and fallback storage", GlobalRejectsUnavailablePreferredAndFallbackStorage },
+                { "Global rejects unsecured config folder overrides by default", GlobalRejectsUnsecuredConfigFolderOverridesByDefault },
+                { "Global rejects untrusted pre-existing secure data without laundering ACLs", GlobalRejectsUntrustedPreexistingSecureData },
+                { "Global fails closed on configuration directory reparse points", GlobalFailsClosedOnConfigurationDirectoryReparsePoints },
+                { "Global bounds secured tree enumeration", GlobalBoundsSecuredTreeEnumeration },
+                { "Global removes configuration file reparse points by handle", GlobalRemovesConfigurationFileReparsePointsByHandle },
+                { "Profile rejects user-writable secured files", ProfileRejectsUserWritableSecuredFiles },
+                { "Release version parser handles SemVer tags", ReleaseVersionParserHandlesSemVerTags },
+                { "Bounded response reader rejects declared and streamed overflow", BoundedResponseReaderRejectsDeclaredAndStreamedOverflow },
+                { "Program path normalization preserves drive roots", ProgramPathNormalizationPreservesDriveRoots },
+                { "Program rejects untrusted application payloads", ProgramRejectsUntrustedApplicationPayloads },
+                { "Program enumerates nested application payloads", ProgramEnumeratesNestedApplicationPayloads },
+                { "Program bounds application payload enumeration", ProgramBoundsApplicationPayloadEnumeration },
+                { "Program distinguishes x64 and ARM64 PE images", ProgramDistinguishesBinaryArchitectures },
+                { "Program discovers WireSock libraries only from registered locations", ProgramDiscoversWireSockLibrariesOnlyFromRegisteredLocations },
+                { "Program rejects user-writable WireSock library directories", ProgramRejectsUserWritableWireSockLibraryDirectories },
+                { "Program detects user-writable WireSock library files", ProgramDetectsUserWritableWireSockLibraryFiles },
+                { "Program bounds WireSock SDK companion enumeration", ProgramBoundsWireSockSdkCompanionEnumeration },
+                { "Program reports attribute inspection failures", ProgramReportsAttributeInspectionFailures },
+                { "Program rejects an untrusted WireSock crash handler", ProgramRejectsUntrustedWireSockCrashHandler },
+                { "Program distinguishes read-only and writable ACLs", ProgramDistinguishesReadOnlyAndWritableAcls },
+                { "Program restricts trusted owner SIDs", ProgramRestrictsTrustedOwnerSids },
+                { "Program checks elevation without token-access failures", ProgramChecksElevationWithoutTokenAccessFailures },
+                { "Program rejects over-the-shoulder elevation identities", ProgramRejectsOverTheShoulderElevationIdentities },
+                { "Managed host boundary returns deterministic startup failures", ManagedHostBoundaryReturnsDeterministicStartupFailures },
+                { "Windows shell icons are optional on legacy Windows", WindowsShellIconsAreOptionalOnLegacyWindows },
+                { "Windows message font is optional on legacy Windows", WindowsMessageFontIsOptionalOnLegacyWindows },
+                { "WinForms default fonts fall back before control construction", WinFormsDefaultFontsFallbackBeforeControlConstruction },
+                { "Program rejects replaceable trusted path ancestors", ProgramRejectsReplaceableTrustedPathAncestors },
+                { "Program rejects protected directory creation below writable parents", ProgramRejectsProtectedDirectoryCreationBelowWritableParents },
+                { "Program permits one protected leaf below a trusted shared root", ProgramPermitsSingleProtectedLeafBelowTrustedSharedRoot },
+                { "Autorun rejects untrusted executable paths", AutoRunRejectsUntrustedExecutablePaths },
+                { "Autorun rejects reparse point executable folders", AutoRunRejectsReparsePointExecutableFolders },
+                { "Profile import rejects oversized files", ProfileImportRejectsOversizedFiles },
+                { "Profile import preserves pre-existing destination on copy failure", ProfileImportPreservesExistingDestinationOnCopyFailure },
+                { "Profile import rejects reparse point sources", ProfileImportRejectsReparsePointSources },
+                { "Profile import rejects directory sources", ProfileImportRejectsDirectorySources },
+                { "Profile import reports malformed source paths consistently", ProfileImportReportsMalformedSourcePathsConsistently },
+                { "Legacy migration quarantines valid profiles", LegacyMigrationQuarantinesValidProfiles },
+                { "Legacy migration accepts uppercase conf extensions", LegacyMigrationAcceptsUppercaseConfExtensions },
+                { "Legacy migration bounds catalog enumeration", LegacyMigrationBoundsCatalogEnumeration },
+                { "Legacy migration cleans managed orphan temporaries before catalog limits", LegacyMigrationCleansManagedOrphansBeforeCatalogLimit },
+                { "Legacy migration preserves modified sources on completion", LegacyMigrationPreservesModifiedSourcesOnCompletion },
+                { "Legacy migration preserves approved duplicates", LegacyMigrationPreservesApprovedDuplicates },
+                { "Legacy migration rejects oversized files", LegacyMigrationRejectsOversizedFiles },
+                { "Legacy migration rejects reparse point sources", LegacyMigrationRejectsReparsePointSources },
+                { "Legacy migration accepts scripts only into quarantine", LegacyMigrationAcceptsScriptsOnlyIntoQuarantine },
+                { "Legacy migration completion removes staged sources", LegacyMigrationCompletionRemovesStagedSources },
+                { "Native recovery marker cleanup removes directory markers", NativeRecoveryMarkerCleanupRemovesDirectoryMarkers },
+                { "Native recovery marker replacement does not follow hard links", NativeRecoveryMarkerReplacementDoesNotFollowHardLinks },
+                { "Native recovery marker leases preserve newer failures", NativeRecoveryMarkerLeasesPreserveNewerFailures },
+                { "Native recovery markers bound diagnostics", NativeRecoveryMarkersBoundDiagnostics },
+                { "Native recovery marker replacement preserves the previous record on failure", NativeRecoveryMarkerReplacementPreservesPreviousRecordOnFailure },
+                { "Secure filesystem delete handles block concurrent writes", SecureFileSystemDeleteHandlesBlockConcurrentWrites },
+                { "Secure filesystem snapshots permit shell-link inspection", SecureFileSystemSnapshotsPermitShellLinkInspection },
+                { "Secure filesystem reads text through validated handles", SecureFileSystemReadsTextThroughValidatedHandles },
+                { "Secure filesystem rejects writable hard links", SecureFileSystemRejectsWritableHardLinks },
+                { "Tunnel session coordinator enforces recovery invariants", TunnelSessionCoordinatorEnforcesRecoveryInvariants },
+                { "Tunnel session coordinator waits for pending operations", TunnelSessionCoordinatorWaitsForPendingOperations },
+                { "Tunnel monitor stops after a bounded query timeout", TunnelMonitorStopsAfterBoundedQueryTimeout },
+                { "Tunnel monitor bounds a busy connecting state", TunnelMonitorBoundsBusyConnectingState },
+                { "Tunnel monitor preserves statistics query timeouts", TunnelMonitorPreservesStatisticsQueryTimeouts },
+                { "Tunnel monitor suppresses canceled query updates", TunnelMonitorSuppressesCanceledQueryUpdates },
+                { "Tunnel monitor classifies unexpected statistics failures", TunnelMonitorClassifiesUnexpectedStatisticsFailures },
+                { "Tunnel monitor handler failures fail closed", TunnelMonitorHandlerFailuresFailClosed },
+                { "Tunnel monitor UI dispatch awaits marshaled updates", TunnelMonitorUiDispatchAwaitsMarshaledUpdates },
+                { "UI dispatch never runs inline on a worker without a handle", UiDispatchNeverRunsInlineOnWorkerWithoutHandle },
+                { "WireSock manager bounds native log backpressure", WireSockManagerBoundsNativeLogBackpressure },
+                { "WireSock manager bounds retained log records", WireSockManagerBoundsRetainedLogRecords },
+                { "UI log buffering coalesces and bounds dispatch", UiLogBufferingCoalescesAndBoundsDispatch },
+                { "UI log presentation filters noisy native records", UiLogPresentationFiltersNoisyNativeRecords },
+                { "Visible log storage overwrites without unbounded growth", VisibleLogStorageOverwritesWithoutGrowth },
+                { "Virtual log list invalidates after item-count transitions", VirtualLogListInvalidatesAfterItemCountTransitions },
+                { "Diagnostic logging redacts credentials", DiagnosticLoggingRedactsCredentials },
+                { "Diagnostic logging bounds oversized records", DiagnosticLoggingBoundsOversizedRecords },
+                { "Native query distinguishes error sentinels", NativeQueryDistinguishesErrorSentinels },
+                { "Settings upgrade runs exactly once", SettingsUpgradeRunsExactlyOnce },
+                { "Legacy user settings migration parses only allowlisted bounded values", LegacyUserSettingsMigrationParsesAllowlistedValues },
+                { "Legacy user settings migration rejects unresolved local paths", LegacyUserSettingsMigrationRejectsUnresolvedLocalPaths },
+                { "Protected settings require consent and persist securely", ProtectedSettingsRequireConsentAndPersist },
+                { "Protected settings reject malformed or oversized data", ProtectedSettingsRejectMalformedOrOversizedData },
+                { "Protected settings recover interrupted saves", ProtectedSettingsRecoverInterruptedSaves },
+                { "Application settings use protected connection values", ApplicationSettingsUseProtectedConnectionValues },
+                { "Settings transaction compensates failures in reverse order", SettingsTransactionCompensatesFailuresInReverseOrder },
+                { "Settings coordinator owns update sequencing", SettingsCoordinatorOwnsUpdateSequencing },
+                { "Settings rollback identifies native recovery requirements", SettingsRollbackIdentifiesNativeRecoveryRequirements },
+                { "Tunnel commands distinguish activation from deactivation", TunnelCommandsDistinguishActivationFromDeactivation },
+                { "Main window presentation renders recovery consistently", MainWindowPresentationRendersRecoveryConsistently },
+                { "Native timeout policy defers cleanup until completion", NativeTimeoutPolicyDefersCleanupUntilCompletion },
+                { "Shutdown settings wait is bounded", ShutdownSettingsWaitIsBounded },
+                { "Autorun preserves persisted state when status is unknown", AutorunPreservesPersistedStateWhenStatusIsUnknown },
+                { "Autorun classification covers legacy shortcuts and conflicts", AutorunClassificationCoversLegacyAndConflicts },
+                { "Autorun helper bounds hangs and recovers verified state", AutoRunHelperBoundsHangsAndRecoversVerifiedState },
+                { "Legacy Startup shortcuts are handled without shell parsing", LegacyStartupShortcutIsHandledWithoutShellParsing },
+                { "Legacy Startup shortcut metadata failures fail closed", LegacyStartupShortcutMetadataFailuresFailClosed },
+                { "Legacy Startup shortcut commit is consent and path bound", LegacyStartupShortcutCommitIsConsentAndPathBound },
+                { "Curve25519 matches RFC 7748 public-key vectors", Curve25519MatchesRfc7748PublicKeyVectors },
+                { "Curve25519 supports optional signing keys", Curve25519SupportsOptionalSigningKeys },
+                { "Editor validates Amnezia options", EditorValidatesAmneziaOptions },
+                { "Editor derives the interface public key independently of highlighting", EditorDerivesInterfacePublicKeyIndependentlyOfHighlighting },
+                { "Image lists clone icons before delayed handle creation", ImageListsCloneIconsBeforeDelayedHandleCreation },
+                { "WinForms dialogs initialize and dispose on an STA thread", WinFormsDialogsInitializeAndDisposeOnStaThread },
+                { "WinForms dialogs use readable responsive layouts", WinFormsDialogsUseReadableResponsiveLayouts },
+                { "Main window profile details retain visual order after scaling", MainWindowProfileDetailsRetainVisualOrderAfterScaling },
+                { "Main window action rows remain visible after scaling", MainWindowActionRowsRemainVisibleAfterScaling },
+                { "Main window concealment hides before handle recreation", MainWindowConcealmentHidesBeforeHandleRecreation },
+                { "Main window activation is suppressed during shutdown", MainWindowActivationIsSuppressedDuringShutdown },
+                { "Settings copies the secured profiles path without shell activation", SettingsCopiesSecuredProfilesPathWithoutShellActivation },
+                { "Editor bounds synchronous syntax highlighting", EditorBoundsSynchronousSyntaxHighlighting },
+                { "Editor application-rule insertion is section aware", EditorApplicationRuleInsertionIsSectionAware },
+                { "Editor application-rule insertion rejects ambiguous values", EditorApplicationRuleInsertionRejectsAmbiguousValues },
+                { "Profile display formatting bounds comma-separated values", ProfileDisplayFormattingBoundsValues },
+                { "AppUserModelID matches the installer shortcut", AppUserModelIdMatchesInstallerShortcut },
+                { "Notification shortcut uses a clean display name", NotificationShortcutUsesCleanDisplayName },
+                { "Notification image paths use file URIs", NotificationImagePathsUseFileUris },
+                { "Shell link HRESULT validation uses signed failure semantics", ShellLinkHresultValidationUsesSignedFailureSemantics },
+                { "Shell link PROPVARIANT interop is architecture safe and type checked", ShellLinkPropVariantInteropIsSafe },
+                { "Windows compatibility manifest enables modern behavior", WindowsCompatibilityManifestEnablesModernBehavior },
+                { "Elevation manifest establishes a native pre-CLR boundary", ElevationManifestEstablishesNativePreClrBoundary },
+                { "MSI builds materialize ordinary output files", MsiBuildsMaterializeOrdinaryOutputFiles },
+                { "Browser activation permits only credential-free HTTPS", BrowserActivationPermitsOnlyCredentialFreeHttps },
+                { "Windows argument quoting preserves shell targets", WindowsArgumentQuotingPreservesShellTargets },
+                { "Program rejects non-local application paths", ProgramRejectsNonLocalApplicationPaths },
+                { "Autorun task name is path and user seeded", AutoRunTaskNameIsPathAndUserSeeded },
+                { "Autorun validates the complete task definition", AutoRunValidatesCompleteTaskDefinition },
+                { "Autorun recognizes only the historical WireSock UI task shape", AutoRunRecognizesHistoricalTaskShape },
+                { "Process picker preserves executable match names", ProcessPickerPreservesExecutableMatchNames },
+                { "Process snapshots are cached serialized and SID based", ProcessSnapshotsAreCachedSerializedAndSidBased },
+                { "Process picker loads executable icons and main title shows version", ProcessPickerLoadsExecutableIconsAndMainTitleShowsVersion },
+                { "WireSock disconnect forwards network-lock preservation", WireSockDisconnectForwardsNetworkLockPreservation },
+                { "Lifecycle resets a preserved lock after handle creation fails", LifecycleResetsPreservedLockAfterHandleCreationFails },
+                { "Lifecycle monitor defers queries during a slow native connect", LifecycleMonitorDefersQueriesDuringSlowNativeConnect },
+                { "Virtual adapter rename does not hold lifecycle locks", VirtualAdapterRenameDoesNotHoldLifecycleLocks },
+                { "Virtual adapter readiness rejects missing and ambiguous candidates", VirtualAdapterReadinessRejectsMissingAndAmbiguousCandidates },
+                { "Virtual adapter rename queue keeps only the latest generation", VirtualAdapterRenameQueueKeepsOnlyLatestGeneration },
+                { "Virtual adapter rename queue rejects out-of-order stale enqueues", VirtualAdapterRenameQueueRejectsOutOfOrderStaleEnqueues },
+                { "Virtual adapter rename provider stalls are capacity bounded", VirtualAdapterRenameProviderStallsAreCapacityBounded },
+                { "Lifecycle tracks late disconnect completion after timeout", LifecycleTracksLateDisconnectCompletionAfterTimeout },
+                { "Lifecycle shutdown queues cleanup behind in-flight native work", LifecycleShutdownQueuesCleanupBehindInFlightNativeWork },
+                { "Lifecycle awaits a late network-lock reset", LifecycleAwaitsLateNetworkLockReset },
+                { "Lifecycle shutdown preserves an active lock when handle cleanup fails", LifecycleShutdownPreservesActiveLockWhenHandleCleanupFails },
+                { "Lifecycle shutdown resets a preserved lock after release retry", LifecycleShutdownResetsPreservedLockAfterReleaseRetry },
+                { "Lifecycle shutdown avoids synchronization-context deadlocks", LifecycleShutdownAvoidsSynchronizationContextDeadlocks },
+                { "WireSock manager surfaces native query failures", WireSockManagerSurfacesNativeQueryFailures },
+                { "WireSock manager cleans up failed starts", WireSockManagerCleansUpFailedStarts },
+                { "WireSock manager retains handles when cleanup fails", WireSockManagerRetainsHandlesWhenCleanupFails },
+                { "WireSock manager retries release without dropping twice", WireSockManagerRetriesReleaseWithoutDroppingTwice },
+                { "WireSock manager quarantines dropped handles", WireSockManagerQuarantinesDroppedHandles },
+                { "WireSock manager updates active log levels without reconnecting", WireSockManagerUpdatesActiveLogLevelsWithoutReconnect },
+                { "SDK smoke rejects unsafe integration profiles", SdkSmokeRejectsUnsafeIntegrationProfiles },
+                { "SDK smoke cleans up failed tunnel creation", SdkSmokeCleansUpFailedTunnelCreation },
+                { "SDK synthetic smoke permits an inactive TEST-NET tunnel", SdkSyntheticSmokePermitsInactiveTunnel },
+                { "SDK smoke runs final cleanup after failures", SdkSmokeRunsFinalCleanupAfterFailures },
+                { "Profile rename commits and rolls back transactionally", ProfileRenameCommitsAndRollsBackTransactionally },
+                { "Profile rename recovery completes interrupted transactions", ProfileRenameRecoveryCompletesInterruptedTransactions },
+                { "Profile rename recovery rejects ambiguous states", ProfileRenameRecoveryRejectsAmbiguousStates },
+                { "Profile rename recovery rejects active XML content", ProfileRenameRecoveryRejectsActiveXmlContent },
+                { "Profile transaction recovery removes orphaned temporary files", ProfileTransactionRecoveryRemovesOrphanedTemporaryFiles },
+                { "Profile transaction recovery cleans managed orphans before entry limits", ProfileTransactionRecoveryCleansManagedOrphansBeforeEntryLimit },
+                { "Profile transaction recovery bounds all directory entries", ProfileTransactionRecoveryBoundsAllDirectoryEntries },
+                { "Test execution timeout policy is bounded", TestExecutionTimeoutPolicyIsBounded },
+                { "Single-instance event rejects broad access", SingleInstanceEventRejectsBroadAccess },
+                { "Tunnel profile state matches selections case-insensitively", TunnelProfileStateMatchesSelectionsCaseInsensitively },
+                { "Network lock enum matches wgbooster ABI", NetworkLockEnumMatchesWgboosterAbi },
+                { "WireSock exports use restricted DLL search", WireSockExportsUseRestrictedDllSearch },
+                { "WireSock handle booleans match the C++ ABI", WireSockHandleBooleansMatchCppAbi },
+                { "WireSock log callback decodes UTF-8 explicitly", WireSockLogCallbackDecodesUtf8Explicitly },
+                { "Stats struct matches wgbooster ABI", StatsStructMatchesWgboosterAbi }
+            };
+
+            if (args?.Any(arg => string.Equals(arg, "--list-tests", StringComparison.OrdinalIgnoreCase)) == true)
+            {
+                foreach (var testName in tests.Keys)
+                    Console.WriteLine(testName);
+                return 0;
+            }
+
+            var filter = GetCommandLineOption(args, "--filter");
+            if (!string.IsNullOrWhiteSpace(filter))
+            {
+                tests = tests
+                    .Where(test => test.Key.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .ToDictionary(test => test.Key, test => test.Value);
+                if (tests.Count == 0)
+                {
+                    Console.WriteLine($"FAIL no tests matched filter '{filter}'.");
+                    return 1;
+                }
+            }
+
+            var failures = 0;
+            var passes = 0;
+            var skips = 0;
+            foreach (var test in tests)
+            {
+                var stopwatch = Stopwatch.StartNew();
+                var result = ExecuteTestWithTimeout(test.Value, TestTimeoutMilliseconds);
+                if (result.TimedOut)
+                {
+                    failures++;
+                    Console.WriteLine(
+                        $"FAIL {test.Key}: exceeded the {TestTimeoutMilliseconds} ms per-test timeout.");
+                    return 1;
+                }
+
+                if (result.Exception != null)
+                {
+                    if (result.Exception is TestSkippedException)
+                    {
+                        skips++;
+                        Console.WriteLine($"SKIP {test.Key}: {result.Exception.Message}");
+                        continue;
+                    }
+
+                    failures++;
+                    Console.WriteLine($"FAIL {test.Key}:{Environment.NewLine}{result.Exception}");
+                    continue;
+                }
+
+                passes++;
+                Console.WriteLine($"PASS {test.Key} ({stopwatch.ElapsedMilliseconds} ms)");
+            }
+
+            Console.WriteLine($"SUMMARY pass={passes} fail={failures} skip={skips}");
+            return failures == 0 ? 0 : 1;
+        }
+
+        private static TestExecutionResult ExecuteTestWithTimeout(Action test, int timeoutMilliseconds)
+        {
+            if (test == null) throw new ArgumentNullException(nameof(test));
+            if (timeoutMilliseconds <= 0) throw new ArgumentOutOfRangeException(nameof(timeoutMilliseconds));
+
+            var completion = new TaskCompletionSource<bool>();
+            var testThread = new Thread(() =>
+            {
+                try
+                {
+                    test();
+                    completion.TrySetResult(true);
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "WireSockUI test"
+            };
+            testThread.SetApartmentState(ApartmentState.STA);
+            testThread.Start();
+            var task = completion.Task;
+            try
+            {
+                if (task.Wait(timeoutMilliseconds))
+                    return TestExecutionResult.Success();
+
+                task.ContinueWith(faultedTask =>
+                        GC.KeepAlive(faultedTask.Exception),
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+                return TestExecutionResult.Timeout();
+            }
+            catch (AggregateException ex)
+            {
+                return TestExecutionResult.Failure(ex.GetBaseException());
+            }
+            catch (Exception ex)
+            {
+                return TestExecutionResult.Failure(ex);
+            }
+        }
+
+        private static string GetCommandLineOption(IReadOnlyList<string> args, string optionName)
+        {
+            if (args == null || string.IsNullOrWhiteSpace(optionName))
+                return null;
+
+            for (var index = 0; index < args.Count; index++)
+            {
+                if (!string.Equals(args[index], optionName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (index + 1 >= args.Count || string.IsNullOrWhiteSpace(args[index + 1]))
+                    throw new ArgumentException($"{optionName} requires a value.");
+
+                return args[index + 1];
+            }
+
+            return null;
+        }
+
+        private static bool TryRunAutoRunServiceTestHelper(string[] args, out int exitCode)
+        {
+            exitCode = 0;
+            if (args == null ||
+                args.Length != 2 ||
+                !string.Equals(
+                    args[0],
+                    AutoRunOperationService.HelperSwitch,
+                    StringComparison.Ordinal))
+                return false;
+
+            var behavior = Environment.GetEnvironmentVariable(
+                "WIRESOCKUI_TEST_AUTORUN_HELPER_BEHAVIOR");
+            switch (behavior)
+            {
+                case "success":
+                    Console.Out.Write("test-helper-" + args[1]);
+                    return true;
+                case "failure":
+                    Console.Error.Write("simulated autorun helper failure");
+                    exitCode = 10;
+                    return true;
+                case "hang":
+                    Console.Out.Write("test-helper-started");
+                    Console.Out.Flush();
+                    Thread.Sleep(TimeSpan.FromSeconds(30));
+                    return true;
+                case "oversize":
+                    Console.Out.Write(new string('x', 256 * 1024));
+                    return true;
+                default:
+                    Console.Error.Write("The autorun service test helper behavior was not configured.");
+                    exitCode = 64;
+                    return true;
+            }
+        }
+
+        private static int RunSdkIntegrationSmoke(bool requireActiveTunnel)
+        {
+            var integrationOption = requireActiveTunnel
+                ? "--sdk-integration"
+                : "--sdk-synthetic-integration";
+            using (var identity = WindowsIdentity.GetCurrent())
+            {
+                var principal = new WindowsPrincipal(identity);
+                if (!principal.IsInRole(WindowsBuiltInRole.Administrator))
+                {
+                    Console.WriteLine($"FAIL {integrationOption} requires an elevated runner token.");
+                    return 1;
+                }
+            }
+
+            var libraryPath = Environment.GetEnvironmentVariable("WIRESOCKUI_WGBOOSTER_PATH");
+            if (string.IsNullOrWhiteSpace(libraryPath))
+            {
+                Console.WriteLine($"FAIL WIRESOCKUI_WGBOOSTER_PATH is required for {integrationOption}.");
+                return 1;
+            }
+
+            try
+            {
+                libraryPath = Path.GetFullPath(libraryPath);
+                var libraryDirectory = Path.GetDirectoryName(libraryPath);
+                if (!WireSockUI.Program.TryValidateWireSockLibraryDirectory(
+                        libraryDirectory, out var validatedDirectory) ||
+                    !string.Equals(Path.GetFullPath(validatedDirectory ?? string.Empty), libraryDirectory,
+                        StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        "The configured SDK directory is not administrator-owned or is missing required files.");
+
+                if (!WireSockUI.Program.TryConfigureRestrictedDllSearchPath(
+                        libraryDirectory, libraryPath, out var loaderDiagnostic))
+                    throw new InvalidOperationException(loaderDiagnostic ?? "Unable to load wgbooster.dll.");
+
+                var api = new WireSockNativeApi();
+                WireguardBoosterExports.LogPrinter logPrinter = message =>
+                {
+                    try
+                    {
+                        var text = WireguardBoosterExports.DecodeLogMessage(message);
+                        if (!string.IsNullOrWhiteSpace(text))
+                            Console.WriteLine($"SDK {text}");
+                    }
+                    catch
+                    {
+                        // A managed exception must never cross the native logging callback boundary.
+                    }
+                };
+
+                var transparentProfile = GetRequiredSdkProfilePath(
+                    "WIRESOCKUI_TEST_PROFILE_TRANSPARENT", "WIRESOCKUI_TEST_PROFILE");
+                var virtualAdapterProfile = GetRequiredSdkProfilePath(
+                    "WIRESOCKUI_TEST_PROFILE_VIRTUAL_ADAPTER", "WIRESOCKUI_TEST_PROFILE");
+                var amneziaProfile = GetRequiredSdkProfilePath("WIRESOCKUI_TEST_PROFILE_AMNEZIA");
+                ValidateAmneziaSdkIntegrationProfile(amneziaProfile);
+
+                EnsureGlobalNetworkLockInactive(false);
+                RunWithFinalCleanup(
+                    () =>
+                    {
+                        RunSdkModeSmoke(api, WireSockManager.Mode.Transparent, transparentProfile, logPrinter,
+                            requireActiveTunnel);
+                        EnsureGlobalNetworkLockInactive(true);
+                        RunSdkModeSmoke(api, WireSockManager.Mode.VirtualAdapter, virtualAdapterProfile, logPrinter,
+                            requireActiveTunnel);
+                        EnsureGlobalNetworkLockInactive(true);
+                        RunSdkModeSmoke(api, WireSockManager.Mode.Transparent, amneziaProfile, logPrinter,
+                            requireActiveTunnel);
+                        EnsureGlobalNetworkLockInactive(true);
+                    },
+                    () => EnsureGlobalNetworkLockInactive(true));
+
+                var connectivityScope = requireActiveTunnel
+                    ? "connected"
+                    : "synthetic local (external connectivity not asserted)";
+                Console.WriteLine(
+                    $"PASS real wgbooster.dll transparent, virtual-adapter, Kill Switch, and Amnezia {connectivityScope} lifecycle smoke tests.");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"FAIL real wgbooster.dll smoke test:{Environment.NewLine}{ex}");
+                return 1;
+            }
+        }
+
+        private static string GetRequiredSdkProfilePath(string variableName, string fallbackVariableName = null)
+        {
+            var sourceVariableName = variableName;
+            var profilePath = Environment.GetEnvironmentVariable(variableName);
+            if (string.IsNullOrWhiteSpace(profilePath) && !string.IsNullOrWhiteSpace(fallbackVariableName))
+            {
+                profilePath = Environment.GetEnvironmentVariable(fallbackVariableName);
+                sourceVariableName = fallbackVariableName;
+            }
+            if (string.IsNullOrWhiteSpace(profilePath))
+                throw new InvalidOperationException(
+                    $"{variableName} is required for the real SDK lifecycle smoke test.");
+
+            profilePath = Path.GetFullPath(profilePath);
+            if (!File.Exists(profilePath))
+                throw new FileNotFoundException($"The SDK integration profile from {sourceVariableName} was not found.",
+                    profilePath);
+
+            if (!WireSockUI.Program.TryValidateTrustedFilePath(profilePath,
+                    $"SDK integration profile from {sourceVariableName}", out var diagnostic))
+                throw new InvalidOperationException(diagnostic ??
+                                                    $"The SDK integration profile from {sourceVariableName} is not trusted.");
+
+            ValidateSdkIntegrationProfileContents(profilePath, sourceVariableName);
+
+            return profilePath;
+        }
+
+        private static void ValidateSdkIntegrationProfileContents(string profilePath, string sourceVariableName)
+        {
+            var profile = new Profile(profilePath);
+            var scriptHooks = profile.GetConfiguredScriptHooks();
+            if (scriptHooks.Count != 0)
+                throw new InvalidOperationException(
+                    $"The SDK integration profile from {sourceVariableName} contains script hooks. " +
+                    "Use a dedicated non-production profile without PreUp, PostUp, PreDown, or PostDown commands.");
+        }
+
+        private static void ValidateAmneziaSdkIntegrationProfile(string profilePath)
+        {
+            var parser = ParseConfig(profilePath);
+            if (!parser.Sections.TryGetValue("Interface", out var interfaceSection))
+                throw new InvalidOperationException("The Amnezia SDK profile has no Interface section.");
+
+            var requiredFields = new[] { "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "Id", "Ip", "Ib" };
+            var missingFields = requiredFields.Where(field => !interfaceSection.Contains(field)).ToArray();
+            if (missingFields.Length != 0)
+                throw new InvalidOperationException(
+                    $"The Amnezia SDK profile must exercise all current fields. Missing: {string.Join(", ", missingFields)}.");
+        }
+
+        private static void RunSdkModeSmoke(IWireSockNativeApi api, WireSockManager.Mode mode, string profilePath,
+            WireguardBoosterExports.LogPrinter logPrinter, bool requireActiveTunnel = true)
+        {
+            var handle = IntPtr.Zero;
+            var tunnelCreationAttempted = false;
+            var tunnelStarted = false;
+            Exception operationException = null;
+
+            try
+            {
+                handle = api.CreateHandle(mode, logPrinter, WireguardBoosterExports.WgbLogLevel.Error, false, false);
+                if (handle == IntPtr.Zero)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        $"wgbooster failed to create a {mode} handle.");
+
+                SetLastErrorForTest(0);
+                var networkLockMode = api.GetNetworkLockMode(mode, handle);
+                var networkLockError = Marshal.GetLastWin32Error();
+                if (networkLockError != 0)
+                    throw new Win32Exception(networkLockError,
+                        $"wgbooster failed to query the {mode} network-lock mode.");
+                if (networkLockMode != WireguardBoosterExports.WgbNetworkLockMode.Disabled &&
+                    networkLockMode != WireguardBoosterExports.WgbNetworkLockMode.Enabled)
+                    throw new InvalidOperationException(
+                        $"wgbooster returned unknown {mode} network-lock mode {(int)networkLockMode}.");
+
+                if (!api.SetNetworkLockMode(mode, handle, WireguardBoosterExports.WgbNetworkLockMode.Disabled))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        $"wgbooster failed to disable the {mode} network-lock mode.");
+
+                if (!api.SetNetworkLockMode(mode, handle, WireguardBoosterExports.WgbNetworkLockMode.Enabled))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        $"wgbooster failed to enable the {mode} network-lock mode.");
+                SetLastErrorForTest(0);
+                var enabledNetworkLockMode = api.GetNetworkLockMode(mode, handle);
+                var enabledNetworkLockError = Marshal.GetLastWin32Error();
+                if (enabledNetworkLockError != 0 ||
+                    enabledNetworkLockMode != WireguardBoosterExports.WgbNetworkLockMode.Enabled)
+                    throw new InvalidOperationException(
+                        $"wgbooster did not preserve the enabled {mode} network-lock mode.");
+                if (!api.SetNetworkLockMode(mode, handle, WireguardBoosterExports.WgbNetworkLockMode.Disabled))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        $"wgbooster failed to reset the {mode} network-lock mode.");
+                SetLastErrorForTest(0);
+                var resetNetworkLockMode = api.GetNetworkLockMode(mode, handle);
+                var resetNetworkLockError = Marshal.GetLastWin32Error();
+                if (resetNetworkLockError != 0 ||
+                    resetNetworkLockMode != WireguardBoosterExports.WgbNetworkLockMode.Disabled)
+                    throw new InvalidOperationException(
+                        $"wgbooster did not reset the {mode} network-lock mode.");
+
+                tunnelCreationAttempted = true;
+                if (!api.CreateTunnelFromFile(mode, handle, profilePath))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        $"wgbooster failed to create the {mode} integration tunnel.");
+
+                if (!api.StartTunnel(mode, handle))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        $"wgbooster failed to start the {mode} integration tunnel.");
+                tunnelStarted = true;
+
+                SetLastErrorForTest(0);
+                var tunnelActive = api.GetTunnelActive(mode, handle);
+                var tunnelActiveError = Marshal.GetLastWin32Error();
+                if (tunnelActiveError != 0)
+                    throw new Win32Exception(tunnelActiveError,
+                        $"wgbooster failed to query the {mode} integration tunnel active state.");
+                if (!tunnelActive && requireActiveTunnel)
+                    throw new InvalidOperationException(
+                        $"wgbooster did not report the {mode} integration tunnel active.");
+
+                SetLastErrorForTest(0);
+                api.GetTunnelState(mode, handle);
+                var stateError = Marshal.GetLastWin32Error();
+                if (stateError != 0)
+                    throw new Win32Exception(stateError,
+                        $"wgbooster failed to query the {mode} integration tunnel state.");
+            }
+            catch (Exception ex)
+            {
+                operationException = ex;
+            }
+
+            var cleanupException = CleanupSdkModeSmoke(api, mode, handle, tunnelCreationAttempted, tunnelStarted);
+            GC.KeepAlive(logPrinter);
+
+            if (operationException != null && cleanupException != null)
+                throw new AggregateException(operationException, cleanupException);
+            if (operationException != null)
+                ExceptionDispatchInfo.Capture(operationException).Throw();
+            if (cleanupException != null)
+                ExceptionDispatchInfo.Capture(cleanupException).Throw();
+
+            Console.WriteLine($"PASS real wgbooster.dll {mode} lifecycle.");
+        }
+
+        private static Exception CleanupSdkModeSmoke(IWireSockNativeApi api, WireSockManager.Mode mode,
+            IntPtr handle, bool tunnelCreationAttempted, bool tunnelStarted)
+        {
+            if (handle == IntPtr.Zero)
+                return null;
+
+            var failures = new List<Exception>();
+            if (tunnelStarted)
+            {
+                try
+                {
+                    if (!api.StopTunnel(mode, handle))
+                        failures.Add(new Win32Exception(Marshal.GetLastWin32Error(),
+                            $"wgbooster failed to stop the {mode} integration tunnel."));
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            }
+
+            var safeToRelease = !tunnelCreationAttempted;
+            if (tunnelCreationAttempted)
+            {
+                try
+                {
+                    if (!api.SetNetworkLockMode(mode, handle, WireguardBoosterExports.WgbNetworkLockMode.Disabled))
+                        failures.Add(new Win32Exception(Marshal.GetLastWin32Error(),
+                            $"wgbooster failed to disable the {mode} network lock during cleanup."));
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+
+                try
+                {
+                    safeToRelease = api.DropTunnel(mode, handle, false);
+                    if (!safeToRelease)
+                        failures.Add(new Win32Exception(Marshal.GetLastWin32Error(),
+                            $"wgbooster failed to drop the {mode} integration tunnel."));
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            }
+
+            if (safeToRelease)
+            {
+                try
+                {
+                    api.ReleaseHandle(mode, handle);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            }
+
+            return failures.Count == 0 ? null : new AggregateException(failures);
+        }
+
+        private static void EnsureGlobalNetworkLockInactive(bool resetIfActive)
+        {
+            if (!WireSockManager.TryIsNetworkLockActive(out var active, out var diagnostic))
+                throw new InvalidOperationException(diagnostic ?? "Unable to query the global network-lock state.");
+            if (!active)
+                return;
+
+            if (resetIfActive)
+            {
+                if (WireSockManager.TryResetNetworkLock(out var resetDiagnostic))
+                    throw new InvalidOperationException(
+                        "The SDK integration test unexpectedly left the global network lock active; it was reset.");
+
+                throw new InvalidOperationException(resetDiagnostic ??
+                                                    "The SDK integration test left the global network lock active and reset failed.");
+            }
+
+            throw new InvalidOperationException(
+                "The global network lock was already active before the SDK integration test.");
+        }
+
+        private static void RunWithFinalCleanup(Action operation, Action cleanup)
+        {
+            if (operation == null) throw new ArgumentNullException(nameof(operation));
+            if (cleanup == null) throw new ArgumentNullException(nameof(cleanup));
+
+            Exception operationException = null;
+            try
+            {
+                operation();
+            }
+            catch (Exception ex)
+            {
+                operationException = ex;
+            }
+
+            Exception cleanupException = null;
+            try
+            {
+                cleanup();
+            }
+            catch (Exception ex)
+            {
+                cleanupException = ex;
+            }
+
+            if (operationException != null && cleanupException != null)
+                throw new AggregateException(operationException, cleanupException);
+            if (operationException != null)
+                ExceptionDispatchInfo.Capture(operationException).Throw();
+            if (cleanupException != null)
+                ExceptionDispatchInfo.Capture(cleanupException).Throw();
+        }
+
+        private static void ProfileRejectsEmptyRequiredValues()
+        {
+            var path = WriteConfig(
+                "[Interface]\n" +
+                "PrivateKey = \n" +
+                "Address = 10.0.0.2/32\n" +
+                "\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n");
+
+            AssertThrows<ArgumentException>(() => new Profile(path), "empty \"PrivateKey\"");
+        }
+
+        private static void ProfileMatchesSdkBlankRoutingListHandling()
+        {
+            var path = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32, ,\n" +
+                "\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0,\n" +
+                "DisallowedIPs = , 192.168.0.0/16,\n");
+
+            var profile = new Profile(path);
+            AssertTrue(profile.Address.Contains("10.0.0.2/32"),
+                "Expected a non-empty interface address to remain available.");
+            AssertTrue(profile.AllowedIPs.Contains("0.0.0.0/0"),
+                "Expected a non-empty allowed route to remain available.");
+            AssertTrue(profile.DisallowedIPs.Contains("192.168.0.0/16"),
+                "Expected a non-empty excluded route to remain available.");
+
+            AssertThrows<FormatException>(
+                () => Profile.ValidateAddresses("Interface", "DNS", "8.8.8.8,", IpHelper.IsValidIpAddress),
+                "DNS");
+
+            var emptyAddressPath = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = , ,\n\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n");
+            AssertThrows<FormatException>(() => new Profile(emptyAddressPath), "at least one address");
+
+            var emptyAllowedIpsPath = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = , ,\n");
+            AssertThrows<FormatException>(() => new Profile(emptyAllowedIpsPath), "at least one address");
+
+            var emptyDisallowedIpsPath = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n" +
+                "DisallowedIPs = , ,\n");
+            AssertTrue(new Profile(emptyDisallowedIpsPath).DisallowedIPs == null,
+                "Expected an optional route list containing only blank items to normalize to null.");
+
+            AssertEscapedBoundedFormatException(
+                () => Profile.ValidateAddresses(
+                    "Peer",
+                    "AllowedIPs",
+                    "Future\0\u202E" + new string('A', 2048),
+                    value => false),
+                @"Future\0\u202E");
+        }
+
+        private static void IpValidationRejectsMalformedValuesSafely()
+        {
+            AssertFalse(IpHelper.IsValidCidr(null), "Expected a null CIDR to be rejected without throwing.");
+            AssertFalse(IpHelper.IsValidIpAddress(null),
+                "Expected a null IP address to be rejected without throwing.");
+            AssertFalse(IpHelper.IsValidIpNetwork(null),
+                "Expected a null IP network to be rejected without throwing.");
+            AssertFalse(IpHelper.IsValidAddress(null),
+                "Expected a null endpoint address to be rejected without throwing.");
+            AssertFalse(IpHelper.IsValidCidr("10.0.0.0/+24"),
+                "Expected a signed IPv4 prefix to be rejected like the current SDK parser.");
+            AssertFalse(IpHelper.IsValidCidr("10.0.0.0/-1"),
+                "Expected a negative IPv4 prefix to be rejected.");
+            AssertFalse(IpHelper.IsValidCidr("2001:db8::/0x40"),
+                "Expected a hexadecimal IPv6 prefix to be rejected.");
+            AssertTrue(IpHelper.IsValidCidr("10.0.0.0/24"), "Expected a valid IPv4 CIDR to pass.");
+            AssertTrue(IpHelper.IsValidCidr("2001:db8::/64"), "Expected a valid IPv6 CIDR to pass.");
+        }
+
+        private static void ProfileValidatesWindowsSafeNames()
+        {
+            AssertTrue(Profile.IsValidProfileName("office-vpn"), "Expected a simple profile name to be valid.");
+            AssertFalse(Profile.IsValidProfileName("CON"), "Reserved DOS device names must be rejected.");
+            AssertFalse(Profile.IsValidProfileName("CON.txt"),
+                "Reserved DOS device names must be rejected even with extensions.");
+            AssertFalse(Profile.IsValidProfileName("COM1.conf"),
+                "Reserved COM device names must be rejected even with extensions.");
+            AssertFalse(Profile.IsValidProfileName("office "), "Trailing spaces must be rejected.");
+            AssertFalse(Profile.IsValidProfileName("office."), "Trailing dots must be rejected.");
+            AssertFalse(Profile.IsValidProfileName(@"nested\office"), "Path separators must be rejected.");
+            AssertTrue(Profile.IsValidProfileName(new string('a', Profile.MaxProfileNameLength)),
+                "Expected the maximum filesystem-safe profile name length to be accepted.");
+            AssertFalse(Profile.IsValidProfileName(new string('a', Profile.MaxProfileNameLength + 1)),
+                "Profile names that exceed a filesystem component must be rejected.");
+            AssertFalse(Profile.IsValidProfileName("CONIN$"), "Console device aliases must be rejected.");
+            AssertFalse(Profile.IsValidProfileName("LPT\u00B9"), "Superscript DOS device aliases must be rejected.");
+        }
+
+        private static void ProfilePathRejectsUnsafeNames()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                AssertThrows<ArgumentException>(() => Profile.GetProfilePath(@"..\office"), "Profile name");
+                AssertThrows<ArgumentException>(() => Profile.GetProfilePath("CON"), "Profile name");
+
+                var profilePath = Profile.GetProfilePath("office");
+                var configRoot = Path.GetFullPath(Global.ConfigsFolder)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                AssertTrue(profilePath.StartsWith(configRoot, StringComparison.OrdinalIgnoreCase),
+                    "Expected profile path to stay inside the configured profile folder.");
+            });
+        }
+
+        private static void ProfileCatalogReportsEnumerationFailures()
+        {
+            var expected = new IOException("profile storage unavailable");
+            var failedCatalog = new ProfileCatalog(() => throw expected);
+            var failedResult = failedCatalog.Load();
+
+            AssertFalse(failedResult.Succeeded, "Expected profile enumeration failures to remain observable.");
+            AssertTrue(ReferenceEquals(expected, failedResult.Exception),
+                "Expected the original profile enumeration exception to be preserved for diagnostics.");
+            AssertEqual(0, failedResult.Profiles.Count);
+
+            var catalog = new ProfileCatalog(() => new[] { "zeta", "Alpha" });
+            var result = catalog.Load();
+            AssertTrue(result.Succeeded, "Expected a successful profile catalog result.");
+            AssertEqual("Alpha,zeta", string.Join(",", result.Profiles));
+        }
+
+        private static void ProfileCatalogRejectsCaseInsensitiveDuplicates()
+        {
+            var catalog = new ProfileCatalog(() => new[] { "Office", "office" });
+            var result = catalog.Load();
+
+            AssertFalse(result.Succeeded,
+                "Expected profile names that differ only by case to make the catalog ambiguous.");
+            AssertTrue(result.Exception is InvalidDataException,
+                "Expected a clear data-integrity error for case-insensitive duplicate profile names.");
+            AssertTrue(result.Exception.Message.Contains("Office") && result.Exception.Message.Contains("office"),
+                "Expected the duplicate-profile diagnostic to identify both files.");
+        }
+
+        private static void ProfileCreationRejectsCaseInsensitiveCollisions()
+        {
+            var directory = Path.Combine(
+                Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var existingPath = Path.Combine(directory, "Office.conf");
+            var destinationPath = Path.Combine(directory, "office.conf");
+            var temporaryPath = Path.Combine(directory, "new-profile.tmp");
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(existingPath, "existing");
+                File.WriteAllText(temporaryPath, "replacement");
+
+                AssertThrows<IOException>(
+                    () => ProfileFileTransaction.Commit(temporaryPath, destinationPath),
+                    "conflicts with existing entry");
+                AssertEqual("existing", File.ReadAllText(existingPath));
+                AssertEqual("replacement", File.ReadAllText(temporaryPath));
+                AssertEqual(1, Directory.GetFiles(directory, "*.conf").Length);
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void ProfileRejectsOversizedInstalledFiles()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var path = Profile.GetProfilePath("oversized");
+                using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    stream.SetLength(Profile.MaxProfileSizeBytes + 1);
+
+                AssertThrows<InvalidDataException>(() => new Profile(path), "maximum supported size");
+                AssertFalse(Profile.GetProfiles().Contains("oversized", StringComparer.OrdinalIgnoreCase),
+                    "Expected oversized installed profiles not to enter the selectable catalog.");
+
+                var nativeApi = new FakeWireSockNativeApi();
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    AssertFalse(manager.Connect("oversized"),
+                        "Expected the final manager activation boundary to reject oversized profiles.");
+                    AssertEqual(0, nativeApi.GetHandleCount);
+                    AssertTrue(manager.LastError?.Contains("maximum supported size") == true,
+                        "Expected a useful oversized-profile activation diagnostic.");
+                }
+            });
+        }
+
+        private static void ProfileReportsConfiguredScriptHooks()
+        {
+            var path = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n" +
+                "PostUp = powershell.exe -NoProfile -Command Write-Host test\n" +
+                "\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n");
+
+            var hooks = new Profile(path).GetConfiguredScriptHooks();
+
+            AssertEqual(1, hooks.Count);
+            AssertEqual("PostUp", hooks[0].Key);
+            AssertTrue(hooks[0].Value.Contains("powershell.exe"), "Expected the script command to be reported.");
+        }
+
+        private static void ScriptHookWarningPreservesAndEscapesCompleteCommands()
+        {
+            var hiddenSuffix = "Remove-Item C:\\important";
+            var longCommand = new string('a', 200) + hiddenSuffix;
+            var hooks = new[]
+            {
+                new KeyValuePair<string, string>("PreUp", longCommand),
+                new KeyValuePair<string, string>("PostDown", "first\r\nsecond\t\u202Ehidden\u2028line")
+            };
+
+            var summary = ProfileScriptWarning.FormatHookSummary(hooks);
+            AssertTrue(summary.Contains(ProfileScriptWarning.EscapeForDisplay(hiddenSuffix)),
+                "Expected the warning to display the complete command rather than truncate its suffix.");
+            AssertTrue(summary.Contains(@"first\r\nsecond\t\u202Ehidden\u2028line"),
+                "Expected line breaks, tabs, separators, and bidirectional controls to be rendered visibly.");
+            AssertFalse(summary.Contains("\u202E"),
+                "Expected the warning not to contain an active bidirectional override character.");
+            AssertFalse(summary.Contains("\u2028"),
+                "Expected the warning not to contain an active Unicode line separator.");
+
+            var literalEscape = ProfileScriptWarning.EscapeForDisplay(@"echo \u202E");
+            AssertEqual(@"echo \\u202E", literalEscape);
+        }
+
+        private static void ProfileEnumerationAcceptsUppercaseConfExtension()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                File.WriteAllText(Path.Combine(Global.ConfigsFolder, "Office.CONF"), string.Empty);
+                File.WriteAllText(Path.Combine(Global.ConfigsFolder, "Archive.config"), string.Empty);
+                File.WriteAllText(Path.Combine(Global.ConfigsFolder, "Backup.conf-old"), string.Empty);
+
+                var profiles = Profile.GetProfiles().ToList();
+                AssertTrue(profiles.Contains("Office"), "Expected .CONF profiles to be listed on Windows.");
+                AssertEqual(1, profiles.Count);
+            });
+        }
+
+        private static void ProfileEnumerationCreatesMissingOverriddenConfigFolder()
+        {
+            var originalConfigsFolder = Global.ConfigsFolder;
+            var originalOverride = Global.AllowUnsecuredConfigFolderOverrideForTests;
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"),
+                "Configs");
+
+            try
+            {
+                Global.ConfigsFolder = directory;
+                Global.AllowUnsecuredConfigFolderOverrideForTests = true;
+
+                var profiles = Profile.GetProfiles().ToList();
+
+                AssertEqual(0, profiles.Count);
+                AssertTrue(Directory.Exists(directory),
+                    "Expected profile enumeration to create a missing overridden config folder.");
+            }
+            finally
+            {
+                Global.ConfigsFolder = originalConfigsFolder;
+                Global.AllowUnsecuredConfigFolderOverrideForTests = originalOverride;
+
+                try
+                {
+                    var root = Path.GetDirectoryName(directory);
+                    if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
+                        Directory.Delete(root, true);
+                }
+                catch
+                {
+                    // Best-effort cleanup must not hide the original test failure.
+                }
+            }
+        }
+
+        private static void ProfileEnumerationRejectsOversizedFolders()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                for (var index = 0; index < Profile.MaxProfileCatalogEntries; index++)
+                    File.WriteAllText(Path.Combine(Global.ConfigsFolder, $"entry-{index:D4}.tmp"), string.Empty);
+                Directory.CreateDirectory(Path.Combine(Global.ConfigsFolder, "non-profile-directory"));
+
+                AssertThrows<InvalidDataException>(
+                    () => Profile.GetProfiles(),
+                    $"more than {Profile.MaxProfileCatalogEntries}");
+            });
+        }
+
+        private static void ProfileRejectsReparsePointProfileFiles()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var target = Path.Combine(Global.ConfigsFolder, "target.conf");
+                var link = Path.Combine(Global.ConfigsFolder, "linked.conf");
+                File.WriteAllText(target, ValidConfig());
+
+                if (!TryCreateProfileReparsePoint(link, target, out var isFileLink))
+                {
+                    SkipOrFail("profile reparse point creation unavailable; reparse profile check not exercised.");
+                    return;
+                }
+
+                AssertTrue(Profile.ProfilePathExists(link),
+                    "Expected profile path existence checks to detect reparse point profile paths.");
+                if (isFileLink)
+                {
+                    var profiles = Profile.GetProfiles().ToList();
+                    AssertFalse(profiles.Contains("linked", StringComparer.OrdinalIgnoreCase),
+                        "Expected reparse point profiles to be excluded from enumeration.");
+                }
+                AssertThrows<IOException>(() => new Profile(link), "reparse point");
+            });
+        }
+
+        private static void ProfileRejectsDirectoryProfilePaths()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var profileDirectory = Path.Combine(Global.ConfigsFolder, "folder.conf");
+                Directory.CreateDirectory(profileDirectory);
+
+                var profiles = Profile.GetProfiles().ToList();
+                AssertFalse(profiles.Contains("folder", StringComparer.OrdinalIgnoreCase),
+                    "Expected directory profile paths to be excluded from enumeration.");
+                AssertThrows<IOException>(() => Profile.EnsureRegularProfileFile(profileDirectory), "directory");
+                AssertThrows<IOException>(() => new Profile(profileDirectory), "directory");
+            });
+        }
+
+        private static void ProfileReportsMissingProfilePathsClearly()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var missingProfile = Path.Combine(Global.ConfigsFolder, "missing.conf");
+
+                AssertFalse(Profile.IsRegularProfileFile(missingProfile, out var diagnostic),
+                    "Expected missing profile paths to be rejected.");
+                AssertTrue(diagnostic.IndexOf("does not exist", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Expected a clear missing-file diagnostic, got '{diagnostic}'.");
+            });
+        }
+
+        private static void ProfileReportsMalformedProfilePathsConsistently()
+        {
+            var malformedPath = "invalid\0profile.conf";
+
+            AssertFalse(Profile.IsRegularProfileFile(malformedPath, out var diagnostic),
+                "Expected malformed profile paths to be rejected.");
+            AssertTrue(!string.IsNullOrWhiteSpace(diagnostic),
+                "Expected malformed profile paths to produce a diagnostic.");
+            AssertFalse(diagnostic.Contains("\0"),
+                $"Expected malformed profile diagnostics to escape embedded NULs, got '{diagnostic}'.");
+            AssertTrue(diagnostic.Contains("\\0"),
+                $"Expected malformed profile diagnostics to include the escaped NUL marker, got '{diagnostic}'.");
+            AssertThrows<IOException>(() => Profile.EnsureRegularProfileFile(malformedPath), "profile");
+        }
+
+        private static void ParserAcceptsOnlyExactWireSockDirectivePrefixes()
+        {
+            var path = WriteConfig(
+                "[Interface]\n" +
+                "#@ws:BypassLanTraffic = true\n" +
+                "#@ws VirtualAdapterMode = false\n" +
+                "#@WS:VirtualAdapterMode = true\n");
+
+            var section = ParseConfig(path).GetSection("Interface");
+
+            AssertTrue(section.ContainsKey("BypassLanTraffic"), "Expected #@ws: directive to become a normal key.");
+            AssertFalse(section.ContainsKey("VirtualAdapterMode"),
+                "Expected non-SDK WireSock directive prefixes to remain comments.");
+            AssertEqual("true", section["BypassLanTraffic"]);
+        }
+
+        private static void ParserMatchesSdkCasing()
+        {
+            var path = WriteConfig("[interface]\nprivatekey = value\n");
+            var parser = ParseConfig(path);
+
+            AssertTrue(parser.GetSectionNames().Contains("interface", StringComparer.Ordinal),
+                "Expected the parser to preserve section casing.");
+            AssertFalse(parser.GetSectionNames().Contains("Interface", StringComparer.Ordinal),
+                "Expected section lookup to match the case-sensitive SDK parser.");
+            AssertTrue(parser.GetSection("interface").ContainsKey("privatekey"),
+                "Expected the parser to preserve key casing.");
+            AssertFalse(parser.GetSection("interface").ContainsKey("PrivateKey"),
+                "Expected key lookup to match the case-sensitive SDK parser.");
+        }
+
+        private static void ParserMatchesSdkLastSectionWinsBehavior()
+        {
+            var path = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n" +
+                "\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n" +
+                "\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = backup.example.com:51820\n" +
+                "AllowedIPs = ::/0\n");
+
+            try
+            {
+                var peer = ParseConfig(path).GetSection("Peer");
+                AssertEqual("backup.example.com:51820", peer["Endpoint"]);
+                AssertEqual("::/0", peer["AllowedIPs"]);
+            }
+            finally
+            {
+                TryDeleteFile(path);
+            }
+        }
+
+        private static void ParserRejectsMalformedLines()
+        {
+            var path = WriteConfig(
+                "[Interface]\n" +
+                "PrivateKey\n");
+
+            try
+            {
+                AssertThrows<FormatException>(() => ParseConfig(path), "line 2");
+            }
+            finally
+            {
+                TryDeleteFile(path);
+            }
+        }
+
+        private static void ParserRejectsKeysBeforeSections()
+        {
+            var path = WriteConfig("PrivateKey = value\n");
+            var unsafePath = WriteConfig(
+                "Future\0\u202E" + new string('A', 2048) + " = value\n");
+
+            try
+            {
+                AssertThrows<FormatException>(() => ParseConfig(path), "before any section");
+
+                AssertEscapedBoundedFormatException(
+                    () => ParseConfig(unsafePath),
+                    @"Future\0\u202E");
+            }
+            finally
+            {
+                TryDeleteFile(path);
+                TryDeleteFile(unsafePath);
+            }
+        }
+
+        private static void ParserRejectsEmptySectionNames()
+        {
+            var path = WriteConfig("[]\n");
+
+            try
+            {
+                AssertThrows<FormatException>(() => ParseConfig(path), "section name is empty");
+            }
+            finally
+            {
+                TryDeleteFile(path);
+            }
+        }
+
+        private static void ParserTrimsSectionNames()
+        {
+            var path = WriteConfig(
+                "[Interface ]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n" +
+                "\n" +
+                "[ Peer ]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n");
+
+            try
+            {
+                var parser = ParseConfig(path);
+                AssertTrue(parser.GetSectionNames().Contains("Interface", StringComparer.OrdinalIgnoreCase),
+                    "Expected parser to trim trailing whitespace in section names.");
+                AssertTrue(parser.GetSectionNames().Contains("Peer", StringComparer.OrdinalIgnoreCase),
+                    "Expected parser to trim leading and trailing whitespace in section names.");
+                new Profile(path);
+            }
+            finally
+            {
+                TryDeleteFile(path);
+            }
+        }
+
+        private static void ProfileAcceptsAmneziaPassthroughOptions()
+        {
+            var path = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n" +
+                "#@ws:H1 = 10-14\n" +
+                "#@ws:H2 = 16-32\n" +
+                "#@ws:H3 = 40\n" +
+                "#@ws:H4 =\n" +
+                "#@ws:Jmin = 4\n" +
+                "#@ws:Jmax = 10\n" +
+                "#@ws:S1 = 1279\n" +
+                "#@ws:S2 = 0\n" +
+                "#@ws:S3 = 1279\n" +
+                "#@ws:S4 = 32\n" +
+                "#@ws:Id = example.com\n" +
+                "#@ws:Ib = chrome\n" +
+                "#@ws:Ip = quic\n" +
+                "\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0, ::/0\n");
+
+            var parser = ParseConfig(path);
+            var interfaceSection = parser.GetSection("Interface");
+
+            AssertEqual("10-14", interfaceSection["H1"]);
+            AssertEqual("16-32", interfaceSection["H2"]);
+            AssertEqual(string.Empty, interfaceSection["H4"]);
+            AssertEqual("1279", interfaceSection["S1"]);
+            AssertEqual("chrome", interfaceSection["Ib"]);
+            new Profile(path);
+        }
+
+        private static void ProfileRejectsInvalidAmneziaPassthroughOptions()
+        {
+            AssertProfileRejectsInterfaceOption("#@ws:H1 = 4-1", "H1");
+            AssertProfileRejectsInterfaceOption("#@ws:H1 = 0x10", "H1");
+            AssertProfileRejectsInterfaceOption("#@ws:S1 = 1280", "S1");
+            AssertProfileRejectsInterfaceOption("#@ws:S1 = 0x20", "S1");
+            AssertProfileRejectsInterfaceOption("#@ws:Jc = +1", "Jc");
+            AssertProfileRejectsInterfaceOption("#@ws:S3 = 1280", "S3");
+            AssertProfileRejectsInterfaceOption("#@ws:Ip = ftp", "Ip");
+            AssertProfileRejectsInterfaceOption("#@ws:Ib = safari", "Ib");
+            AssertProfileRejectsInterfaceOption("#@ws:Jmin = 10\n#@ws:Jmax = 4", "Jmin");
+            AssertProfileRejectsInterfaceOption("#@ws:Jmin = 10\n#@ws:Jmax = 10", "less than");
+        }
+
+        private static void ParserAcceptsSdkUtf8BomAndRejectsIncompatibleEncodings()
+        {
+            var path = WriteConfig(string.Empty);
+            try
+            {
+                File.WriteAllText(path, ValidConfig(), new UTF8Encoding(true));
+                AssertTrue(ParseConfig(path).GetSection("Interface") != null,
+                    "Expected the parser to accept a leading UTF-8 BOM like the current SDK.");
+                AssertTrue(new Profile(path).PrivateKey == PrivateKey,
+                    "Expected profile projection to accept a leading UTF-8 BOM.");
+
+                File.WriteAllText(path, ValidConfig(), Encoding.Unicode);
+                AssertThrows<FormatException>(() => ParseConfig(path), "UTF-8");
+
+                File.WriteAllText(path, ValidConfig(), new UTF32Encoding(false, true, true));
+                AssertThrows<FormatException>(() => ParseConfig(path), "UTF-8");
+
+                File.WriteAllText(path, ValidConfig(), new UTF32Encoding(true, true, true));
+                AssertThrows<FormatException>(() => ParseConfig(path), "UTF-8");
+
+                var utf8 = new UTF8Encoding(false, true);
+                var shortReadPayload = new UTF8Encoding(true).GetPreamble()
+                    .Concat(utf8.GetBytes(ValidConfig()))
+                    .ToArray();
+                using (var stream = new ShortReadMemoryStream(shortReadPayload))
+                {
+                    var parser = new WireguardConfigParser.ConfigParser(stream);
+                    AssertTrue(parser.GetSection("Interface") != null,
+                        "Expected BOM detection to tolerate a stream that returns a short read.");
+                }
+            }
+            finally
+            {
+                TryDeleteFile(path);
+            }
+        }
+
+        private static void ParserMatchesSdkDuplicateKeyProjection()
+        {
+            var path = WriteConfig(
+                "[Interface]\n" +
+                "PrivateKey = invalid-first-value\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n" +
+                "Address = fd00::2/128\n" +
+                "MTU = invalid-first-value\n" +
+                "MTU = 1400\n" +
+                "PreUp = first.cmd\n" +
+                "PreUp = second.cmd\n\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = invalid-first-value\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n" +
+                "AllowedIPs = ::/0\n");
+
+            try
+            {
+                var parser = ParseConfig(path);
+                var interfaceSection = parser.GetSection("Interface");
+                var peerSection = parser.GetSection("Peer");
+
+                AssertEqual(PrivateKey, interfaceSection["PrivateKey"]);
+                AssertEqual("1400", interfaceSection["MTU"]);
+                AssertEqual("10.0.0.2/32, fd00::2/128", interfaceSection["Address"]);
+                AssertEqual("first.cmd, second.cmd", interfaceSection["PreUp"]);
+                AssertEqual("example.com:51820", peerSection["Endpoint"]);
+                AssertEqual("0.0.0.0/0, ::/0", peerSection["AllowedIPs"]);
+                new Profile(path);
+            }
+            finally
+            {
+                TryDeleteFile(path);
+            }
+        }
+
+        private static void ParserRejectsMalformedUtf8()
+        {
+            var path = WriteConfig(string.Empty);
+            try
+            {
+                var validPrefix = Encoding.UTF8.GetBytes("[Interface]\nPrivateKey = ");
+                var bytes = validPrefix.Concat(new byte[] { 0xc3, 0x28 }).ToArray();
+                File.WriteAllBytes(path, bytes);
+                AssertThrows<DecoderFallbackException>(
+                    () => ParseConfig(path), null);
+            }
+            finally
+            {
+                TryDeleteFile(path);
+            }
+        }
+
+        private static void ProfileValidatesAmneziaOptionGroups()
+        {
+            AssertProfileRejectsInterfaceOption("#@ws:S1 = 1", "incomplete");
+            AssertProfileRejectsInterfaceOption("#@ws:S3 = 1", "incomplete");
+            AssertProfileRejectsInterfaceOption("#@ws:Jmin = 10", "specified together");
+            AssertProfileRejectsInterfaceOption("#@ws:Jd = 10", "require");
+        }
+
+        private static void ProfileValidatesProtocolImitationCombinations()
+        {
+            var chromiumPath = WriteProfileWithInterfaceOptions(
+                "#@ws:Id = ***\n#@ws:Ip = quic\n#@ws:Ib = chromium");
+            var firefoxPath = WriteProfileWithInterfaceOptions(
+                "#@ws:Id = example.com\n#@ws:Ip = quic\n#@ws:Ib = ff");
+            var aliasPath = WriteProfileWithInterfaceOptions(
+                "#@ws:Id = example.com\n#@ws:Ip = stun_request");
+
+            try
+            {
+                new Profile(chromiumPath);
+                new Profile(firefoxPath);
+                new Profile(aliasPath);
+            }
+            finally
+            {
+                TryDeleteFile(chromiumPath);
+                TryDeleteFile(firefoxPath);
+                TryDeleteFile(aliasPath);
+            }
+
+            AssertProfileRejectsInterfaceOption("#@ws:Ip = quic", "require");
+            AssertProfileRejectsInterfaceOption("#@ws:Id = a..b\n#@ws:Ip = sip", "SIP imitation host");
+            AssertProfileRejectsInterfaceOption("#@ws:Id = a..b\n#@ws:Ip = sip_request", "SIP imitation host");
+            AssertProfileRejectsInterfaceOption(
+                $"#@ws:Id = {new string('a', 64)}.com\n#@ws:Ip = sip", "SIP imitation host");
+
+            AssertProfileRejectsInterfaceOption(
+                "#@ws:S1 = 0\n#@ws:S2 = 0\n#@ws:H1 = 10-20\n#@ws:H2 = 20-30\n#@ws:H3 = 40\n#@ws:H4 = 50",
+                "overlapping");
+            AssertProfileRejectsInterfaceOption(
+                "#@ws:S1 = 0\n#@ws:S2 = 0\n#@ws:H1 =\n#@ws:H2 = 1\n#@ws:H3 = 3\n#@ws:H4 = 4",
+                "overlapping");
+        }
+
+        private static void ProfileRejectsUnsupportedDirectDllDirectives()
+        {
+            AssertProfileRejectsInterfaceOption("#@ws:BypassLanTraffic = true", "DisallowedIPs");
+            AssertProfileRejectsInterfaceOption("#@ws:bypasslantraffic = true", "DisallowedIPs");
+            AssertProfileRejectsInterfaceOption("Table = auto", "not supported");
+            AssertProfileRejectsInterfaceOption("table = auto", "\"Table\" is not supported");
+            for (var index = 1; index <= 5; index++)
+            {
+                var canonicalKey = $"I{index}";
+                AssertProfileRejectsInterfaceOption(
+                    $"#@ws:{canonicalKey} = value",
+                    $"\"{canonicalKey}\" is not supported");
+                AssertProfileRejectsInterfaceOption(
+                    $"#@ws:i{index} = value",
+                    $"\"{canonicalKey}\" is not supported");
+            }
+
+            AssertProfileRejectsInterfaceOption(
+                "#@ws:i6 = value",
+                "key \"i6\" in \"Interface\" is not supported");
+
+            AssertProfileRejectsPeerOption(
+                "#@ws:Socks5Username = user",
+                "Socks5ProxyUsername");
+            AssertProfileRejectsPeerOption(
+                "#@ws:socks5username = user",
+                "Socks5ProxyUsername");
+        }
+
+        private static void AssertProfileRejectsPeerOption(string optionLine, string messagePart)
+        {
+            var path = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n" +
+                optionLine + "\n");
+            try
+            {
+                AssertThrows<FormatException>(() => new Profile(path), messagePart);
+            }
+            finally
+            {
+                TryDeleteFile(path);
+            }
+        }
+
+        private static void ProfileRejectsUnknownNativeDirectives()
+        {
+            AssertProfileRejectsInterfaceOption(
+                "#@ws:FuturePacketMode = enabled",
+                "FuturePacketMode");
+            AssertProfileRejectsInterfaceOption(
+                "PreConnect = cmd.exe /c future-script.cmd",
+                "PreConnect");
+
+            var unknownPeerDirective = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n" +
+                "#@ws:PostConnect = cmd.exe /c future-script.cmd\n");
+            var unknownSection = WriteConfig(
+                ValidConfig() +
+                "\n[Automation]\n" +
+                "OnConnect = cmd.exe /c future-script.cmd\n");
+            var overwrittenUnknownDirective = WriteConfig(
+                "[Interface]\n" +
+                "PreConnect = cmd.exe /c ignored-by-last-section-semantics.cmd\n" +
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n");
+            var unsafeIdentifier = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n" +
+                "Future\0\u202E" + new string('A', 2048) + " = value\n\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n");
+
+            try
+            {
+                AssertThrows<FormatException>(
+                    () => new Profile(unknownPeerDirective),
+                    "PostConnect");
+                AssertThrows<FormatException>(
+                    () => new Profile(unknownSection),
+                    "Automation");
+                new Profile(overwrittenUnknownDirective);
+
+                AssertEscapedBoundedFormatException(
+                    () => new Profile(unsafeIdentifier),
+                    @"Future\0\u202E");
+            }
+            finally
+            {
+                TryDeleteFile(unknownPeerDirective);
+                TryDeleteFile(unknownSection);
+                TryDeleteFile(overwrittenUnknownDirective);
+                TryDeleteFile(unsafeIdentifier);
+            }
+        }
+
+        private static void ProfileValidatesCurrentSdkNumericRanges()
+        {
+            var path = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n" +
+                "ListenPort = 0\n" +
+                "ScriptExecTimeout = 4294967295\n" +
+                "EnableDefaultGateway = true\n\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n" +
+                "PersistentKeepalive = 4294967295\n");
+
+            try
+            {
+                new Profile(path);
+            }
+            finally
+            {
+                TryDeleteFile(path);
+            }
+
+            AssertProfileRejectsInterfaceOption("ScriptExecTimeout = 4294967296", "4294967295");
+            AssertProfileRejectsInterfaceOption("ListenPort = 65536", "65535");
+            AssertProfileRejectsInterfaceOption("EnableDefaultGateway = TRUE", "exactly");
+        }
+
+        private static void ProfileRejectsSdkCasingMismatches()
+        {
+            AssertProfileRejectsInterfaceOption("#@ws:jc = 1", "expects \"Jc\"");
+
+            var path = WriteConfig(
+                "[interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n");
+            try
+            {
+                AssertThrows<ArgumentException>(() => new Profile(path), "Interface");
+            }
+            finally
+            {
+                TryDeleteFile(path);
+            }
+        }
+
+        private static void InterfaceExtensionValidationRulesAreShared()
+        {
+            AssertTrue(ConfigValueValidator.TryGetInterfaceExtensionRule("h1", out var h1),
+                "Expected H1 to be registered as a shared interface extension rule.");
+            AssertTrue(h1.IsValid("1-4"), "Expected H1 to accept ascending ranges.");
+            AssertFalse(h1.IsValid("4-1"), "Expected H1 to reject descending ranges.");
+
+            AssertTrue(ConfigValueValidator.TryGetInterfaceExtensionRule("Ib", out var ib),
+                "Expected Ib to be registered as a shared interface extension rule.");
+            AssertTrue(ib.IsValid("chrome"), "Expected Ib to accept supported browser profiles.");
+            AssertTrue(ib.IsValid("chromium"), "Expected Ib to accept the SDK Chromium alias.");
+            AssertTrue(ib.IsValid("ff"), "Expected Ib to accept the SDK Firefox alias.");
+            AssertFalse(ib.IsValid("safari"), "Expected Ib to reject unsupported browser profiles.");
+
+            AssertTrue(ConfigValueValidator.TryGetInterfaceExtensionRule("Id", out var id),
+                "Expected Id to be registered as a shared interface extension rule.");
+            AssertTrue(id.IsValid("***"), "Expected non-SIP Id values to follow the SDK byte-length contract.");
+        }
+
+        private static void AssertProfileRejectsInterfaceOption(string optionLine, string messagePart)
+        {
+            var path = WriteProfileWithInterfaceOptions(optionLine);
+
+            try
+            {
+                AssertThrows<FormatException>(() => new Profile(path), messagePart);
+            }
+            finally
+            {
+                TryDeleteFile(path);
+            }
+        }
+
+        private static string WriteProfileWithInterfaceOptions(string optionLines)
+        {
+            return WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n" +
+                optionLines + "\n" +
+                "\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n");
+        }
+
+        private static void StatsFormattingHandlesExtremeValues()
+        {
+            AssertFalse(string.IsNullOrWhiteSpace(ulong.MaxValue.AsHumanReadable()),
+                "Expected large byte counters to format without overflowing the suffix list.");
+            AssertFalse(string.IsNullOrWhiteSpace(long.MaxValue.AsTimeAgo()),
+                "Expected large handshake ages to format without narrowing to Int32.");
+        }
+
+        private static void StatsFormattingHandlesMissingHandshakes()
+        {
+            var value = (-1L).AsHandshakeAge();
+            AssertFalse(value.Contains("1"),
+                $"Expected the native no-handshake sentinel not to be rendered as one second, got '{value}'.");
+            AssertFalse(string.IsNullOrWhiteSpace(value), "Expected a localized no-handshake status.");
+        }
+
+        private static void TimeFormattingUsesPluralHours()
+        {
+            var value = TimeSpan.FromHours(2).AsTimeAgo();
+
+            AssertTrue(value.Contains("2"), "Expected two-hour durations to include the hour count.");
+            AssertTrue(value.IndexOf("hours", StringComparison.OrdinalIgnoreCase) >= 0,
+                $"Expected two-hour durations to use a plural hour label, got '{value}'.");
+        }
+
+        private static void TimeFormattingUsesSingularHourForPartialSecondHour()
+        {
+            var value = TimeSpan.FromMinutes(90).AsTimeAgo();
+
+            AssertTrue(value.IndexOf("an hour", StringComparison.OrdinalIgnoreCase) >= 0,
+                $"Expected 90-minute durations to use the singular hour label, got '{value}'.");
+        }
+
+        private static void TimeFormattingHandlesFutureValues()
+        {
+            var value = TimeSpan.FromHours(-2).AsTimeAgo();
+
+            AssertTrue(!value.Contains("-"), $"Expected future durations to format without a negative sign, got '{value}'.");
+            AssertTrue(value.Contains("2"), "Expected future two-hour durations to include the absolute hour count.");
+            AssertTrue(value.IndexOf("hours", StringComparison.OrdinalIgnoreCase) >= 0,
+                $"Expected future two-hour durations to use a plural hour label, got '{value}'.");
+        }
+
+        private static void TimeFormattingUsesLocalizedDayText()
+        {
+            AssertEqual(WireSockUI.Properties.Resources.TimeLapseDay, TimeSpan.FromHours(36).AsTimeAgo());
+        }
+
+        private static void GlobalConfigFolderContainmentHandlesDriveRoots()
+        {
+            var isSameOrChildPath = typeof(Global).GetMethod("IsSameOrChildPath",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (isSameOrChildPath == null)
+                throw new InvalidOperationException("IsSameOrChildPath helper was not found.");
+
+            var root = Path.GetPathRoot(Environment.SystemDirectory);
+            var child = Path.Combine(root, "Windows");
+
+            AssertTrue((bool)isSameOrChildPath.Invoke(null, new object[] { root, root }),
+                "Expected a root path to be treated as itself.");
+            AssertTrue((bool)isSameOrChildPath.Invoke(null, new object[] { child, root }),
+                "Expected a child of a drive root to be detected.");
+        }
+
+        private static void GlobalRejectsInvalidSpecialFolderRoots()
+        {
+            AssertThrows<DirectoryNotFoundException>(
+                () => Global.RequireAbsoluteSpecialFolderRoot(string.Empty, "test application data"),
+                "relative data directory");
+            AssertThrows<DirectoryNotFoundException>(
+                () => Global.RequireAbsoluteSpecialFolderRoot("relative-data", "test application data"),
+                "absolute path");
+
+            var absolute = Path.GetFullPath(Path.GetTempPath());
+            AssertEqual(
+                absolute,
+                Global.RequireAbsoluteSpecialFolderRoot(absolute, "test application data"));
+        }
+
+        private static void GlobalPermitsRedirectedLegacyApplicationDataOnly()
+        {
+            var commonApplicationData =
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+
+            Global.ValidateSpecialFolderRoots(
+                @"\\server.example\redirected$\user\AppData\Roaming",
+                commonApplicationData);
+
+            AssertThrows<DirectoryNotFoundException>(
+                () => Global.ValidateSpecialFolderRoots(
+                    @"\\server.example\redirected$\user\AppData\Roaming",
+                    @"\\server.example\shared$\ProgramData"),
+                "local");
+            AssertThrows<DirectoryNotFoundException>(
+                () => Global.ValidateSpecialFolderRoots(
+                    "relative-user-data",
+                    commonApplicationData),
+                "absolute path");
+        }
+
+        private static void GlobalRejectsUnsecuredConfigFolderOverridesByDefault()
+        {
+            var originalConfigsFolder = Global.ConfigsFolder;
+            var originalOverride = Global.AllowUnsecuredConfigFolderOverrideForTests;
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                Global.ConfigsFolder = directory;
+                Global.AllowUnsecuredConfigFolderOverrideForTests = false;
+
+                AssertThrows<InvalidOperationException>(() => Global.EnsureConfigsFolder(), "secured folder");
+            }
+            finally
+            {
+                Global.ConfigsFolder = originalConfigsFolder;
+                Global.AllowUnsecuredConfigFolderOverrideForTests = originalOverride;
+            }
+        }
+
+        private static bool TryRunWinFormsFontFallbackTestHelper(string[] args, out int exitCode)
+        {
+            exitCode = 0;
+            if (args == null ||
+                args.Length != 1 ||
+                !string.Equals(args[0], WinFormsFontFallbackHelperSwitch, StringComparison.Ordinal))
+                return false;
+
+            try
+            {
+                if (!UiFonts.TryCreatePrivateSystemFont(out var healthyFont))
+                {
+                    Console.Error.Write(
+                        "A usable Windows TrueType font file could not be loaded privately.");
+                    exitCode = 1;
+                    return true;
+                }
+
+                using (healthyFont)
+                {
+                    var fallbackFactoryCalled = false;
+                    if (!UiFonts.TryEnsureWinFormsDefaultFonts(
+                            () => healthyFont,
+                            () => healthyFont,
+                            () =>
+                            {
+                                fallbackFactoryCalled = true;
+                                return null;
+                            },
+                            out var unnecessaryFallback,
+                            out var healthyDiagnostic) ||
+                        unnecessaryFallback ||
+                        fallbackFactoryCalled ||
+                        !string.IsNullOrEmpty(healthyDiagnostic))
+                    {
+                        Console.Error.Write(
+                            "Healthy WinForms defaults unexpectedly selected a fallback.");
+                        exitCode = 2;
+                        return true;
+                    }
+                }
+
+                Font fallbackFont = null;
+                if (!UiFonts.TryEnsureWinFormsDefaultFonts(
+                        () => throw new ArgumentException("Font '?' cannot be found."),
+                        () => throw new InvalidOperationException(
+                            "The menu font provider must not run after the default font fails."),
+                        () => fallbackFont = UiFonts.CreateFallbackFont(),
+                        out var installedFallback,
+                        out var diagnostic) ||
+                    !installedFallback ||
+                    fallbackFont == null ||
+                    diagnostic?.Contains("Font '?' cannot be found.") != true)
+                {
+                    Console.Error.Write(diagnostic);
+                    exitCode = 3;
+                    return true;
+                }
+
+                using (var contextMenu = new ContextMenuStrip())
+                using (var toolStrip = new ToolStrip())
+                {
+                    contextMenu.GripStyle = ToolStripGripStyle.Hidden;
+                    toolStrip.GripStyle = ToolStripGripStyle.Hidden;
+                    if (!ReferenceEquals(fallbackFont, Control.DefaultFont) ||
+                        !ReferenceEquals(fallbackFont, contextMenu.Font) ||
+                        !ReferenceEquals(fallbackFont, toolStrip.Font))
+                    {
+                        Console.Error.Write(
+                            "WinForms controls did not retain the installed fallback font.");
+                        exitCode = 4;
+                    }
+                }
+
+                const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Static;
+                var controlDefaultFontField = typeof(Control).GetField("defaultFont", flags);
+                var toolStripDefaultFontField =
+                    typeof(ToolStripManager).GetField("defaultFont", flags);
+                var toolStripDefaultFontCache =
+                    typeof(ToolStripManager).GetField("defaultFontCache", flags)?.GetValue(null)
+                    as System.Collections.Concurrent.ConcurrentDictionary<int, Font>;
+                if (toolStripDefaultFontCache != null &&
+                    (!toolStripDefaultFontCache.TryGetValue(96, out var standardDpiFont) ||
+                     !toolStripDefaultFontCache.TryGetValue(384, out var highDpiFont) ||
+                     !ReferenceEquals(fallbackFont, standardDpiFont) ||
+                     !ReferenceEquals(fallbackFont, highDpiFont)))
+                {
+                    Console.Error.Write(
+                        "The ToolStrip fallback cache did not cover every monitor DPI.");
+                    exitCode = 5;
+                    return true;
+                }
+
+                controlDefaultFontField?.SetValue(null, null);
+                toolStripDefaultFontField?.SetValue(null, null);
+                toolStripDefaultFontCache?.Clear();
+                UiFonts.RestoreFallbackAfterPreferenceChange(
+                    null,
+                    new Microsoft.Win32.UserPreferenceChangingEventArgs(
+                        Microsoft.Win32.UserPreferenceCategory.Window));
+                using (var refreshedContextMenu = new ContextMenuStrip())
+                {
+                    refreshedContextMenu.GripStyle = ToolStripGripStyle.Hidden;
+                    if (!ReferenceEquals(fallbackFont, Control.DefaultFont) ||
+                        !ReferenceEquals(fallbackFont, refreshedContextMenu.Font))
+                    {
+                        Console.Error.Write(
+                            "WinForms did not restore the fallback after a preference change.");
+                        exitCode = 6;
+                    }
+                }
+
+                controlDefaultFontField?.SetValue(null, null);
+                Microsoft.Win32.UserPreferenceChangedEventHandler simulatedLateControlHandler =
+                    (sender, eventArgs) =>
+                    {
+                        if (eventArgs.Category ==
+                            Microsoft.Win32.UserPreferenceCategory.Color)
+                            controlDefaultFontField?.SetValue(null, null);
+                    };
+                Microsoft.Win32.SystemEvents.UserPreferenceChanged +=
+                    simulatedLateControlHandler;
+                try
+                {
+                    UiFonts.RestoreFallbackAfterPreferenceChange(
+                        null,
+                        new Microsoft.Win32.UserPreferenceChangingEventArgs(
+                            Microsoft.Win32.UserPreferenceCategory.Color));
+
+                    var systemEventsType = typeof(Microsoft.Win32.SystemEvents);
+                    var preferenceChangedEventKey = systemEventsType.GetField(
+                        "OnUserPreferenceChangedEvent",
+                        flags)?.GetValue(null);
+                    var raiseEvent = systemEventsType.GetMethod(
+                        "RaiseEvent",
+                        flags,
+                        null,
+                        new[] { typeof(object), typeof(object[]) },
+                        null);
+                    if (preferenceChangedEventKey == null || raiseEvent == null)
+                        throw new MissingMemberException(
+                            "The .NET Framework SystemEvents test seam was unavailable.");
+
+                    raiseEvent.Invoke(
+                        null,
+                        new object[]
+                        {
+                            preferenceChangedEventKey,
+                            new object[]
+                            {
+                                null,
+                                new Microsoft.Win32.UserPreferenceChangedEventArgs(
+                                    Microsoft.Win32.UserPreferenceCategory.Color)
+                            }
+                        });
+                }
+                finally
+                {
+                    Microsoft.Win32.SystemEvents.UserPreferenceChanged -=
+                        simulatedLateControlHandler;
+                }
+
+                if (!ReferenceEquals(fallbackFont, Control.DefaultFont))
+                {
+                    Console.Error.Write(
+                        "WinForms did not restore the fallback after a color preference change.");
+                    exitCode = 7;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.Write(ex);
+                exitCode = 8;
+                return true;
+            }
+        }
+
+        private static void GlobalPrefersTrustedProgramDataStorage()
+        {
+            const string preferredRoot = @"C:\ProgramData\WireSockUI";
+            const string preferredNotifications = @"C:\ProgramData\WireSockUI-Notifications";
+            var validationCount = 0;
+            Global.TrustedDirectoryCreationValidator validator =
+                delegate (string path, string label, out string diagnostic)
+                {
+                    validationCount++;
+                    diagnostic = null;
+                    return string.Equals(path, preferredRoot, StringComparison.OrdinalIgnoreCase);
+                };
+
+            var selection = Global.ResolveSecureStoragePaths(
+                preferredRoot,
+                preferredNotifications,
+                @"C:\Program Files",
+                validator,
+                path => false);
+
+            AssertEqual(preferredRoot, selection.SecureMainFolder);
+            AssertEqual(preferredNotifications, selection.NotificationAssetsFolder);
+            AssertFalse(selection.UsesFallback, "Expected trusted ProgramData storage to remain preferred.");
+            AssertEqual(1, validationCount);
+        }
+
+        private static void GlobalFallsBackToProtectedProgramFilesStorage()
+        {
+            const string preferredRoot = @"C:\ProgramData\WireSockUI";
+            const string fallbackParent = @"C:\Program Files";
+            const string expectedFallback = @"C:\Program Files\WireSock Foundation WireSock UI Data";
+            const string expectedNotifications =
+                @"C:\Program Files\WireSock Foundation WireSock UI Notifications";
+            Global.TrustedDirectoryCreationValidator validator =
+                delegate (string path, string label, out string diagnostic)
+                {
+                    if (string.Equals(path, preferredRoot, StringComparison.OrdinalIgnoreCase))
+                    {
+                        diagnostic = "ProgramData grants Everyone full control.";
+                        return false;
+                    }
+
+                    diagnostic = null;
+                    return string.Equals(path, expectedFallback, StringComparison.OrdinalIgnoreCase);
+                };
+
+            var selection = Global.ResolveSecureStoragePaths(
+                preferredRoot,
+                @"C:\ProgramData\WireSockUI-Notifications",
+                fallbackParent,
+                validator,
+                path => false);
+
+            AssertEqual(expectedFallback, selection.SecureMainFolder);
+            AssertEqual(expectedNotifications, selection.NotificationAssetsFolder);
+            AssertTrue(selection.UsesFallback, "Expected unsafe ProgramData storage to select the fallback.");
+            AssertTrue(
+                selection.FallbackDiagnostic.IndexOf("Everyone full control", StringComparison.OrdinalIgnoreCase) >= 0,
+                "Expected the preferred-path failure to be retained for diagnostics.");
+            AssertFalse(
+                selection.SecureMainFolder.StartsWith(
+                    @"C:\Program Files\WireSock Foundation WireSock UI" + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase),
+                "Mutable fallback data must remain outside the native application payload.");
+            AssertFalse(
+                selection.NotificationAssetsFolder.StartsWith(
+                    @"C:\Program Files\WireSock Foundation WireSock UI" + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase),
+                "Mutable notification assets must remain outside the native application payload.");
+            AssertEqual(fallbackParent, Path.GetDirectoryName(selection.SecureMainFolder));
+            AssertEqual(fallbackParent, Path.GetDirectoryName(selection.NotificationAssetsFolder));
+        }
+
+        private static void GlobalResolvesArchitectureStableProgramFilesStorage()
+        {
+            var programFilesRoot = Global.GetArchitectureStableProgramFilesRoot();
+
+            AssertTrue(Path.IsPathRooted(programFilesRoot),
+                "Expected Windows to return an absolute Program Files folder.");
+            AssertTrue(Directory.Exists(programFilesRoot),
+                "Expected the architecture-stable Program Files folder to exist.");
+
+            if (Environment.Is64BitOperatingSystem && !Environment.Is64BitProcess)
+            {
+                AssertFalse(string.Equals(
+                        programFilesRoot,
+                        Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                        StringComparison.OrdinalIgnoreCase),
+                    "A 32-bit process on 64-bit Windows must not redirect fallback data to Program Files (x86).");
+            }
+        }
+
+        private static void GlobalKeepsExistingTrustedFallback()
+        {
+            const string preferredRoot = @"C:\ProgramData\WireSockUI";
+            const string fallbackRoot = @"C:\Program Files\WireSock Foundation WireSock UI Data";
+            var preferredValidated = false;
+            Global.TrustedDirectoryCreationValidator validator =
+                delegate (string path, string label, out string diagnostic)
+                {
+                    diagnostic = null;
+                    if (string.Equals(path, preferredRoot, StringComparison.OrdinalIgnoreCase))
+                        preferredValidated = true;
+                    return true;
+                };
+
+            var selection = Global.ResolveSecureStoragePaths(
+                preferredRoot,
+                @"C:\ProgramData\WireSockUI-Notifications",
+                @"C:\Program Files",
+                validator,
+                path => string.Equals(path, fallbackRoot, StringComparison.OrdinalIgnoreCase));
+
+            AssertTrue(selection.UsesFallback, "Expected an existing trusted fallback to remain selected.");
+            AssertEqual(fallbackRoot, selection.SecureMainFolder);
+            AssertFalse(preferredValidated, "Sticky fallback selection should not probe or switch to ProgramData.");
+        }
+
+        private static void GlobalRejectsUnsafeExistingFallback()
+        {
+            const string fallbackRoot = @"C:\Program Files\WireSock Foundation WireSock UI Data";
+            Global.TrustedDirectoryCreationValidator validator =
+                delegate (string path, string label, out string diagnostic)
+                {
+                    diagnostic = "Fallback is writable by Users.";
+                    return false;
+                };
+
+            AssertThrows<UnauthorizedAccessException>(
+                () => Global.ResolveSecureStoragePaths(
+                    @"C:\ProgramData\WireSockUI",
+                    @"C:\ProgramData\WireSockUI-Notifications",
+                    @"C:\Program Files",
+                    validator,
+                    path => string.Equals(path, fallbackRoot, StringComparison.OrdinalIgnoreCase)),
+                "existing protected WireSock UI fallback");
+        }
+
+        private static void GlobalDoesNotLaunderUnsafeFallbackAcl()
+        {
+            var fallbackParent = Path.Combine(
+                Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var fallbackRoot = Path.Combine(
+                fallbackParent, "WireSock Foundation WireSock UI Data");
+            var sentinel = Path.Combine(fallbackRoot, "do-not-modify.txt");
+            Directory.CreateDirectory(fallbackRoot);
+            File.WriteAllText(sentinel, "preserve me");
+
+            try
+            {
+                var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+                var security = Directory.GetAccessControl(fallbackRoot);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    users,
+                    FileSystemRights.Modify,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+                Directory.SetAccessControl(fallbackRoot, security);
+                const AccessControlSections comparedSections =
+                    AccessControlSections.Access |
+                    AccessControlSections.Owner |
+                    AccessControlSections.Group;
+                var originalSecurity = Directory.GetAccessControl(fallbackRoot)
+                    .GetSecurityDescriptorSddlForm(comparedSections);
+
+                AssertThrows<UnauthorizedAccessException>(
+                    () => Global.ResolveSecureStoragePaths(
+                        @"C:\ProgramData\WireSockUI",
+                        @"C:\ProgramData\WireSockUI-Notifications",
+                        fallbackParent,
+                        WireSockUI.Program.TryValidateTrustedDirectoryCreationPath,
+                        path => string.Equals(path, fallbackRoot, StringComparison.OrdinalIgnoreCase)),
+                    "existing protected WireSock UI fallback");
+
+                AssertEqual("preserve me", File.ReadAllText(sentinel));
+                AssertEqual(
+                    originalSecurity,
+                    Directory.GetAccessControl(fallbackRoot)
+                        .GetSecurityDescriptorSddlForm(comparedSections));
+            }
+            finally
+            {
+                TryDeleteDirectory(fallbackParent, true);
+            }
+        }
+
+        private static void GlobalDoesNotBypassUnsafeExistingPreferredTree()
+        {
+            const string preferredRoot = @"C:\ProgramData\WireSockUI";
+            Global.TrustedDirectoryCreationValidator validator =
+                delegate (string path, string label, out string diagnostic)
+                {
+                    diagnostic = string.Equals(path, preferredRoot, StringComparison.OrdinalIgnoreCase)
+                        ? "Existing data is owned by a non-administrative user."
+                        : null;
+                    return !string.Equals(path, preferredRoot, StringComparison.OrdinalIgnoreCase);
+                };
+
+            AssertThrows<UnauthorizedAccessException>(
+                () => Global.ResolveSecureStoragePaths(
+                    preferredRoot,
+                    @"C:\ProgramData\WireSockUI-Notifications",
+                    @"C:\Program Files",
+                    validator,
+                    path => string.Equals(path, preferredRoot, StringComparison.OrdinalIgnoreCase)),
+                "existing preferred WireSock UI data directory");
+        }
+
+        private static void GlobalRebasesEverySecureStoragePath()
+        {
+            var originalSelection = new Global.SecureStoragePaths(
+                Global.SecureMainFolder,
+                Global.NotificationAssetsFolder,
+                Global.IsUsingSecureStorageFallback,
+                Global.SecureStorageFallbackDiagnostic);
+            const string fallbackRoot = @"C:\Program Files\WireSock Foundation WireSock UI Data";
+            const string fallbackNotifications =
+                @"C:\Program Files\WireSock Foundation WireSock UI Notifications";
+
+            try
+            {
+                Global.ApplySecureStoragePaths(new Global.SecureStoragePaths(
+                    fallbackRoot,
+                    fallbackNotifications,
+                    true,
+                    "test fallback"));
+
+                AssertEqual(fallbackRoot, Global.SecureMainFolder);
+                AssertEqual(Path.Combine(fallbackRoot, "Configs"), Global.ConfigsFolder);
+                AssertEqual(Path.Combine(fallbackRoot, "Configs", ".transactions"),
+                    Global.ProfileTransactionsFolder);
+                AssertEqual(Path.Combine(fallbackRoot, "PendingLegacyProfiles"),
+                    Global.PendingLegacyProfilesFolder);
+                AssertEqual(Path.Combine(fallbackRoot, "Logs"), Global.DiagnosticsFolder);
+                AssertEqual(Path.Combine(fallbackRoot, "Logs", "WireSockUI.log"), Global.DiagnosticLogPath);
+                AssertEqual(Path.Combine(fallbackRoot, "NativeRecoveryRequired.txt"),
+                    Global.NativeRecoveryMarkerPath);
+                AssertEqual(fallbackNotifications, Global.NotificationAssetsFolder);
+                AssertTrue(Global.IsUsingSecureStorageFallback, "Expected fallback state to be applied.");
+            }
+            finally
+            {
+                Global.ApplySecureStoragePaths(originalSelection);
+            }
+        }
+
+        private static void GlobalRejectsUnavailablePreferredAndFallbackStorage()
+        {
+            Global.TrustedDirectoryCreationValidator validator =
+                delegate (string path, string label, out string diagnostic)
+                {
+                    diagnostic = path.IndexOf("ProgramData", StringComparison.OrdinalIgnoreCase) >= 0
+                        ? "ProgramData is unsafe."
+                        : "The Program Files root is unsafe.";
+                    return false;
+                };
+
+            AssertThrows<UnauthorizedAccessException>(
+                () => Global.ResolveSecureStoragePaths(
+                    @"C:\ProgramData\WireSockUI",
+                    @"C:\ProgramData\WireSockUI-Notifications",
+                    @"C:\Program Files",
+                    validator,
+                    path => false),
+                "Program Files root is unsafe");
+        }
+
+        private static void ReleaseVersionParserHandlesSemVerTags()
+        {
+            AssertTrue(ReleaseVersionParser.TryParseReleaseTag("release-v1.2.3", out var canonicalRelease),
+                "Expected canonical release-v tags to parse.");
+            AssertEqual("1.2.3", canonicalRelease.ToString());
+
+            AssertTrue(ReleaseVersionParser.TryParseReleaseTag("V1.2.3", out var upperV),
+                "Expected uppercase V-prefixed tags to parse.");
+            AssertEqual("1.2.3", upperV.ToString());
+
+            AssertTrue(ReleaseVersionParser.TryParseReleaseTag("v1.2.3-beta.1", out var prerelease),
+                "Expected prerelease tags to parse by comparing their numeric release version.");
+            AssertEqual("1.2.3", prerelease.ToString());
+
+            AssertTrue(ReleaseVersionParser.TryParseReleaseTag("1.2.3+build.5", out var metadata),
+                "Expected build metadata tags to parse by comparing their numeric release version.");
+            AssertEqual("1.2.3", metadata.ToString());
+
+            AssertFalse(ReleaseVersionParser.TryParseReleaseTag("not-a-version", out _),
+                "Expected invalid release tags to be rejected.");
+        }
+
+        private static void BoundedResponseReaderRejectsDeclaredAndStreamedOverflow()
+        {
+            var exact = Encoding.UTF8.GetBytes("12345678");
+            using (var stream = new MemoryStream(exact, false))
+                AssertEqual("12345678", BoundedStreamReader.ReadUtf8ToEnd(stream, exact.Length));
+
+            using (var oversized = new MemoryStream(new byte[9], false))
+                AssertThrows<InvalidDataException>(
+                    () => BoundedStreamReader.ReadUtf8ToEnd(oversized, 8),
+                    "maximum supported size");
+
+            using (var chunked = new ChunkedReadStream(new byte[9], 3))
+                AssertThrows<InvalidDataException>(
+                    () => BoundedStreamReader.ReadUtf8ToEnd(chunked, 8),
+                    "maximum supported size");
+        }
+
+        private static void ProgramPathNormalizationPreservesDriveRoots()
+        {
+            var normalize = typeof(WireSockUI.Program).GetMethod("NormalizePathDirectory",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (normalize == null)
+                throw new InvalidOperationException("NormalizePathDirectory helper was not found.");
+
+            var root = Path.GetPathRoot(Environment.SystemDirectory);
+            var normalizedRoot = (string)normalize.Invoke(null, new object[] { root });
+            var normalizedWithQuotes = (string)normalize.Invoke(null, new object[] { $"\"{root}\"" });
+            var normalizedChild = (string)normalize.Invoke(null, new object[] { Path.Combine(root, "Windows") + "\\" });
+
+            AssertEqual(root, normalizedRoot);
+            AssertEqual(root, normalizedWithQuotes);
+            AssertEqual(Path.Combine(root, "Windows"), normalizedChild);
+        }
+
+        private static void ProgramRejectsUntrustedApplicationPayloads()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var executable = Path.Combine(directory, "WireSockUI.exe");
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(executable, string.Empty);
+                File.WriteAllText(executable + ".config", "<configuration />");
+                File.WriteAllText(Path.Combine(directory, "dependency.dll"), string.Empty);
+
+                AssertFalse(WireSockUI.Program.TryValidateApplicationPayload(executable, out var diagnostic),
+                    "Expected an elevated application payload in a user-writable directory to be rejected.");
+                AssertTrue(!string.IsNullOrWhiteSpace(diagnostic) &&
+                           diagnostic.IndexOf("writable", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Expected an actionable application trust diagnostic, got '{diagnostic}'.");
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void ProgramEnumeratesNestedApplicationPayloads()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var localeDirectory = Path.Combine(directory, "zh-Hant");
+            var resourceAssembly = Path.Combine(localeDirectory, "Microsoft.Win32.TaskScheduler.resources.dll");
+
+            try
+            {
+                Directory.CreateDirectory(localeDirectory);
+                File.WriteAllText(Path.Combine(directory, "WireSockUI.exe"), string.Empty);
+                File.WriteAllText(resourceAssembly, string.Empty);
+
+                AssertTrue(WireSockUI.Program.TryEnumerateApplicationPayloadEntries(
+                        directory, out var files, out var directories, out var diagnostic),
+                    diagnostic ?? "Expected nested application payload enumeration to succeed.");
+                AssertTrue(files.Contains(resourceAssembly, StringComparer.OrdinalIgnoreCase),
+                    "Expected nested resource assemblies to be included in payload validation.");
+                AssertTrue(directories.Contains(localeDirectory, StringComparer.OrdinalIgnoreCase),
+                    "Expected locale directories to be included in payload validation.");
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void ProgramBoundsApplicationPayloadEnumeration()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+                for (var index = 0; index <= WireSockUI.Program.MaxApplicationPayloadEntries; index++)
+                    File.WriteAllText(Path.Combine(directory, $"payload-{index:D5}.txt"), string.Empty);
+
+                AssertFalse(WireSockUI.Program.TryEnumerateApplicationPayloadEntries(
+                        directory, out _, out _, out var diagnostic),
+                    "Expected oversized application payload enumeration to fail closed.");
+                AssertTrue(diagnostic?.IndexOf("more than", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Expected an actionable payload limit diagnostic, got '{diagnostic}'.");
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void ProgramDistinguishesBinaryArchitectures()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var x64Path = Path.Combine(directory, "x64.dll");
+            var arm64Path = Path.Combine(directory, "arm64.dll");
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+                WriteMinimalPortableExecutable(x64Path, 0x8664);
+                WriteMinimalPortableExecutable(arm64Path, 0xaa64);
+
+                AssertTrue(WindowsBinaryArchitectureInfo.TryReadPortableExecutableArchitecture(
+                        x64Path, out var x64, out var x64Diagnostic),
+                    x64Diagnostic ?? "Expected the x64 image to parse.");
+                AssertTrue(WindowsBinaryArchitectureInfo.TryReadPortableExecutableArchitecture(
+                        arm64Path, out var arm64, out var arm64Diagnostic),
+                    arm64Diagnostic ?? "Expected the ARM64 image to parse.");
+
+                AssertEqual((int)WindowsBinaryArchitecture.X64, (int)x64);
+                AssertEqual((int)WindowsBinaryArchitecture.Arm64, (int)arm64);
+                AssertTrue(WindowsBinaryArchitectureInfo.AreCompatible(x64, x64),
+                    "Expected matching PE architectures to be compatible.");
+                AssertFalse(WindowsBinaryArchitectureInfo.AreCompatible(x64, arm64),
+                    "Expected x64 and ARM64 images to be rejected as incompatible.");
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void WriteMinimalPortableExecutable(string path, ushort machine)
+        {
+            var image = new byte[70];
+            image[0] = (byte)'M';
+            image[1] = (byte)'Z';
+            BitConverter.GetBytes(64).CopyTo(image, 0x3c);
+            image[64] = (byte)'P';
+            image[65] = (byte)'E';
+            BitConverter.GetBytes(machine).CopyTo(image, 68);
+            File.WriteAllBytes(path, image);
+        }
+
+        private static void ProgramDiscoversWireSockLibrariesOnlyFromRegisteredLocations()
+        {
+            const string registeredInstallLocation = @"C:\Program Files\WireSock SDK";
+            var candidates = WireSockUI.Program
+                .EnumerateWireSockLibraryDirectoryCandidates(
+                    new[] { registeredInstallLocation })
+                .ToArray();
+
+            AssertEqual(3, candidates.Length);
+            AssertEqual(
+                Path.Combine(registeredInstallLocation, "sdk"),
+                candidates[0]);
+            AssertEqual(
+                Path.Combine(registeredInstallLocation, "bin"),
+                candidates[1]);
+            AssertEqual(registeredInstallLocation, candidates[2]);
+            AssertFalse(
+                candidates.Any(candidate => string.Equals(
+                    candidate,
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    StringComparison.OrdinalIgnoreCase)),
+                "Expected application-adjacent wgbooster.dll discovery to remain disabled.");
+        }
+
+        private static void ProgramRejectsUserWritableWireSockLibraryDirectories()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+
+            try
+            {
+                File.WriteAllText(Path.Combine(directory, "wgbooster.dll"), string.Empty);
+
+                try
+                {
+                    var security = Directory.GetAccessControl(directory);
+                    security.AddAccessRule(new FileSystemAccessRule(
+                        WindowsIdentity.GetCurrent().User,
+                        FileSystemRights.Modify,
+                        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                        PropagationFlags.None,
+                        AccessControlType.Allow));
+                    Directory.SetAccessControl(directory, security);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // Temporary test folders are normally user-writable already; explicit ACL setup is best effort.
+                }
+
+                var accepted = WireSockUI.Program.TryValidateWireSockLibraryDirectory(
+                    directory, out var validatedDirectory);
+
+                AssertFalse(accepted, "Expected user-writable WireSock library directories to be rejected.");
+                AssertTrue(validatedDirectory == null,
+                    "Expected rejected WireSock library directories not to return a path.");
+            }
+            finally
+            {
+                try
+                {
+                    if (Directory.Exists(directory))
+                        Directory.Delete(directory, true);
+                }
+                catch
+                {
+                    // Best-effort cleanup must not hide the original test failure.
+                }
+            }
+        }
+
+        private static void ProgramDetectsUserWritableWireSockLibraryFiles()
+        {
+            var isPotentiallyUserWritableFile = typeof(WireSockUI.Program).GetMethod("IsPotentiallyUserWritableFile",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (isPotentiallyUserWritableFile == null)
+                throw new InvalidOperationException("IsPotentiallyUserWritableFile helper was not found.");
+
+            var file = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", $"{Guid.NewGuid():N}.dll");
+            Directory.CreateDirectory(Path.GetDirectoryName(file));
+
+            try
+            {
+                File.WriteAllText(file, string.Empty);
+
+                var userWritable = (bool)isPotentiallyUserWritableFile.Invoke(null, new object[] { file });
+
+                AssertTrue(userWritable, "Expected user-writable WireSock library files to be detected.");
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(file))
+                        File.Delete(file);
+                }
+                catch
+                {
+                    // Best-effort cleanup must not hide the original test failure.
+                }
+            }
+        }
+
+        private static void ProgramRestrictsTrustedOwnerSids()
+        {
+            var hasTrustedOwner = typeof(WireSockUI.Program).GetMethod("HasTrustedOwner",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (hasTrustedOwner == null)
+                throw new InvalidOperationException("HasTrustedOwner helper was not found.");
+
+            var isTrustedAdministrativeSid = typeof(WireSockUI.Program).GetMethod("IsTrustedAdministrativeSid",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (isTrustedAdministrativeSid == null)
+                throw new InvalidOperationException("IsTrustedAdministrativeSid helper was not found.");
+
+            var accountDomainSid = new SecurityIdentifier("S-1-5-21-1000000001-1000000002-1000000003");
+            var administratorSid = new SecurityIdentifier(
+                WellKnownSidType.AccountAdministratorSid,
+                accountDomainSid);
+            var domainAdminsSid = new SecurityIdentifier(
+                WellKnownSidType.AccountDomainAdminsSid,
+                accountDomainSid);
+            var ordinaryUserSid = new SecurityIdentifier($"{accountDomainSid.Value}-1100");
+
+            var security = new DirectorySecurity();
+            security.SetOwner(administratorSid);
+            AssertFalse((bool)hasTrustedOwner.Invoke(null, new object[] { security }),
+                "Expected an unrelated RID-500 account owner not to be trusted by suffix alone.");
+
+            security.SetOwner(domainAdminsSid);
+            AssertFalse((bool)hasTrustedOwner.Invoke(null, new object[] { security }),
+                "Expected an unrelated RID-512 group owner not to be trusted by suffix alone.");
+
+            security.SetOwner(ordinaryUserSid);
+            AssertFalse((bool)hasTrustedOwner.Invoke(null, new object[] { security }),
+                "Expected an ordinary account-domain owner to remain untrusted.");
+
+            security.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
+            AssertTrue((bool)hasTrustedOwner.Invoke(null, new object[] { security }),
+                "Expected the built-in Administrators group owner to remain trusted.");
+
+            AssertFalse((bool)isTrustedAdministrativeSid.Invoke(null, new object[]
+                { new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null) }),
+                "Expected LocalService not to be trusted as an elevated SDK library writer.");
+            AssertFalse((bool)isTrustedAdministrativeSid.Invoke(null, new object[]
+                { new SecurityIdentifier("S-1-5-80-100-200-300-400-500") }),
+                "Expected arbitrary service SIDs not to be trusted as elevated SDK library writers.");
+            AssertTrue((bool)isTrustedAdministrativeSid.Invoke(null, new object[]
+                {
+                    new SecurityIdentifier(
+                        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
+                }), "Expected the exact TrustedInstaller SID to remain trusted.");
+#if DEBUG
+            if (WireSockUI.Program.IsProcessElevated(out _))
+            {
+                using (var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query))
+                {
+                    AssertTrue(
+                        (bool)isTrustedAdministrativeSid.Invoke(
+                            null,
+                            new object[] { identity.User }),
+                        "Expected a Debug build to inspect the elevated current user without a token-access failure.");
+                }
+            }
+#endif
+        }
+
+        private static void ProgramRejectsOverTheShoulderElevationIdentities()
+        {
+            var signedInUser =
+                new SecurityIdentifier("S-1-5-21-1000000001-1000000002-1000000003-1100");
+            var suppliedAdministrator =
+                new SecurityIdentifier("S-1-5-21-1000000001-1000000002-1000000003-500");
+
+            AssertTrue(
+                WireSockUI.Program.ValidateInteractiveUserIdentity(
+                    signedInUser,
+                    signedInUser,
+                    out var matchingDiagnostic),
+                matchingDiagnostic);
+            AssertTrue(string.IsNullOrEmpty(matchingDiagnostic),
+                "Expected a matching signed-in and process identity to have no diagnostic.");
+
+            AssertFalse(
+                WireSockUI.Program.ValidateInteractiveUserIdentity(
+                    suppliedAdministrator,
+                    signedInUser,
+                    out var mismatchDiagnostic),
+                "Expected credentials supplied by another administrator account to fail closed.");
+            AssertTrue(
+                mismatchDiagnostic?.IndexOf("different account", StringComparison.OrdinalIgnoreCase) >= 0,
+                "Expected an actionable over-the-shoulder elevation diagnostic.");
+        }
+
+        private static void ProgramChecksElevationWithoutTokenAccessFailures()
+        {
+            var elevated = WireSockUI.Program.IsProcessElevated(out var diagnostic);
+            if (elevated)
+            {
+                AssertTrue(
+                    string.IsNullOrEmpty(diagnostic),
+                    "Expected an elevated token to have no diagnostic.");
+                return;
+            }
+
+            AssertTrue(
+                diagnostic?.IndexOf(
+                    "not running with an elevated administrator token",
+                    StringComparison.OrdinalIgnoreCase) >= 0,
+                $"Expected a normal non-elevated result, not a token-access failure: {diagnostic}");
+        }
+
+        private static void GlobalFailsClosedOnConfigurationDirectoryReparsePoints()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var target = root + ".target";
+            var link = Path.Combine(root, "unsafe-child");
+            Directory.CreateDirectory(root);
+            Directory.CreateDirectory(target);
+
+            try
+            {
+                SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                if (!TryCreateDirectoryJunction(link, target))
+                {
+                    SkipOrFail("configuration directory reparse point creation unavailable; fail-closed check not exercised.");
+                    return;
+                }
+
+                AssertThrows<IOException>(
+                    () => Global.SecureExistingChildren(root, null, 0), "reparse point");
+            }
+            finally
+            {
+                SecureFileSystem.AllowOwnerWriteFailureForTests = false;
+                TryDeleteDirectory(link, false);
+                TryDeleteDirectory(root, true);
+                TryDeleteDirectory(target, true);
+            }
+        }
+
+        private static void GlobalBoundsSecuredTreeEnumeration()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+
+            try
+            {
+                SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                for (var index = 0; index <= Global.MaxSecuredTreeEntries; index++)
+                    File.WriteAllText(Path.Combine(root, $"entry-{index:D5}.txt"), string.Empty);
+
+                AssertThrows<InvalidDataException>(
+                    () => Global.SecureExistingChildren(root, null, 0), "more than");
+            }
+            finally
+            {
+                SecureFileSystem.AllowOwnerWriteFailureForTests = false;
+                TryDeleteDirectory(root, true);
+            }
+        }
+
+        private static void ProgramRejectsUntrustedWireSockCrashHandler()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+
+            try
+            {
+                File.WriteAllText(Path.Combine(directory, "crashpad_handler.exe"), string.Empty);
+                AssertFalse(WireSockUI.Program.TryValidateTrustedWireSockCompanionFiles(
+                        directory, Path.Combine(directory, "wgbooster.dll"), out var diagnostic),
+                    "Expected an explicitly user-writable crash handler to be rejected.");
+                AssertTrue(diagnostic?.IndexOf("non-administrative", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Expected an actionable crash-handler trust diagnostic, got '{diagnostic}'.");
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void ProgramBoundsWireSockSdkCompanionEnumeration()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var libraryPath = Path.Combine(directory, "wgbooster.dll");
+            Directory.CreateDirectory(directory);
+
+            try
+            {
+                File.WriteAllText(libraryPath, string.Empty);
+                for (var index = 0; index < WireSockUI.Program.MaxWireSockSdkDirectoryEntries; index++)
+                    File.WriteAllText(Path.Combine(directory, $"entry-{index:D5}.tmp"), string.Empty);
+
+                AssertFalse(WireSockUI.Program.TryValidateTrustedWireSockCompanionFiles(
+                        directory, libraryPath, out var diagnostic),
+                    "Expected oversized WireSock SDK companion enumeration to fail closed.");
+                AssertTrue(diagnostic?.IndexOf("more than", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Expected an actionable SDK directory limit diagnostic, got '{diagnostic}'.");
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void ProgramDistinguishesReadOnlyAndWritableAcls()
+        {
+            var inspect = typeof(WireSockUI.Program).GetMethod("IsPotentiallyUserWritableSecurity",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (inspect == null)
+                throw new InvalidOperationException("IsPotentiallyUserWritableSecurity helper was not found.");
+
+            var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+            var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+            var readOnlySecurity = new DirectorySecurity();
+            readOnlySecurity.SetOwner(administrators);
+            readOnlySecurity.AddAccessRule(new FileSystemAccessRule(
+                users,
+                FileSystemRights.ReadAndExecute,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            readOnlySecurity.AddAccessRule(new FileSystemAccessRule(
+                users,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.InheritOnly,
+                AccessControlType.Allow));
+
+            AssertFalse((bool)inspect.Invoke(null, new object[] { readOnlySecurity }),
+                "Expected read-only and inherited-only non-administrative ACEs to remain trusted.");
+
+            readOnlySecurity.AddAccessRule(new FileSystemAccessRule(
+                users, FileSystemRights.Modify, AccessControlType.Allow));
+            AssertTrue((bool)inspect.Invoke(null, new object[] { readOnlySecurity }),
+                "Expected a non-administrative modify ACE to be rejected.");
+        }
+
+        private static void ProfileRejectsUserWritableSecuredFiles()
+        {
+            var originalConfigsFolder = Global.ConfigsFolder;
+            var originalOverride = Global.AllowUnsecuredConfigFolderOverrideForTests;
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+                Global.ConfigsFolder = directory;
+                Global.AllowUnsecuredConfigFolderOverrideForTests = false;
+                var profilePath = Profile.GetProfilePath("unsafe");
+                File.WriteAllText(profilePath, ValidConfig());
+
+                AssertFalse(Profile.IsRegularProfileFile(profilePath, out var diagnostic),
+                    "Expected elevated activation to reject a user-writable profile.");
+                AssertTrue(diagnostic?.IndexOf("non-administrative", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Expected an ACL diagnostic, got '{diagnostic}'.");
+            }
+            finally
+            {
+                Global.ConfigsFolder = originalConfigsFolder;
+                Global.AllowUnsecuredConfigFolderOverrideForTests = originalOverride;
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void ProgramRejectsReplaceableTrustedPathAncestors()
+        {
+            var inspectAncestor = typeof(WireSockUI.Program).GetMethod("IsPotentiallyUserReplaceableAncestor",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (inspectAncestor == null)
+                throw new InvalidOperationException("IsPotentiallyUserReplaceableAncestor helper was not found.");
+
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+
+            try
+            {
+                AssertTrue((bool)inspectAncestor.Invoke(null, new object[] { directory }),
+                    "Expected a user-owned temporary ancestor to be replaceable and therefore untrusted.");
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void ProgramRejectsProtectedDirectoryCreationBelowWritableParents()
+        {
+            var directory = Path.Combine(
+                Path.GetTempPath(),
+                "WireSockUI.Tests",
+                Guid.NewGuid().ToString("N"));
+            var protectedChild = Path.Combine(directory, "protected", "data");
+            Directory.CreateDirectory(directory);
+
+            try
+            {
+                AssertFalse(
+                    WireSockUI.Program.TryValidateTrustedDirectoryCreationPath(
+                        protectedChild,
+                        "Test protected directory",
+                        out var diagnostic),
+                    "Expected protected directory creation below a user-writable parent to fail closed.");
+                AssertTrue(
+                    !string.IsNullOrWhiteSpace(diagnostic) &&
+                    diagnostic.IndexOf("non-administrative", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Expected an actionable protected-directory diagnostic, got '{diagnostic}'.");
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void ProgramPermitsSingleProtectedLeafBelowTrustedSharedRoot()
+        {
+            var commonApplicationData =
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            if (string.IsNullOrWhiteSpace(commonApplicationData))
+                throw new DirectoryNotFoundException("The shared application-data directory is unavailable.");
+
+            var missingLeaf = Path.Combine(
+                commonApplicationData,
+                "WireSockUI.Tests-" + Guid.NewGuid().ToString("N"));
+            AssertFalse(Directory.Exists(missingLeaf),
+                "Expected the protected-directory test leaf not to exist.");
+            AssertTrue(
+                WireSockUI.Program.TryValidateTrustedDirectoryCreationPath(
+                    missingLeaf,
+                    "Test protected directory",
+                    out var leafDiagnostic),
+                $"Expected one missing protected leaf below the trusted shared root to be allowed, got '{leafDiagnostic}'.");
+
+            var nestedMissingLeaf = Path.Combine(missingLeaf, "nested");
+            AssertFalse(
+                WireSockUI.Program.TryValidateTrustedDirectoryCreationPath(
+                    nestedMissingLeaf,
+                    "Test nested protected directory",
+                    out var nestedDiagnostic),
+                "Expected protected-directory validation to reject multiple missing path components.");
+            AssertTrue(
+                !string.IsNullOrWhiteSpace(nestedDiagnostic) &&
+                nestedDiagnostic.IndexOf("Only one protected leaf", StringComparison.OrdinalIgnoreCase) >= 0,
+                $"Expected an actionable nested-creation diagnostic, got '{nestedDiagnostic}'.");
+        }
+
+        private static void AutoRunRejectsUntrustedExecutablePaths()
+        {
+            var validate = typeof(FrmSettings).GetMethod("IsExecutablePathTrustedForAutoRun",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (validate == null)
+                throw new InvalidOperationException("IsExecutablePathTrustedForAutoRun helper was not found.");
+
+            var file = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", $"{Guid.NewGuid():N}.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(file));
+
+            try
+            {
+                File.WriteAllText(file, string.Empty);
+
+                var args = new object[] { file, null };
+                var trusted = (bool)validate.Invoke(null, args);
+
+                AssertFalse(trusted, "Expected elevated autorun to reject a user-writable executable path.");
+                AssertTrue(args[1] is string diagnostic &&
+                           diagnostic.IndexOf("non-administrative", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Expected an actionable autorun trust diagnostic, got '{args[1]}'.");
+            }
+            finally
+            {
+                TryDeleteFile(file);
+            }
+        }
+
+        private static void AutoRunRejectsReparsePointExecutableFolders()
+        {
+            var validate = typeof(FrmSettings).GetMethod("IsExecutablePathTrustedForAutoRun",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (validate == null)
+                throw new InvalidOperationException("IsExecutablePathTrustedForAutoRun helper was not found.");
+
+            var root = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var targetDirectory = Path.Combine(root, "target");
+            var linkDirectory = Path.Combine(root, "link");
+            var targetFile = Path.Combine(targetDirectory, "WireSockUI.exe");
+            var linkedFile = Path.Combine(linkDirectory, "WireSockUI.exe");
+
+            try
+            {
+                Directory.CreateDirectory(targetDirectory);
+                File.WriteAllText(targetFile, string.Empty);
+
+                if (!TryCreateDirectoryJunction(linkDirectory, targetDirectory))
+                {
+                    SkipOrFail("autorun directory reparse point creation unavailable; autorun reparse check not exercised.");
+                    return;
+                }
+
+                var args = new object[] { linkedFile, null };
+                var trusted = (bool)validate.Invoke(null, args);
+
+                AssertFalse(trusted, "Expected elevated autorun to reject executable paths through reparse point folders.");
+                AssertTrue(args[1] is string diagnostic &&
+                           diagnostic.IndexOf("reparse point", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Expected an actionable autorun reparse diagnostic, got '{args[1]}'.");
+            }
+            finally
+            {
+                TryDeleteDirectory(linkDirectory, false);
+                TryDeleteDirectory(root, true);
+            }
+        }
+
+        private static void ProfileImportRejectsOversizedFiles()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var source = Path.Combine(directory, "oversized.conf");
+            var destination = Path.Combine(directory, "oversized.tmp");
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+                using (var stream = new FileStream(source, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    stream.SetLength(1024 * 1024 + 1);
+                }
+
+                AssertThrows<InvalidOperationException>(
+                    () => ProfileImportService.CopyProfileToTemporaryFile(source, destination),
+                    "too large");
+                AssertFalse(File.Exists(destination), "Expected oversized profile imports not to create a temp copy.");
+            }
+            finally
+            {
+                try
+                {
+                    if (Directory.Exists(directory))
+                        Directory.Delete(directory, true);
+                }
+                catch
+                {
+                    // Best-effort cleanup must not hide the original test failure.
+                }
+            }
+        }
+
+        private static void ProfileImportPreservesExistingDestinationOnCopyFailure()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var source = Path.Combine(directory, "oversized.conf");
+            var destination = Path.Combine(directory, "existing.tmp");
+            const string destinationContents = "keep me";
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+                using (var stream = new FileStream(source, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    stream.SetLength(2);
+                }
+
+                File.WriteAllText(destination, destinationContents);
+
+                AssertThrows<InvalidOperationException>(
+                    () => RegularFileSource.CopyToTemporaryFile(source, destination, 1, "profile", "too large"),
+                    "too large");
+                AssertEqual(destinationContents, File.ReadAllText(destination));
+            }
+            finally
+            {
+                try
+                {
+                    if (Directory.Exists(directory))
+                        Directory.Delete(directory, true);
+                }
+                catch
+                {
+                    // Best-effort cleanup must not hide the original test failure.
+                }
+            }
+        }
+
+        private static void ProfileImportRejectsReparsePointSources()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var target = Path.Combine(directory, "target.conf");
+            var link = Path.Combine(directory, "linked.conf");
+            var destination = Path.Combine(directory, "linked.tmp");
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(target, ValidConfig());
+
+                if (!TryCreateProfileReparsePoint(link, target, out _))
+                {
+                    SkipOrFail("profile reparse point creation unavailable; profile import reparse check not exercised.");
+                    return;
+                }
+
+                AssertThrows<IOException>(
+                    () => ProfileImportService.CopyProfileToTemporaryFile(link, destination),
+                    "reparse point");
+                AssertFalse(File.Exists(destination),
+                    "Expected reparse point profile imports not to create a temp copy.");
+            }
+            finally
+            {
+                try
+                {
+                    if (Directory.Exists(directory))
+                        Directory.Delete(directory, true);
+                }
+                catch
+                {
+                    // Best-effort cleanup must not hide the original test failure.
+                }
+            }
+        }
+
+        private static void ProfileImportRejectsDirectorySources()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+
+                try
+                {
+                    using (RegularFileSource.OpenForRead(directory + Path.DirectorySeparatorChar, "profile"))
+                    {
+                    }
+                }
+                catch (IOException ex)
+                {
+                    AssertTrue(ex.Message.IndexOf("directory", StringComparison.OrdinalIgnoreCase) >= 0,
+                        $"Expected directory source diagnostic, got '{ex.Message}'.");
+                    AssertTrue(ex.Message.Contains(Path.GetFileName(directory)),
+                        $"Expected directory source diagnostic to include the selected folder name, got '{ex.Message}'.");
+                    return;
+                }
+
+                throw new InvalidOperationException("Expected directory source imports to be rejected.");
+            }
+            finally
+            {
+                try
+                {
+                    if (Directory.Exists(directory))
+                        Directory.Delete(directory, true);
+                }
+                catch
+                {
+                    // Best-effort cleanup must not hide the original test failure.
+                }
+            }
+        }
+
+        private static void ProfileImportReportsMalformedSourcePathsConsistently()
+        {
+            var invalidPath = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                              Path.DirectorySeparatorChar + "<invalid>.conf";
+
+            AssertThrows<IOException>(
+                () =>
+                {
+                    using (RegularFileSource.OpenForRead(invalidPath, "profile"))
+                    {
+                    }
+                },
+                "Unable to open");
+        }
+
+        private static void LegacyMigrationRejectsOversizedFiles()
+        {
+            WithTemporaryLegacyMigrationFolders((legacyFolder, pendingFolder) =>
+            {
+                var source = Path.Combine(legacyFolder, "oversized.conf");
+                using (var stream = new FileStream(source, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    stream.SetLength(1024 * 1024 + 1);
+
+                LegacyProfileMigrationService.StageLegacyProfiles();
+
+                AssertFalse(File.Exists(Path.Combine(pendingFolder, "oversized.conf")),
+                    "Expected oversized legacy profiles not to enter quarantine.");
+                AssertTrue(File.Exists(source),
+                    "Expected a rejected legacy profile to remain available for manual recovery.");
+            });
+        }
+
+        private static void GlobalRemovesConfigurationFileReparsePointsByHandle()
+        {
+            WithTemporaryLegacyMigrationFolders((legacyFolder, pendingFolder) =>
+            {
+                var target = Path.Combine(Global.ConfigsFolder, "target.conf");
+                var link = Path.Combine(Global.ConfigsFolder, "linked.conf");
+                File.WriteAllText(target, ValidConfig());
+
+                if (!TryCreateProfileReparsePoint(link, target, out var isFileLink) || !isFileLink)
+                {
+                    SkipOrFail("file symbolic-link creation unavailable; handle-based cleanup not exercised.");
+                    return;
+                }
+
+                Global.EnsureConfigsFolder();
+
+                AssertFalse(File.Exists(link), "Expected startup hardening to remove the reparse point itself.");
+                AssertTrue(File.Exists(target), "Expected reparse-point cleanup to preserve the target file.");
+            });
+        }
+
+        private static void LegacyMigrationRejectsReparsePointSources()
+        {
+            WithTemporaryLegacyMigrationFolders((legacyFolder, pendingFolder) =>
+            {
+                var target = Path.Combine(legacyFolder, "target.txt");
+                var link = Path.Combine(legacyFolder, "linked.conf");
+                File.WriteAllText(target, ValidConfig());
+
+                if (!TryCreateProfileReparsePoint(link, target, out _))
+                {
+                    SkipOrFail("profile reparse point creation unavailable; legacy migration reparse check not exercised.");
+                    return;
+                }
+
+                LegacyProfileMigrationService.StageLegacyProfiles();
+                AssertFalse(File.Exists(Path.Combine(pendingFolder, "linked.conf")),
+                    "Expected a reparse-point legacy profile not to enter quarantine.");
+            });
+        }
+
+        private static void LegacyMigrationQuarantinesValidProfiles()
+        {
+            WithTemporaryLegacyMigrationFolders((legacyFolder, pendingFolder) =>
+            {
+                var source = Path.Combine(legacyFolder, "office.conf");
+                File.WriteAllText(source, ValidConfig());
+
+                LegacyProfileMigrationService.StageLegacyProfiles();
+
+                AssertTrue(File.Exists(Path.Combine(pendingFolder, "office.conf")),
+                    "Expected a valid legacy profile to be staged for explicit review.");
+                AssertTrue(File.Exists(source),
+                    "Expected staging not to delete the user-controlled legacy source before approval.");
+                AssertFalse(File.Exists(Profile.GetProfilePath("office")),
+                    "Expected staging not to promote or activate the legacy profile.");
+            });
+        }
+
+        private static void LegacyMigrationAcceptsUppercaseConfExtensions()
+        {
+            WithTemporaryLegacyMigrationFolders((legacyFolder, pendingFolder) =>
+            {
+                var source = Path.Combine(legacyFolder, "office.CONF");
+                File.WriteAllText(source, ValidConfig());
+
+                LegacyProfileMigrationService.StageLegacyProfiles();
+
+                AssertTrue(File.Exists(Path.Combine(pendingFolder, "office.conf")),
+                    "Expected case-insensitive legacy profile extensions to enter quarantine.");
+
+                LegacyProfileMigrationService.CompleteApprovedMigration("office");
+                AssertFalse(File.Exists(source),
+                    "Expected approval to remove the original source with its exact extension casing.");
+            });
+        }
+
+        private static void LegacyMigrationBoundsCatalogEnumeration()
+        {
+            WithTemporaryLegacyMigrationFolders((legacyFolder, pendingFolder) =>
+            {
+                for (var index = 0; index <= LegacyProfileMigrationService.MaxLegacyCatalogEntries; index++)
+                    File.WriteAllText(Path.Combine(legacyFolder, $"entry-{index:D5}.tmp"), string.Empty);
+
+                AssertThrows<InvalidDataException>(
+                    LegacyProfileMigrationService.StageLegacyProfiles, "more than");
+
+                for (var index = 0; index <= LegacyProfileMigrationService.MaxLegacyCatalogEntries; index++)
+                    File.WriteAllText(Path.Combine(pendingFolder, $"entry-{index:D5}.tmp"), string.Empty);
+
+                AssertThrows<InvalidDataException>(
+                    () => LegacyProfileMigrationService.GetPendingProfileNames(), "more than");
+            });
+        }
+
+        private static void LegacyMigrationPreservesModifiedSourcesOnCompletion()
+        {
+            WithTemporaryLegacyMigrationFolders((legacyFolder, pendingFolder) =>
+            {
+                var source = Path.Combine(legacyFolder, "office.conf");
+                var pending = Path.Combine(pendingFolder, "office.conf");
+                File.WriteAllText(source, ValidConfig());
+                LegacyProfileMigrationService.StageLegacyProfiles();
+                File.WriteAllText(source, ValidConfig().Replace("10.0.0.2/32", "10.0.0.3/32"));
+
+                AssertThrows<IOException>(
+                    () => LegacyProfileMigrationService.CompleteApprovedMigration("office"),
+                    "no longer matches");
+                AssertTrue(File.Exists(source),
+                    "Expected a legacy source modified after staging to be preserved.");
+                AssertTrue(File.Exists(pending),
+                    "Expected quarantine metadata to remain available after a source mismatch.");
+            });
+        }
+
+        private static void LegacyMigrationPreservesApprovedDuplicates()
+        {
+            WithTemporaryLegacyMigrationFolders((legacyFolder, pendingFolder) =>
+            {
+                var contents = ValidConfig();
+                var source = Path.Combine(legacyFolder, "office.conf");
+                File.WriteAllText(source, contents);
+                File.WriteAllText(Profile.GetProfilePath("office"), contents);
+
+                LegacyProfileMigrationService.StageLegacyProfiles();
+
+                AssertTrue(File.Exists(source),
+                    "Expected migration not to delete an unapproved legacy source even when contents match.");
+                AssertFalse(File.Exists(Path.Combine(pendingFolder, "office.conf")),
+                    "Expected an already approved duplicate not to be staged again.");
+            });
+        }
+
+        private static void NativeRecoveryMarkerCleanupRemovesDirectoryMarkers()
+        {
+            WithTemporarySecureMainFolder(() =>
+            {
+                Directory.CreateDirectory(Global.NativeRecoveryMarkerPath);
+
+                var snapshot = Global.NativeRecoveryMarkers.Capture();
+                AssertTrue(snapshot?.Contents.IndexOf("directory", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Expected directory marker diagnostic, got '{snapshot?.Contents}'.");
+
+                AssertTrue(Global.NativeRecoveryMarkers.TryDelete(snapshot),
+                    "Expected the unchanged invalid marker to be deleted through its startup snapshot.");
+                AssertFalse(Directory.Exists(Global.NativeRecoveryMarkerPath),
+                    "Expected recovery marker cleanup to remove directory markers.");
+            });
+        }
+
+        private static void NativeRecoveryMarkerReplacementDoesNotFollowHardLinks()
+        {
+            WithTemporarySecureMainFolder(() =>
+            {
+                var originalOwnerWriteFailure = SecureFileSystem.AllowOwnerWriteFailureForTests;
+                var target = Path.Combine(Global.SecureMainFolder, "hard-link-target.txt");
+                try
+                {
+                    SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                    File.WriteAllText(target, "unchanged");
+                    if (!CreateHardLink(Global.NativeRecoveryMarkerPath, target, IntPtr.Zero))
+                    {
+                        SkipOrFail("hard-link creation unavailable; recovery marker replacement not exercised.");
+                        return;
+                    }
+
+                    var lease = Global.NativeRecoveryMarkers.Write("test marker", "test diagnostic");
+
+                    AssertTrue(lease != null, "Expected recovery marker replacement to succeed.");
+                    AssertEqual("unchanged", File.ReadAllText(target));
+                    AssertTrue(File.ReadAllText(Global.NativeRecoveryMarkerPath).Contains("Context: test marker"),
+                        "Expected recovery marker content to be written to a newly created file.");
+                }
+                finally
+                {
+                    SecureFileSystem.AllowOwnerWriteFailureForTests = originalOwnerWriteFailure;
+                }
+            });
+        }
+
+        private static void NativeRecoveryMarkerLeasesPreserveNewerFailures()
+        {
+            WithTemporarySecureMainFolder(() =>
+            {
+                var originalOwnerWriteFailure = SecureFileSystem.AllowOwnerWriteFailureForTests;
+                try
+                {
+                    SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                    var firstLease = Global.NativeRecoveryMarkers.Write("first operation", "first diagnostic");
+                    var firstSnapshot = Global.NativeRecoveryMarkers.Capture();
+                    var secondLease = Global.NativeRecoveryMarkers.Write("second operation", "second diagnostic");
+
+                    AssertTrue(firstLease != null && firstSnapshot != null && secondLease != null,
+                        "Expected every recovery marker operation to create an ownership token.");
+                    AssertFalse(Global.NativeRecoveryMarkers.TryDelete(firstLease),
+                        "Expected an older lease not to delete a newer marker.");
+                    AssertFalse(Global.NativeRecoveryMarkers.TryUpdate(firstLease, "stale failure", "stale diagnostic"),
+                        "Expected an older lease not to overwrite a newer marker.");
+                    AssertFalse(Global.NativeRecoveryMarkers.TryDelete(firstSnapshot),
+                        "Expected an older startup snapshot not to delete a newer marker.");
+
+                    var contents = Global.NativeRecoveryMarkers.Read();
+                    AssertTrue(contents.Contains("Context: second operation"),
+                        "Expected the newer recovery marker to remain intact.");
+                    AssertTrue(Global.NativeRecoveryMarkers.TryDelete(secondLease),
+                        "Expected the current marker owner to delete its marker.");
+                    AssertFalse(File.Exists(Global.NativeRecoveryMarkerPath),
+                        "Expected the owned recovery marker to be removed.");
+                }
+                finally
+                {
+                    SecureFileSystem.AllowOwnerWriteFailureForTests = originalOwnerWriteFailure;
+                }
+            });
+        }
+
+        private static void NativeRecoveryMarkersBoundDiagnostics()
+        {
+            WithTemporarySecureMainFolder(() =>
+            {
+                var originalOwnerWriteFailure = SecureFileSystem.AllowOwnerWriteFailureForTests;
+                try
+                {
+                    SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                    var lease = Global.NativeRecoveryMarkers.Write(
+                        new string('c', 100 * 1024),
+                        new string('d', 200 * 1024));
+
+                    AssertTrue(lease != null, "Expected the bounded recovery marker write to succeed.");
+                    AssertTrue(new FileInfo(Global.NativeRecoveryMarkerPath).Length <= 64 * 1024,
+                        "Expected the recovery marker to stay within its read limit.");
+                    AssertTrue(Global.NativeRecoveryMarkers.Read().Contains("Diagnostic: "),
+                        "Expected the bounded marker to retain its diagnostic field.");
+                    AssertTrue(Global.NativeRecoveryMarkers.TryDelete(lease),
+                        "Expected the bounded marker to remain owned and deletable.");
+
+                    using (var stream = new FileStream(Global.NativeRecoveryMarkerPath, FileMode.CreateNew,
+                               FileAccess.Write, FileShare.None))
+                        stream.SetLength(64 * 1024 + 1);
+
+                    var oversizedSnapshot = Global.NativeRecoveryMarkers.Capture();
+                    AssertTrue(oversizedSnapshot?.Contents.Contains("could not be read") == true,
+                        "Expected an oversized external marker to produce a bounded diagnostic.");
+                    AssertTrue(Global.NativeRecoveryMarkers.TryDelete(oversizedSnapshot),
+                        "Expected scoped cleanup to remove the unchanged oversized marker.");
+                    AssertFalse(File.Exists(Global.NativeRecoveryMarkerPath),
+                        "Expected the oversized marker to be removed through its validated handle.");
+                }
+                finally
+                {
+                    SecureFileSystem.AllowOwnerWriteFailureForTests = originalOwnerWriteFailure;
+                }
+            });
+        }
+
+        private static void NativeRecoveryMarkerReplacementPreservesPreviousRecordOnFailure()
+        {
+            WithTemporarySecureMainFolder(() =>
+            {
+                var originalOwnerWriteFailure = SecureFileSystem.AllowOwnerWriteFailureForTests;
+                try
+                {
+                    SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                    var orphanTemporaryPath =
+                        Global.NativeRecoveryMarkerPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    File.WriteAllText(orphanTemporaryPath, "orphaned marker write");
+                    var firstLease = Global.NativeRecoveryMarkers.Write("preserved operation", "preserved diagnostic");
+                    AssertTrue(firstLease != null, "Expected the initial recovery marker write to succeed.");
+                    AssertFalse(File.Exists(orphanTemporaryPath),
+                        "Expected recovery marker writes to clean an orphaned managed temporary file.");
+                    var previousContents = File.ReadAllText(Global.NativeRecoveryMarkerPath);
+
+                    using (new FileStream(Global.NativeRecoveryMarkerPath, FileMode.Open, FileAccess.Read,
+                               FileShare.Read))
+                    {
+                        var failedLease = Global.NativeRecoveryMarkers.Write("replacement operation",
+                            "replacement diagnostic");
+                        AssertTrue(failedLease == null,
+                            "Expected atomic marker replacement to report the sharing violation.");
+                    }
+
+                    AssertEqual(previousContents, File.ReadAllText(Global.NativeRecoveryMarkerPath));
+                    AssertFalse(Directory.GetFiles(Global.SecureMainFolder, "*.tmp").Any(),
+                        "Expected a failed atomic replacement to remove its temporary file.");
+                }
+                finally
+                {
+                    SecureFileSystem.AllowOwnerWriteFailureForTests = originalOwnerWriteFailure;
+                }
+            });
+        }
+
+        private static void SecureFileSystemRejectsWritableHardLinks()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var target = Path.Combine(directory, "target.txt");
+            var link = Path.Combine(directory, "link.txt");
+            var originalOwnerWriteFailure = SecureFileSystem.AllowOwnerWriteFailureForTests;
+            try
+            {
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(target, "contents");
+                if (!CreateHardLink(link, target, IntPtr.Zero))
+                {
+                    SkipOrFail("hard-link creation unavailable; writable-file rejection not exercised.");
+                    return;
+                }
+
+                SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                AssertThrows<IOException>(() =>
+                {
+                    using (SecureFileSystem.OpenFile(link, true))
+                    {
+                    }
+                }, "hard-linked");
+            }
+            finally
+            {
+                SecureFileSystem.AllowOwnerWriteFailureForTests = originalOwnerWriteFailure;
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void SecureFileSystemReadsTextThroughValidatedHandles()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var path = Path.Combine(directory, "profile.conf");
+            var hardLinkPath = Path.Combine(directory, "profile-hard-link.conf");
+            try
+            {
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(path, "[Interface]\r\nPrivateKey = test", new UTF8Encoding(true));
+
+                AssertEqual("[Interface]\r\nPrivateKey = test", SecureFileSystem.ReadAllText(path, 1024));
+                if (!CreateHardLink(hardLinkPath, path, IntPtr.Zero))
+                {
+                    SkipOrFail("hard-link creation unavailable; validated content-read rejection not exercised.");
+                    return;
+                }
+
+                AssertThrows<IOException>(() => SecureFileSystem.ReadAllText(hardLinkPath, 1024), "hard-linked");
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void SecureFileSystemDeleteHandlesBlockConcurrentWrites()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var path = Path.Combine(directory, "delete-target.txt");
+            try
+            {
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(path, "contents");
+
+                using (SecureFileSystem.OpenFileForDelete(path))
+                {
+                    using (var reader = new FileStream(path, FileMode.Open, FileAccess.Read,
+                               FileShare.Read | FileShare.Write | FileShare.Delete))
+                        AssertEqual((int)'c', reader.ReadByte());
+
+                    AssertThrows<IOException>(() =>
+                    {
+                        using (new FileStream(path, FileMode.Open, FileAccess.Write,
+                                   FileShare.Read | FileShare.Write | FileShare.Delete))
+                        {
+                        }
+                    }, null);
+                }
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void SecureFileSystemSnapshotsPermitShellLinkInspection()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var shortcutPath = Path.Combine(directory, "startup.lnk");
+            var snapshotPath = Path.Combine(directory, "startup-snapshot.lnk");
+            var targetPath = Assembly.GetExecutingAssembly().Location;
+            try
+            {
+                Directory.CreateDirectory(directory);
+                using (var shortcut = new ShellLink { TargetPath = targetPath })
+                    shortcut.Save(shortcutPath);
+
+                using (var shortcutFile = SecureFileSystem.OpenFileForReadAndDelete(shortcutPath))
+                {
+                    shortcutFile.CopyToNewFile(snapshotPath, 1024 * 1024);
+                    using (var shortcut = new ShellLink(snapshotPath))
+                        AssertTrue(string.Equals(Path.GetFullPath(targetPath), Path.GetFullPath(shortcut.TargetPath),
+                                StringComparison.OrdinalIgnoreCase),
+                            "Expected the validated shortcut snapshot to preserve its target.");
+                    shortcutFile.Delete();
+                }
+
+                AssertFalse(File.Exists(shortcutPath), "Expected the validated source shortcut to be deleted.");
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void NativeQueryDistinguishesErrorSentinels()
+        {
+            var cleared = false;
+            var succeeded = NativeCall.TryQuery(
+                () => false,
+                result => !result,
+                () => cleared = true,
+                () => 5,
+                out var queryValue,
+                out var diagnostic);
+
+            AssertTrue(cleared, "Expected stale native error state to be cleared before the query.");
+            AssertFalse(succeeded, "Expected a false sentinel accompanied by a native error to fail.");
+            AssertFalse(queryValue, "Expected the original query value to be preserved.");
+            AssertTrue(diagnostic?.Contains("5") == true, "Expected the native error code in the diagnostic.");
+
+            succeeded = NativeCall.TryQuery(
+                () => false,
+                result => !result,
+                () => { },
+                () => 0,
+                out queryValue,
+                out diagnostic);
+            AssertTrue(succeeded, "Expected an error sentinel with ERROR_SUCCESS to remain a valid inactive state.");
+            AssertTrue(diagnostic == null, "Expected no diagnostic for a valid inactive state.");
+
+            succeeded = NativeCall.TryQuery(
+                () => true,
+                result => !result,
+                () => { },
+                () => 5,
+                out queryValue,
+                out diagnostic);
+            AssertTrue(succeeded, "Expected a non-sentinel value to ignore stale native error state.");
+        }
+
+        private static void SettingsUpgradeRunsExactlyOnce()
+        {
+            var calls = new List<string>();
+            WireSockUI.Program.RunSettingsUpgrade(
+                true,
+                () => calls.Add("upgrade"),
+                () => calls.Add("complete"),
+                () => calls.Add("save"));
+
+            AssertEqual("upgrade,complete,save", string.Join(",", calls));
+
+            WireSockUI.Program.RunSettingsUpgrade(
+                false,
+                () => throw new InvalidOperationException("Upgrade should not run."),
+                () => throw new InvalidOperationException("Completion should not run."),
+                () => throw new InvalidOperationException("Save should not run."));
+
+            WireSockUI.Program.RunSettingsUpgrade(
+                true,
+                () =>
+                {
+                    calls.Add("retry");
+                    return false;
+                },
+                () => throw new InvalidOperationException("A failed migration must remain pending."),
+                () => throw new InvalidOperationException("A failed migration must not be saved."));
+            AssertEqual("upgrade,complete,save,retry", string.Join(",", calls));
+        }
+
+        private static void LegacyUserSettingsMigrationParsesAllowlistedValues()
+        {
+            const string xml =
+                "<configuration><userSettings><WireSockUI.Properties.Settings>" +
+                "<setting name=\"AutoConnect\"><value>true</value></setting>" +
+                "<setting name=\"AutoMinimize\"><value>true</value></setting>" +
+                "<setting name=\"AutoUpdate\"><value>false</value></setting>" +
+                "<setting name=\"EnableNotifications\"><value>false</value></setting>" +
+                "<setting name=\"EnableKillSwitch\"><value>true</value></setting>" +
+                "<setting name=\"UseAdapter\"><value>true</value></setting>" +
+                "<setting name=\"LastProfile\"><value>office</value></setting>" +
+                "<setting name=\"LogLevel\"><value>Debug</value></setting>" +
+                "<setting name=\"AutoRun\"><value>true</value></setting>" +
+                "<setting name=\"Unknown\"><value>ignored</value></setting>" +
+                "</WireSockUI.Properties.Settings></userSettings>" +
+                "<spoof><setting name=\"LogLevel\"><value>All</value></setting></spoof>" +
+                "</configuration>";
+
+            using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(xml)))
+            {
+                AssertTrue(
+                    LegacyUserSettingsMigrationService.TryParse(stream, out var snapshot),
+                    "Expected the bounded legacy settings document to be recognized.");
+                AssertTrue(snapshot.AutoConnect == true, "Expected AutoConnect to migrate.");
+                AssertTrue(snapshot.AutoMinimize == true, "Expected AutoMinimize to migrate.");
+                AssertTrue(snapshot.AutoUpdate == false, "Expected AutoUpdate to migrate.");
+                AssertTrue(snapshot.EnableNotifications == false,
+                    "Expected EnableNotifications to migrate.");
+                AssertTrue(snapshot.EnableKillSwitch == true,
+                    "Expected EnableKillSwitch to migrate for later privileged confirmation.");
+                AssertTrue(snapshot.UseAdapter == true,
+                    "Expected UseAdapter to migrate for later privileged confirmation.");
+                AssertEqual("office", snapshot.LastProfile);
+                AssertEqual("Debug", snapshot.LogLevel);
+            }
+
+            const string entityDocument =
+                "<!DOCTYPE x [<!ENTITY secret SYSTEM \"file:///c:/windows/win.ini\">]>" +
+                "<configuration><userSettings><WireSockUI.Properties.Settings>" +
+                "<setting name=\"LogLevel\"><value>&secret;</value></setting>" +
+                "</WireSockUI.Properties.Settings></userSettings></configuration>";
+            using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(entityDocument)))
+                AssertThrows<XmlException>(
+                    () => LegacyUserSettingsMigrationService.TryParse(stream, out _),
+                    "DTD");
+
+            AssertTrue(
+                LegacyUserSettingsMigrationService.IsKnownLegacyIdentityDirectory(
+                    "WireSockUI.exe_Url_a1b2c3"),
+                "Expected the legacy URL-evidence settings identity.");
+            AssertTrue(
+                LegacyUserSettingsMigrationService.IsKnownLegacyIdentityDirectory(
+                    "WireSockUI.exe_StrongName_a1b2c3"),
+                "Expected the legacy strong-name settings identity.");
+            AssertFalse(
+                LegacyUserSettingsMigrationService.IsKnownLegacyIdentityDirectory(
+                    "Unrelated.exe_Url_a1b2c3"),
+                "Expected unrelated LocalFileSettingsProvider identities to be ignored.");
+            AssertTrue(
+                LegacyUserSettingsMigrationService.IsEligibleLegacyVersion(
+                    new Version(1, 2, 2, 0),
+                    new Version(1, 2, 3, 0)),
+                "Expected a previous-version settings directory to be eligible.");
+            AssertTrue(
+                LegacyUserSettingsMigrationService.IsEligibleLegacyVersion(
+                    new Version(1, 2, 3, 0),
+                    new Version(1, 2, 3, 0)),
+                "Expected a same-version settings directory under a different application identity to migrate.");
+            AssertFalse(
+                LegacyUserSettingsMigrationService.IsEligibleLegacyVersion(
+                    new Version(1, 2, 4, 0),
+                    new Version(1, 2, 3, 0)),
+                "Expected a future-version settings directory to be rejected.");
+
+            var directory = Path.Combine(
+                Path.GetTempPath(), "WireSockUI.LegacySettings.Tests", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            try
+            {
+                var source = Path.Combine(directory, "user.config");
+                File.WriteAllText(source, xml, new UTF8Encoding(false, true));
+                AssertTrue(
+                    LegacyUserSettingsMigrationService.TryReadConfiguration(
+                        source, out var fileSnapshot),
+                    "Expected the validated-handle settings reader to parse a regular file.");
+                AssertEqual("Debug", fileSnapshot.LogLevel);
+
+                var oversized = Path.Combine(directory, "oversized.config");
+                File.WriteAllBytes(
+                    oversized,
+                    new byte[LegacyUserSettingsMigrationService.MaximumSettingsFileBytes + 1]);
+                AssertThrows<InvalidDataException>(
+                    () => LegacyUserSettingsMigrationService.TryReadConfiguration(
+                        oversized, out _),
+                    "maximum supported size");
+
+                var hardLink = Path.Combine(directory, "hard-link.config");
+                if (CreateHardLink(hardLink, source, IntPtr.Zero))
+                {
+                    AssertThrows<IOException>(
+                        () => LegacyUserSettingsMigrationService.TryReadConfiguration(
+                            hardLink, out _),
+                        "hard-linked");
+                }
+
+                var symbolicLink = Path.Combine(directory, "symbolic-link.config");
+                if (TryCreateFileSymbolicLink(symbolicLink, source))
+                {
+                    AssertThrows<IOException>(
+                        () => LegacyUserSettingsMigrationService.TryReadConfiguration(
+                            symbolicLink, out _),
+                        "reparse point");
+                }
+            }
+            finally
+            {
+                try
+                {
+                    if (Directory.Exists(directory))
+                        Directory.Delete(directory, true);
+                }
+                catch
+                {
+                    // Best-effort test cleanup must not hide the original result.
+                }
+            }
+        }
+
+        private static void LegacyUserSettingsMigrationRejectsUnresolvedLocalPaths()
+        {
+            AssertThrows<DirectoryNotFoundException>(
+                () => LegacyUserSettingsMigrationService.IsLocalFixedPath(string.Empty),
+                "must be absolute");
+            AssertThrows<DirectoryNotFoundException>(
+                () => LegacyUserSettingsMigrationService.IsLocalFixedPath("relative-local-data"),
+                "must be absolute");
+
+            AssertFalse(
+                LegacyUserSettingsMigrationService.ApplyLatest(
+                    WireSockUI.Properties.Settings.Default,
+                    null,
+                    string.Empty),
+                "Expected an unresolved LocalApplicationData path to preserve the migration retry flag.");
+            AssertFalse(
+                LegacyUserSettingsMigrationService.ApplyLatest(
+                    WireSockUI.Properties.Settings.Default,
+                    null,
+                    "relative-local-data"),
+                "Expected a relative LocalApplicationData path to preserve the migration retry flag.");
+        }
+
+        private static void ProtectedSettingsRequireConsentAndPersist()
+        {
+            var originalSettings = PrivilegedSettingsStore.Capture();
+            var originalAllowOwnerFailure = SecureFileSystem.AllowOwnerWriteFailureForTests;
+            try
+            {
+                SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                WithTemporarySecureMainFolder(() =>
+                {
+                    var legacy = new PrivilegedSettingsSnapshot(true, "office", true, true);
+                    var confirmations = 0;
+                    PrivilegedSettingsStore.Initialize(legacy, settings =>
+                    {
+                        confirmations++;
+                        AssertEqual("office", settings.LastProfile);
+                        return false;
+                    });
+
+                    AssertEqual(1, confirmations);
+                    AssertFalse(PrivilegedSettingsStore.AutoConnect,
+                        "Expected rejected legacy settings to use safe defaults.");
+                    AssertFalse(PrivilegedSettingsStore.EnableKillSwitch,
+                        "Expected rejected legacy settings not to alter the Kill Switch preference.");
+                    AssertTrue(File.Exists(PrivilegedSettingsStore.SettingsFilePath),
+                        "Expected protected defaults to be persisted after migration was declined.");
+
+                    PrivilegedSettingsStore.Apply(legacy);
+                    PrivilegedSettingsStore.Save();
+                    PrivilegedSettingsStore.SetForTests(new PrivilegedSettingsSnapshot(false, string.Empty,
+                        false, false));
+                    PrivilegedSettingsStore.Initialize(
+                        new PrivilegedSettingsSnapshot(false, string.Empty, false, false),
+                        _ => throw new InvalidOperationException("Existing protected settings must not prompt."));
+
+                    AssertTrue(PrivilegedSettingsStore.AutoConnect,
+                        "Expected the protected auto-connect setting to round-trip.");
+                    AssertEqual("office", PrivilegedSettingsStore.LastProfile);
+                    AssertTrue(PrivilegedSettingsStore.UseAdapter,
+                        "Expected the protected adapter mode to round-trip.");
+                    AssertTrue(PrivilegedSettingsStore.EnableKillSwitch,
+                        "Expected the protected Kill Switch preference to round-trip.");
+                });
+            }
+            finally
+            {
+                SecureFileSystem.AllowOwnerWriteFailureForTests = originalAllowOwnerFailure;
+                PrivilegedSettingsStore.SetForTests(originalSettings);
+            }
+        }
+
+        private static void ProtectedSettingsRejectMalformedOrOversizedData()
+        {
+            AssertThrows<XmlException>(
+                () => PrivilegedSettingsStore.Parse(
+                    "<!DOCTYPE settings [<!ENTITY x 'true'>]><PrivilegedSettings Version='1'><AutoConnect>&x;</AutoConnect><LastProfile/><UseAdapter>false</UseAdapter><EnableKillSwitch>false</EnableKillSwitch></PrivilegedSettings>"),
+                "DTD");
+            AssertThrows<FormatException>(
+                () => PrivilegedSettingsStore.Parse(
+                    "<PrivilegedSettings Version='1'><AutoConnect>false</AutoConnect><LastProfile/><UseAdapter>false</UseAdapter><EnableKillSwitch>false</EnableKillSwitch><Unexpected/></PrivilegedSettings>"),
+                "structure");
+            AssertThrows<FormatException>(
+                () => PrivilegedSettingsStore.Parse(
+                    "<PrivilegedSettings Version='1'><AutoConnect>false</AutoConnect><LastProfile>..</LastProfile><UseAdapter>false</UseAdapter><EnableKillSwitch>false</EnableKillSwitch></PrivilegedSettings>"),
+                "invalid value");
+
+            var originalSettings = PrivilegedSettingsStore.Capture();
+            var originalAllowOwnerFailure = SecureFileSystem.AllowOwnerWriteFailureForTests;
+            try
+            {
+                SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                WithTemporarySecureMainFolder(() =>
+                {
+                    File.WriteAllText(PrivilegedSettingsStore.SettingsFilePath, new string('x', 64 * 1024 + 1));
+                    AssertThrows<InvalidDataException>(
+                        () => PrivilegedSettingsStore.Initialize(
+                            new PrivilegedSettingsSnapshot(false, string.Empty, false, false), _ => false),
+                        "maximum supported size");
+
+                    File.WriteAllBytes(PrivilegedSettingsStore.SettingsFilePath, new byte[] { 0xc3, 0x28 });
+                    AssertThrows<DecoderFallbackException>(
+                        () => PrivilegedSettingsStore.Initialize(
+                            new PrivilegedSettingsSnapshot(false, string.Empty, false, false), _ => false),
+                        string.Empty);
+
+                    File.Delete(PrivilegedSettingsStore.SettingsFilePath);
+                    Directory.CreateDirectory(PrivilegedSettingsStore.SettingsFilePath);
+                    AssertThrows<IOException>(
+                        () => PrivilegedSettingsStore.Initialize(
+                            new PrivilegedSettingsSnapshot(false, string.Empty, false, false), _ => false),
+                        "regular file");
+                });
+            }
+            finally
+            {
+                SecureFileSystem.AllowOwnerWriteFailureForTests = originalAllowOwnerFailure;
+                PrivilegedSettingsStore.SetForTests(originalSettings);
+            }
+        }
+
+        private static void ProtectedSettingsRecoverInterruptedSaves()
+        {
+            var originalSettings = PrivilegedSettingsStore.Capture();
+            var originalAllowOwnerFailure = SecureFileSystem.AllowOwnerWriteFailureForTests;
+            try
+            {
+                SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                WithTemporarySecureMainFolder(() =>
+                {
+                    var backupPath = Path.Combine(Global.SecureMainFolder, "PrivilegedSettings.xml.backup");
+                    var orphanTemporaryPath = Path.Combine(
+                        Global.SecureMainFolder,
+                        $".PrivilegedSettings.xml.{Guid.NewGuid():N}.tmp");
+                    var orphanInvalidPath = Path.Combine(
+                        Global.SecureMainFolder,
+                        $".PrivilegedSettings.xml.{Guid.NewGuid():N}.invalid");
+                    var unmanagedLookalikePath = Path.Combine(
+                        Global.SecureMainFolder,
+                        ".PrivilegedSettings.xml.not-a-guid.tmp");
+                    File.WriteAllText(orphanTemporaryPath, "orphaned temporary settings");
+                    File.WriteAllText(orphanInvalidPath, "orphaned invalid settings");
+                    File.WriteAllText(unmanagedLookalikePath, "unmanaged lookalike");
+
+                    var backupOnly = new PrivilegedSettingsSnapshot(true, "restored", false, true);
+                    File.WriteAllText(backupPath, PrivilegedSettingsStore.Serialize(backupOnly),
+                        new UTF8Encoding(false, true));
+
+                    PrivilegedSettingsStore.Initialize(
+                        new PrivilegedSettingsSnapshot(false, string.Empty, false, false),
+                        _ => throw new InvalidOperationException("Backup recovery must not prompt."));
+
+                    AssertEqual("restored", PrivilegedSettingsStore.LastProfile);
+                    AssertTrue(File.Exists(PrivilegedSettingsStore.SettingsFilePath),
+                        "Expected a backup-only interrupted save to restore the settings file.");
+                    AssertFalse(File.Exists(backupPath),
+                        "Expected the restored backup to be consumed.");
+                    AssertFalse(File.Exists(orphanTemporaryPath),
+                        "Expected interrupted-save recovery to remove an orphaned managed temporary file.");
+                    AssertFalse(File.Exists(orphanInvalidPath),
+                        "Expected interrupted-save recovery to remove an orphaned managed invalid file.");
+                    AssertTrue(File.Exists(unmanagedLookalikePath),
+                        "Expected interrupted-save recovery not to remove an unrecognized lookalike file.");
+
+                    var committed = new PrivilegedSettingsSnapshot(false, "committed", true, false);
+                    File.WriteAllText(PrivilegedSettingsStore.SettingsFilePath,
+                        PrivilegedSettingsStore.Serialize(committed), new UTF8Encoding(false, true));
+                    File.WriteAllText(backupPath, PrivilegedSettingsStore.Serialize(backupOnly),
+                        new UTF8Encoding(false, true));
+
+                    PrivilegedSettingsStore.Initialize(
+                        new PrivilegedSettingsSnapshot(false, string.Empty, false, false),
+                        _ => throw new InvalidOperationException("Committed settings recovery must not prompt."));
+
+                    AssertEqual("committed", PrivilegedSettingsStore.LastProfile);
+                    AssertTrue(PrivilegedSettingsStore.UseAdapter,
+                        "Expected a committed settings file to win over its stale backup.");
+                    AssertFalse(File.Exists(backupPath),
+                        "Expected a stale backup to be deleted after the committed file was verified.");
+
+                    File.WriteAllText(PrivilegedSettingsStore.SettingsFilePath, "invalid protected settings");
+                    File.WriteAllText(backupPath, PrivilegedSettingsStore.Serialize(backupOnly),
+                        new UTF8Encoding(false, true));
+
+                    PrivilegedSettingsStore.Initialize(
+                        new PrivilegedSettingsSnapshot(false, string.Empty, false, false),
+                        _ => throw new InvalidOperationException("Invalid committed settings recovery must not prompt."));
+
+                    AssertEqual("restored", PrivilegedSettingsStore.LastProfile);
+                    AssertFalse(File.Exists(backupPath),
+                        "Expected a valid backup to replace an invalid committed settings file.");
+                    AssertFalse(Directory.GetFiles(Global.SecureMainFolder, "*.invalid").Any(),
+                        "Expected the invalid committed settings file to be removed after recovery.");
+
+                    File.Delete(PrivilegedSettingsStore.SettingsFilePath);
+                    Directory.CreateDirectory(PrivilegedSettingsStore.SettingsFilePath);
+                    File.WriteAllText(backupPath, PrivilegedSettingsStore.Serialize(backupOnly),
+                        new UTF8Encoding(false, true));
+                    AssertThrows<IOException>(
+                        () => PrivilegedSettingsStore.Initialize(
+                            new PrivilegedSettingsSnapshot(false, string.Empty, false, false), _ => false),
+                        "regular file");
+                    AssertTrue(File.Exists(backupPath),
+                        "Expected a trust-boundary failure to leave the recovery backup untouched.");
+                });
+            }
+            finally
+            {
+                SecureFileSystem.AllowOwnerWriteFailureForTests = originalAllowOwnerFailure;
+                PrivilegedSettingsStore.SetForTests(originalSettings);
+            }
+        }
+
+        private static void ApplicationSettingsUseProtectedConnectionValues()
+        {
+            var originalProtectedSettings = PrivilegedSettingsStore.Capture();
+            var originalLegacyAutoConnect = WireSockUI.Properties.Settings.Default.AutoConnect;
+            var originalLegacyUseAdapter = WireSockUI.Properties.Settings.Default.UseAdapter;
+            var originalLegacyKillSwitch = WireSockUI.Properties.Settings.Default.EnableKillSwitch;
+            try
+            {
+                PrivilegedSettingsStore.SetForTests(new PrivilegedSettingsSnapshot(true, "office", true, true));
+                WireSockUI.Properties.Settings.Default.AutoConnect = false;
+                WireSockUI.Properties.Settings.Default.UseAdapter = false;
+                WireSockUI.Properties.Settings.Default.EnableKillSwitch = false;
+
+                var captured = ApplicationSettingsSnapshot.Capture();
+                AssertTrue(captured.AutoConnect,
+                    "Expected connection settings capture to ignore the legacy user-scoped value.");
+                AssertTrue(captured.UseAdapter,
+                    "Expected adapter mode capture to come from protected storage.");
+                AssertTrue(captured.EnableKillSwitch,
+                    "Expected Kill Switch capture to come from protected storage.");
+
+                new ApplicationSettingsSnapshot(captured.AutoRun, false, captured.AutoMinimize,
+                    captured.AutoUpdate, false, captured.EnableNotifications, false, captured.LogLevel).Apply();
+                AssertEqual("office", PrivilegedSettingsStore.LastProfile);
+                AssertFalse(PrivilegedSettingsStore.AutoConnect,
+                    "Expected applying settings to update protected auto-connect state.");
+                AssertFalse(PrivilegedSettingsStore.UseAdapter,
+                    "Expected applying settings to update protected adapter state.");
+                AssertFalse(PrivilegedSettingsStore.EnableKillSwitch,
+                    "Expected applying settings to update protected Kill Switch state.");
+            }
+            finally
+            {
+                WireSockUI.Properties.Settings.Default.AutoConnect = originalLegacyAutoConnect;
+                WireSockUI.Properties.Settings.Default.UseAdapter = originalLegacyUseAdapter;
+                WireSockUI.Properties.Settings.Default.EnableKillSwitch = originalLegacyKillSwitch;
+                PrivilegedSettingsStore.SetForTests(originalProtectedSettings);
+            }
+        }
+
+        private static void SettingsTransactionCompensatesFailuresInReverseOrder()
+        {
+            var calls = new List<string>();
+            var result = CompensatingTransaction.ApplyAsync(new[]
+                {
+                    new CompensatingTransactionStep("log-level",
+                        () =>
+                        {
+                            calls.Add("apply-log-level");
+                            return Task.FromResult(true);
+                        },
+                        () =>
+                        {
+                            calls.Add("rollback-log-level");
+                            return Task.FromResult(true);
+                        }),
+                    new CompensatingTransactionStep("kill-switch",
+                        () =>
+                        {
+                            calls.Add("apply-kill-switch");
+                            return Task.FromResult(false);
+                        },
+                        () =>
+                        {
+                            calls.Add("rollback-kill-switch");
+                            return Task.FromResult(false);
+                        }),
+                    new CompensatingTransactionStep("persistence",
+                        () =>
+                        {
+                            calls.Add("apply-persistence");
+                            return Task.FromResult(true);
+                        },
+                        () => Task.FromResult(true))
+                })
+                .GetAwaiter().GetResult();
+
+            AssertFalse(result.Succeeded, "Expected a failed Kill Switch update to fail the transaction.");
+            AssertEqual("kill-switch", result.FailedStep);
+            AssertEqual("apply-log-level,apply-kill-switch,rollback-kill-switch,rollback-log-level",
+                string.Join(",", calls));
+            AssertEqual("kill-switch", string.Join(",", result.RollbackFailures));
+
+            var expectedException = new InvalidOperationException("autorun access denied");
+            var exceptionResult = CompensatingTransaction.ApplyAsync(new[]
+                {
+                    new CompensatingTransactionStep("autorun task",
+                        () => throw expectedException,
+                        () => Task.FromResult(true))
+                })
+                .GetAwaiter().GetResult();
+
+            AssertFalse(exceptionResult.Succeeded, "Expected an autorun exception to fail the transaction.");
+            AssertTrue(ReferenceEquals(expectedException, exceptionResult.Exception),
+                "Expected the transaction result to retain the actionable autorun exception.");
+        }
+
+        private static void SettingsCoordinatorOwnsUpdateSequencing()
+        {
+            var calls = new List<string>();
+            var previous = new ApplicationSettingsSnapshot(false, false, false, false,
+                false, false, false, "Info");
+            var requested = new ApplicationSettingsSnapshot(true, true, true, true,
+                true, true, true, "Debug");
+            var coordinator = new SettingsUpdateCoordinator(
+                logLevel =>
+                {
+                    calls.Add("log:" + logLevel);
+                    return Task.FromResult(true);
+                },
+                (enabled, applyNativeState) =>
+                {
+                    calls.Add($"kill:{enabled}:{applyNativeState}");
+                    return Task.FromResult(true);
+                },
+                settings =>
+                {
+                    calls.Add(ReferenceEquals(settings, requested) ? "persist:requested" : "persist:previous");
+                    return Task.FromResult(true);
+                });
+
+            var result = coordinator.ApplyAsync(
+                    previous,
+                    requested,
+                    true,
+                    () =>
+                    {
+                        calls.Add("autorun:apply");
+                        return Task.FromResult(true);
+                    },
+                    () =>
+                    {
+                        calls.Add("autorun:rollback");
+                        return Task.FromResult(true);
+                    },
+                    () =>
+                    {
+                        calls.Add("autorun:commit");
+                        return Task.FromResult(true);
+                    })
+                .GetAwaiter().GetResult();
+
+            AssertTrue(result.Succeeded, "Expected the settings coordinator transaction to succeed.");
+            AssertEqual(
+                "autorun:apply,log:Debug,persist:requested,kill:True:True,autorun:commit",
+                string.Join(",", calls));
+
+            calls.Clear();
+            var failingCoordinator = new SettingsUpdateCoordinator(
+                logLevel =>
+                {
+                    calls.Add("log:" + logLevel);
+                    return Task.FromResult(true);
+                },
+                (enabled, applyNativeState) =>
+                {
+                    calls.Add($"kill:{enabled}:{applyNativeState}");
+                    return Task.FromResult(true);
+                },
+                settings =>
+                {
+                    calls.Add(ReferenceEquals(settings, requested) ? "persist:requested" : "persist:previous");
+                    if (ReferenceEquals(settings, requested))
+                        throw new IOException("simulated persistence failure");
+                    return Task.FromResult(true);
+                });
+
+            var failedResult = failingCoordinator.ApplyAsync(
+                    previous,
+                    requested,
+                    false,
+                    () =>
+                    {
+                        calls.Add("autorun:apply");
+                        return Task.FromResult(true);
+                    },
+                    () =>
+                    {
+                        calls.Add("autorun:rollback");
+                        return Task.FromResult(true);
+                    },
+                    () =>
+                    {
+                        calls.Add("autorun:commit");
+                        return Task.FromResult(true);
+                    })
+                .GetAwaiter().GetResult();
+
+            AssertFalse(failedResult.Succeeded,
+                "Expected a synchronous persistence exception to fail the settings transaction.");
+            AssertEqual("settings persistence", failedResult.FailedStep);
+            AssertTrue(failedResult.Exception is IOException,
+                "Expected the settings transaction to retain the synchronous persistence exception.");
+            AssertEqual(
+                "autorun:apply,log:Debug,persist:requested,persist:previous,log:Info,autorun:rollback",
+                string.Join(",", calls));
+            AssertFalse(calls.Contains("autorun:commit"),
+                "Expected legacy autorun cleanup to remain deferred when a later settings step fails.");
+        }
+
+        private static void SettingsRollbackIdentifiesNativeRecoveryRequirements()
+        {
+            var noRollbackFailure = new CompensatingTransactionResult(true);
+            AssertFalse(noRollbackFailure.RollbackFailed("native Kill Switch"),
+                "Expected omitted rollback failures to normalize to an empty list.");
+
+            var nativeFailure = new CompensatingTransactionResult(false, "native Kill Switch", null,
+                new[] { "native Kill Switch: access denied" });
+            AssertTrue(SettingsUpdateCoordinator.FailureRequiresNativeRecovery(nativeFailure),
+                "Expected a failed native Kill Switch rollback to require recovery.");
+
+            var persistenceFailure = new CompensatingTransactionResult(false, "settings persistence", null,
+                new[] { "settings persistence: disk full" });
+            AssertFalse(SettingsUpdateCoordinator.FailureRequiresNativeRecovery(persistenceFailure),
+                "Expected a non-native rollback failure not to be mislabeled as driver recovery.");
+
+            var similarlyNamedFailure = new CompensatingTransactionResult(false, "settings persistence", null,
+                new[] { "native Kill Switch backup: disk full" });
+            AssertFalse(SettingsUpdateCoordinator.FailureRequiresNativeRecovery(similarlyNamedFailure),
+                "Expected only the exact native Kill Switch transaction step to require driver recovery.");
+        }
+
+        private static void TunnelCommandsDistinguishActivationFromDeactivation()
+        {
+            AssertTrue(TunnelCommandPolicy.IsDisconnectOnly(FrmMain.ConnectionState.Connected,
+                    TunnelCommand.ToggleSelectedProfile),
+                "Expected the connected Activate/Deactivate button to request disconnect only.");
+            AssertFalse(TunnelCommandPolicy.IsDisconnectOnly(FrmMain.ConnectionState.Disconnected,
+                    TunnelCommand.ToggleSelectedProfile),
+                "Expected the disconnected button to activate the selected profile.");
+            AssertFalse(TunnelCommandPolicy.IsDisconnectOnly(FrmMain.ConnectionState.Connected,
+                    TunnelCommand.ActivateSelectedProfile),
+                "Expected profile activation to switch or reconnect instead of acting as Deactivate.");
+        }
+
+        private static void NativeTimeoutPolicyDefersCleanupUntilCompletion()
+        {
+            var pending = Task.FromResult(NativeOperationResult<bool>.Success(true));
+            var timedOut = NativeOperationResult<bool>.Timeout("timeout", pending);
+            AssertTrue(NativeOperationRecoveryPolicy.MustDeferCleanup(timedOut),
+                "Expected cleanup to wait for the timed-out native query.");
+            AssertFalse(NativeOperationRecoveryPolicy.MustDeferCleanup(NativeOperationResult<bool>.Failure("failed")),
+                "Expected a completed failure to permit immediate cleanup.");
+            AssertTrue(NativeOperationRecoveryPolicy.CanRestorePreviousState(
+                    NativeOperationResult<bool>.Success(true)),
+                "Expected a verified late success to restore the previous UI state.");
+            AssertFalse(NativeOperationRecoveryPolicy.CanRestorePreviousState(
+                    NativeOperationResult<bool>.Failure("failed")),
+                "Expected a late failure to retain recovery state.");
+
+            var missingCompletion = NativeOperationRecoveryPolicy.NormalizeCompletion<bool>(null,
+                "native state query");
+            AssertFalse(missingCompletion.Succeeded,
+                "Expected a missing late native result to retain recovery state.");
+            AssertTrue(missingCompletion.Diagnostic.Contains("completed without a result"),
+                "Expected a missing late native result to provide an actionable diagnostic.");
+            AssertEqual("existing additional",
+                NativeOperationRecoveryPolicy.AppendDiagnostic("existing", "additional"));
+            AssertEqual("additional", NativeOperationRecoveryPolicy.AppendDiagnostic(null, "additional"));
+            AssertEqual("existing", NativeOperationRecoveryPolicy.AppendDiagnostic("existing", null));
+        }
+
+        private static void AutorunPreservesPersistedStateWhenStatusIsUnknown()
+        {
+            AssertTrue(FrmSettings.ResolveRequestedAutoRun(FrmSettings.AutoRunStatus.Unknown, false, true),
+                "Expected an unknown Task Scheduler state to preserve the persisted preference.");
+            AssertFalse(FrmSettings.ResolveRequestedAutoRun(FrmSettings.AutoRunStatus.Disabled, false, true),
+                "Expected a verified disabled state to override a stale persisted preference.");
+            AssertTrue(FrmSettings.ResolveRequestedAutoRun(FrmSettings.AutoRunStatus.Enabled, true, false),
+                "Expected a known enabled state to use the requested value.");
+        }
+
+        private static void AutoRunHelperBoundsHangsAndRecoversVerifiedState()
+        {
+            const string behaviorVariable =
+                "WIRESOCKUI_TEST_AUTORUN_HELPER_BEHAVIOR";
+            var previousBehavior = Environment.GetEnvironmentVariable(behaviorVariable);
+            var helperPath = Assembly.GetExecutingAssembly().Location;
+            var service = new AutoRunOperationService(() => helperPath);
+
+            try
+            {
+                Environment.SetEnvironmentVariable(behaviorVariable, "success");
+                var success = service.ExecuteAsync(
+                        AutoRunHelperOperation.Inspect,
+                        TimeSpan.FromSeconds(5),
+                        false,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(
+                    (int)AutoRunOperationOutcome.Succeeded,
+                    (int)success.Outcome);
+                AssertEqual("test-helper-inspect", success.Payload);
+
+                Environment.SetEnvironmentVariable(behaviorVariable, "failure");
+                var failure = service.ExecuteAsync(
+                        AutoRunHelperOperation.Inspect,
+                        TimeSpan.FromSeconds(5),
+                        false,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(
+                    (int)AutoRunOperationOutcome.Failed,
+                    (int)failure.Outcome);
+                AssertTrue(
+                    failure.Diagnostic?.Contains("simulated autorun helper failure") == true,
+                    "Expected the bounded helper diagnostic to be preserved.");
+
+                Environment.SetEnvironmentVariable(behaviorVariable, "oversize");
+                var oversizedOutput = service.ExecuteAsync(
+                        AutoRunHelperOperation.Inspect,
+                        TimeSpan.FromSeconds(5),
+                        false,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(
+                    (int)AutoRunOperationOutcome.Succeeded,
+                    (int)oversizedOutput.Outcome);
+                AssertEqual(128 * 1024, oversizedOutput.Payload.Length);
+                AssertTrue(
+                    oversizedOutput.Payload.EndsWith("...", StringComparison.Ordinal),
+                    "Expected oversized helper output to retain an explicit truncation marker.");
+
+                Environment.SetEnvironmentVariable(behaviorVariable, "failure");
+                var failedMutation = service.ExecuteAsync(
+                        AutoRunHelperOperation.Enable,
+                        TimeSpan.FromSeconds(5),
+                        true,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(
+                    (int)AutoRunOperationOutcome.StateUncertain,
+                    (int)failedMutation.Outcome);
+                AssertTrue(
+                    failedMutation.OperationStarted,
+                    "Expected a failed helper mutation to require state verification.");
+                var verifiedFailureDiagnostic = FrmSettings.BuildVerifiedIncompleteAutoRunDiagnostic(
+                    AutoRunHelperOperation.Enable,
+                    failedMutation.Diagnostic);
+                AssertTrue(
+                    verifiedFailureDiagnostic.Contains("simulated autorun helper failure"),
+                    "Expected verified helper failures to retain their original diagnostic.");
+                AssertFalse(
+                    verifiedFailureDiagnostic.Contains("timed-out"),
+                    "Expected a non-timeout helper failure not to be mislabeled as a timeout.");
+
+                Environment.SetEnvironmentVariable(behaviorVariable, "success");
+                var blockedAfterFailure = service.ExecuteAsync(
+                        AutoRunHelperOperation.Disable,
+                        TimeSpan.FromSeconds(5),
+                        true,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(
+                    (int)AutoRunOperationOutcome.StateUncertain,
+                    (int)blockedAfterFailure.Outcome);
+                AssertFalse(
+                    blockedAfterFailure.OperationStarted,
+                    "Expected a mutation after a failed helper to be blocked before process start.");
+                service.AcknowledgeVerifiedMutationState();
+
+                Environment.SetEnvironmentVariable(behaviorVariable, "hang");
+                var uncertain = service.ExecuteAsync(
+                        AutoRunHelperOperation.Enable,
+                        TimeSpan.FromMilliseconds(100),
+                        true,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(
+                    (int)AutoRunOperationOutcome.StateUncertain,
+                    (int)uncertain.Outcome);
+                AssertTrue(
+                    uncertain.OperationStarted,
+                    "Expected a timed-out mutation to be treated as having possibly started.");
+
+                Environment.SetEnvironmentVariable(behaviorVariable, "success");
+                var blockedMutation = service.ExecuteAsync(
+                        AutoRunHelperOperation.Disable,
+                        TimeSpan.FromSeconds(5),
+                        true,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(
+                    (int)AutoRunOperationOutcome.StateUncertain,
+                    (int)blockedMutation.Outcome);
+                AssertFalse(
+                    blockedMutation.OperationStarted,
+                    "Expected an unverified follow-up mutation to be rejected before process start.");
+
+                var verification = service.ExecuteAsync(
+                        AutoRunHelperOperation.Inspect,
+                        TimeSpan.FromSeconds(5),
+                        false,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(
+                    (int)AutoRunOperationOutcome.Succeeded,
+                    (int)verification.Outcome);
+
+                service.AcknowledgeVerifiedMutationState();
+                var retry = service.ExecuteAsync(
+                        AutoRunHelperOperation.Disable,
+                        TimeSpan.FromSeconds(5),
+                        true,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(
+                    (int)AutoRunOperationOutcome.Succeeded,
+                    (int)retry.Outcome);
+                AssertEqual("test-helper-disable", retry.Payload);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(
+                    behaviorVariable,
+                    previousBehavior);
+            }
+        }
+
+        private static void Curve25519MatchesRfc7748PublicKeyVectors()
+        {
+            var privateKey = ParseHex(
+                "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+            var originalPrivateKey = (byte[])privateKey.Clone();
+            var publicKey = Curve25519.GetPublicKey(privateKey);
+            AssertEqual(
+                "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+                ToHex(publicKey));
+            AssertEqual(ToHex(originalPrivateKey), ToHex(privateKey));
+
+            var peerPublicKey = ParseHex(
+                "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+            var sharedSecret = Curve25519.GetSharedSecret(privateKey, peerPublicKey);
+            AssertEqual(
+                "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+                ToHex(sharedSecret));
+            AssertEqual(ToHex(originalPrivateKey), ToHex(privateKey));
+
+            peerPublicKey[31] |= 0x80;
+            var highBitSharedSecret = Curve25519.GetSharedSecret(privateKey, peerPublicKey);
+            AssertEqual(ToHex(sharedSecret), ToHex(highBitSharedSecret));
+            AssertEqual(0x80, peerPublicKey[31] & 0x80);
+            AssertThrows<ArgumentNullException>(
+                () => Curve25519.GetSharedSecret(privateKey, null), nameof(peerPublicKey));
+            AssertThrows<CryptographicException>(
+                () => Curve25519.GetSharedSecret(privateKey, new byte[Curve25519.KeySize]), "all-zero");
+
+            var generatedPrivateKey = Curve25519.CreateRandomPrivateKey();
+            AssertEqual(32, generatedPrivateKey.Length);
+            AssertEqual(0, generatedPrivateKey[0] & 7);
+            AssertEqual(0x40, generatedPrivateKey[31] & 0x40);
+            AssertEqual(0, generatedPrivateKey[31] & 0x80);
+        }
+
+        private static void Curve25519SupportsOptionalSigningKeys()
+        {
+            var publicKey = new byte[Curve25519.KeySize];
+            var privateKey = new byte[Curve25519.KeySize];
+
+            Curve25519.KeyGenInline(publicKey, null, privateKey);
+
+            AssertEqual(ToHex(Curve25519.GetPublicKey(privateKey)), ToHex(publicKey));
+            var signingKey = Curve25519.GetSigningKey(privateKey);
+            AssertEqual(Curve25519.KeySize, signingKey.Length);
+            AssertTrue(signingKey.Any(value => value != 0),
+                "Expected the generated signing key to contain a non-zero value.");
+        }
+
+        private static void EditorValidatesAmneziaOptions()
+        {
+            AssertTrue(ConfigValueValidator.IsUIntOrRange("1-4", 0, uint.MaxValue),
+                "Expected decimal H ranges to be accepted.");
+            AssertFalse(ConfigValueValidator.IsUIntOrRange("0x10-0x20", 0, uint.MaxValue),
+                "Expected hexadecimal H ranges to be rejected like the SDK parser.");
+            AssertFalse(ConfigValueValidator.IsUIntOrRange("4-1", 0, uint.MaxValue),
+                "Expected descending H ranges to be rejected.");
+            AssertTrue(ConfigValueValidator.IsUIntDecimalInRange("1279", 0, ConfigValueValidator.MaximumAmneziaPadding),
+                "Expected maximum Amnezia padding to be accepted.");
+            AssertFalse(ConfigValueValidator.IsUIntDecimalInRange("1280", 0, ConfigValueValidator.MaximumAmneziaPadding),
+                "Expected oversized S1/S2 padding to be rejected.");
+            AssertFalse(ConfigValueValidator.IsUIntDecimalInRange("+1", 0, uint.MaxValue),
+                "Expected signed unsigned values to be rejected like std::from_chars.");
+            AssertTrue(ConfigValueValidator.IsOneOf("quic", "quic", "dns", "sip", "stun"),
+                "Expected known Ip values to be accepted.");
+            AssertFalse(ConfigValueValidator.IsOneOf("invalid", "chrome", "firefox", "curl", "random"),
+                "Expected unknown Ib values to be rejected.");
+            AssertTrue(ConfigValueValidator.IsSipImitationHost("xn--e1afmkfd.xn--p1ai"),
+                "Expected an ACE/Punycode SIP host to be accepted.");
+            AssertFalse(ConfigValueValidator.IsSipImitationHost("a..b"),
+                "Expected empty SIP hostname labels to be rejected.");
+        }
+
+        private static void ShutdownSettingsWaitIsBounded()
+        {
+            var neverCompletes = new TaskCompletionSource<object>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var stopwatch = Stopwatch.StartNew();
+            var completed = BoundedTaskWaiter.WaitAsync(neverCompletes.Task, 50)
+                .GetAwaiter().GetResult();
+            stopwatch.Stop();
+
+            AssertFalse(completed,
+                "Expected shutdown to continue when a settings operation never completes.");
+            AssertTrue(stopwatch.Elapsed < TimeSpan.FromSeconds(2),
+                "Expected the settings shutdown deadline to remain bounded.");
+            AssertTrue(BoundedTaskWaiter.WaitAsync(Task.CompletedTask, 50)
+                    .GetAwaiter().GetResult(),
+                "Expected an already-completed settings operation to be observed.");
+            AssertThrows<InvalidOperationException>(
+                () => BoundedTaskWaiter.WaitAsync(
+                        Task.FromException(new InvalidOperationException("settings failed")),
+                        50)
+                    .GetAwaiter().GetResult(),
+                "settings failed");
+        }
+
+        private static void WinFormsDialogsInitializeAndDisposeOnStaThread()
+        {
+            AssertEqual(
+                ApartmentState.STA.ToString(),
+                Thread.CurrentThread.GetApartmentState().ToString());
+
+            var instanceFlags = BindingFlags.Instance | BindingFlags.NonPublic;
+            var getControlState = typeof(Control).GetMethod(
+                "GetState",
+                instanceFlags,
+                null,
+                new[] { typeof(int) },
+                null);
+            if (getControlState == null)
+                throw new InvalidOperationException("WinForms Control.GetState was not found.");
+
+            using (var settings = new FrmSettings())
+            {
+                foreach (var fieldName in new[] { "chkAutoUpdate", "chkNotify" })
+                {
+                    var field = typeof(FrmSettings).GetField(fieldName, instanceFlags);
+                    var control = field?.GetValue(settings) as CheckBox;
+                    if (control == null)
+                        throw new InvalidOperationException($"Settings control '{fieldName}' was not found.");
+
+#if WIRESOCKUI_ENABLE_UWP
+                    AssertTrue(control.Enabled,
+                        $"Expected UWP settings control '{fieldName}' to remain available.");
+#else
+                    AssertFalse(control.Enabled,
+                        $"Expected unsupported classic setting '{fieldName}' to be disabled.");
+                    AssertFalse((bool)getControlState.Invoke(control, new object[] { 0x00000002 }),
+                        $"Expected unsupported classic setting '{fieldName}' to be hidden.");
+#endif
+                }
+
+                var cancellationField = typeof(FrmSettings).GetField(
+                    "_lifetimeCancellation",
+                    instanceFlags);
+                var cancellation = cancellationField?.GetValue(settings) as CancellationTokenSource;
+                if (cancellation == null)
+                    throw new InvalidOperationException("Settings lifetime cancellation source was not found.");
+
+                settings.CancelPendingOperations();
+                settings.CancelPendingOperations();
+                AssertTrue(cancellation.IsCancellationRequested,
+                    "Expected settings shutdown cancellation to be idempotent and observable by helper operations.");
+            }
+
+            var editor = new FrmEdit();
+            var editorText =
+                typeof(FrmEdit).GetField("txtEditor", instanceFlags)?.GetValue(editor) as RichTextBox;
+            if (editorText == null)
+                throw new InvalidOperationException("The profile editor text control was not found.");
+            AssertEqual(checked((int)Profile.MaxProfileSizeBytes), editorText.MaxLength);
+            editor.Dispose();
+            AssertTrue(
+                typeof(FrmEdit).GetField("_highlightTimer", instanceFlags)?.GetValue(editor) == null,
+                "Expected profile-editor timer resources to be released.");
+
+            var taskManager = new TaskManager();
+            var search =
+                typeof(TaskManager).GetField("txtSearch", instanceFlags)?.GetValue(taskManager) as TextBox;
+            if (search == null)
+                throw new InvalidOperationException("The process search control was not found.");
+            AssertEqual(260, search.MaxLength);
+            taskManager.Dispose();
+            AssertTrue(
+                typeof(TaskManager).GetField("_filterTimer", instanceFlags)?.GetValue(taskManager) == null,
+                "Expected process-filter timer resources to be released.");
+        }
+
+        private static void WinFormsDialogsUseReadableResponsiveLayouts()
+        {
+            using (var settings = new FrmSettings())
+            {
+                AssertDialogUsesSystemFont(settings, "settings");
+                AssertTrue(settings.ClientSize.Width >= 340 && settings.ClientSize.Height >= 250,
+                    "Expected the settings dialog to remain readable after compacting optional rows.");
+                AssertTrue(settings.FormBorderStyle == FormBorderStyle.FixedDialog,
+                    "Expected the settings window to use dialog chrome.");
+
+                var autoRun = GetRequiredPrivateControl<CheckBox>(settings, "chkAutorun");
+                var autoMinimize = GetRequiredPrivateControl<CheckBox>(settings, "chkAutoMinimize");
+                var autoConnect = GetRequiredPrivateControl<CheckBox>(settings, "chkAutoConnect");
+                var autoUpdate = GetRequiredPrivateControl<CheckBox>(settings, "chkAutoUpdate");
+                var useAdapter = GetRequiredPrivateControl<CheckBox>(settings, "chkUseAdapter");
+                var notify = GetRequiredPrivateControl<CheckBox>(settings, "chkNotify");
+                var save = GetRequiredPrivateControl<Button>(settings, "btnSave");
+                var copy = GetRequiredPrivateControl<Button>(settings, "btnCopyProfilesFolderPath");
+                var killSwitch = GetRequiredPrivateControl<CheckBox>(settings, "chkEnableKillSwitch");
+                var logLevel = GetRequiredPrivateControl<ComboBox>(settings, "ddlLogLevel");
+                settings.PerformLayout();
+#if WIRESOCKUI_ENABLE_UWP
+                AssertTrue(settings.ClientSize.Height >= 310,
+                    "Expected the UWP settings dialog to retain its full layout.");
+                var settingsRows = new[]
+                {
+                    autoRun, autoMinimize, autoConnect, autoUpdate, useAdapter, notify, killSwitch
+                };
+#else
+                var settingsRows = new[]
+                {
+                    autoRun, autoMinimize, autoConnect, useAdapter, killSwitch
+                };
+#endif
+                AssertControlsUseUniformVerticalPitch(settingsRows, "settings option rows");
+                AssertSettingsActionsFollowContent(settings, logLevel, save, copy);
+                AssertControlFits(settings, killSwitch, "settings Kill Switch");
+                AssertControlFits(settings, logLevel, "settings log level");
+                AssertControlFits(settings, save, "settings Save action");
+                AssertControlFits(settings, copy, "settings profiles-folder action");
+                AssertTrue(save.Height >= 30 && copy.Height >= 30,
+                    "Expected settings actions to have a comfortable click target.");
+
+                settings.Scale(new SizeF(1.5F, 1.5F));
+                settings.PerformLayout();
+                AssertControlsUseUniformVerticalPitch(settingsRows, "scaled settings option rows");
+                AssertControlFits(settings, killSwitch, "scaled settings Kill Switch");
+                AssertControlFits(settings, logLevel, "scaled settings log level");
+                AssertControlFits(settings, save, "scaled settings Save action");
+                AssertControlFits(settings, copy, "scaled settings profiles-folder action");
+            }
+
+            using (var editor = new FrmEdit())
+            {
+                AssertDialogUsesSystemFont(editor, "profile editor");
+                AssertTrue(editor.FormBorderStyle == FormBorderStyle.Sizable,
+                    "Expected the profile editor to be resizable.");
+                AssertTrue(editor.MaximizeBox, "Expected the profile editor to support maximizing.");
+                AssertTrue(editor.MinimumSize.Width >= 700 && editor.MinimumSize.Height >= 500,
+                    "Expected the profile editor to retain a readable minimum size.");
+
+                var editorText = GetRequiredPrivateControl<RichTextBox>(editor, "txtEditor");
+                var bottom = GetRequiredPrivateControl<Panel>(editor, "pnlBottom");
+                var save = GetRequiredPrivateControl<Button>(editor, "btnSave");
+                var cancel = GetRequiredPrivateControl<Button>(editor, "btnCancel");
+                AssertTrue(string.Equals(editorText.Font.Name, "Consolas", StringComparison.OrdinalIgnoreCase) &&
+                           editorText.Font.SizeInPoints >= 10F,
+                    "Expected a readable modern monospace editor font.");
+
+                var originalEditorSize = editorText.ClientSize;
+                editor.ClientSize = new Size(editor.ClientSize.Width + 180, editor.ClientSize.Height + 120);
+                editor.PerformLayout();
+                AssertTrue(editorText.ClientSize.Width > originalEditorSize.Width &&
+                           editorText.ClientSize.Height > originalEditorSize.Height,
+                    "Expected the profile editor content to grow with the dialog.");
+                AssertControlFits(editor, bottom, "profile editor action row");
+                AssertControlFits(bottom, save, "profile editor Save action");
+                AssertControlFits(bottom, cancel, "profile editor Cancel action");
+
+                editor.Scale(new SizeF(1.5F, 1.5F));
+                editor.PerformLayout();
+                AssertControlFits(editor, bottom, "scaled profile editor action row");
+                AssertControlFits(bottom, save, "scaled profile editor Save action");
+                AssertControlFits(bottom, cancel, "scaled profile editor Cancel action");
+            }
+
+            using (var taskManager = new TaskManager())
+            {
+                AssertDialogUsesSystemFont(taskManager, "process picker");
+                AssertTrue(taskManager.FormBorderStyle == FormBorderStyle.Sizable,
+                    "Expected the process picker to be resizable.");
+                AssertTrue(taskManager.MaximizeBox, "Expected the process picker to support maximizing.");
+                AssertTrue(taskManager.MinimumSize.Width >= 400 && taskManager.MinimumSize.Height >= 380,
+                    "Expected the process picker to retain a readable minimum size.");
+
+                var processList = GetRequiredPrivateControl<ListView>(taskManager, "lstProcesses");
+                var filters = GetRequiredPrivateControl<Panel>(taskManager, "pnlFilters");
+                var search = GetRequiredPrivateControl<TextBox>(taskManager, "txtSearch");
+                var refresh = GetRequiredPrivateControl<Button>(taskManager, "btnRefresh");
+                var originalListSize = processList.ClientSize;
+                var originalSearchWidth = search.Width;
+                taskManager.ClientSize = new Size(
+                    taskManager.ClientSize.Width + 180,
+                    taskManager.ClientSize.Height + 120);
+                taskManager.PerformLayout();
+                filters.PerformLayout();
+
+                AssertTrue(processList.ClientSize.Width > originalListSize.Width &&
+                           processList.ClientSize.Height > originalListSize.Height,
+                    "Expected the process list to grow with the dialog.");
+                AssertTrue(search.Width > originalSearchWidth,
+                    "Expected the process search field to grow with the dialog.");
+                AssertControlFits(taskManager, processList, "process list");
+                AssertControlFits(taskManager, filters, "process filter row");
+                AssertControlFits(filters, search, "process search field");
+                AssertControlFits(filters, refresh, "process refresh action");
+                AssertTrue(processList.Bottom <= filters.Top,
+                    "Expected the process list to remain above the filter row.");
+                AssertTrue(processList.Columns[0].Width <= processList.ClientSize.Width &&
+                           processList.Columns[0].Width >= processList.ClientSize.Width - 8,
+                    "Expected the process column to follow the resizable viewport.");
+
+                taskManager.Scale(new SizeF(1.5F, 1.5F));
+                taskManager.PerformLayout();
+                filters.PerformLayout();
+                AssertControlFits(taskManager, processList, "scaled process list");
+                AssertControlFits(taskManager, filters, "scaled process filter row");
+                AssertControlFits(filters, search, "scaled process search field");
+                AssertControlFits(filters, refresh, "scaled process refresh action");
+                AssertTrue(processList.Bottom <= filters.Top,
+                    "Expected the scaled process list to remain above the filter row.");
+            }
+        }
+
+        private static T GetRequiredPrivateControl<T>(object owner, string fieldName) where T : Control
+        {
+            var control = owner.GetType()
+                .GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.GetValue(owner) as T;
+            if (control == null)
+                throw new InvalidOperationException(
+                    $"The '{fieldName}' control was not found on {owner.GetType().Name}.");
+            return control;
+        }
+
+        private static void AssertDialogUsesSystemFont(Form dialog, string description)
+        {
+            if (UiFonts.TryGetMessageBoxFont(out var messageBoxFont))
+            {
+                AssertTrue(
+                    string.Equals(dialog.Font.Name, messageBoxFont.Name,
+                        StringComparison.OrdinalIgnoreCase) &&
+                    dialog.Font.SizeInPoints >= messageBoxFont.SizeInPoints,
+                    $"Expected the {description} dialog to use the Windows message font.");
+                return;
+            }
+
+            AssertTrue(dialog.Font != null && dialog.Font.SizeInPoints > 0,
+                $"Expected the {description} dialog to retain a usable fallback font.");
+        }
+
+        private static void AssertControlFits(Control parent, Control child, string description)
+        {
+            AssertTrue(child.Left >= 0 && child.Top >= 0 &&
+                       child.Right <= parent.ClientSize.Width &&
+                       child.Bottom <= parent.ClientSize.Height,
+                $"Expected {description} to remain inside its parent bounds.");
+        }
+
+        private static void AssertControlsUseUniformVerticalPitch(
+            IReadOnlyList<Control> controls,
+            string description)
+        {
+            if (controls == null || controls.Count < 2)
+                throw new InvalidOperationException($"At least two controls are required for {description}.");
+
+            var expectedPitch = controls[1].Top - controls[0].Top;
+            AssertTrue(expectedPitch > 0, $"Expected {description} to advance vertically.");
+            for (var index = 2; index < controls.Count; index++)
+            {
+                var actualPitch = controls[index].Top - controls[index - 1].Top;
+                AssertTrue(Math.Abs(actualPitch - expectedPitch) <= 1,
+                    $"Expected compact {description}; row {index} advanced by {actualPitch}px instead of {expectedPitch}px.");
+            }
+        }
+
+        private static void AssertSettingsActionsFollowContent(
+            Form settings,
+            Control logLevel,
+            params Button[] actions)
+        {
+            var maximumGap = Math.Max(24, Math.Max(logLevel.Height, settings.Font.Height * 2));
+            foreach (var action in actions)
+            {
+                var contentGap = action.Top - logLevel.Bottom;
+                AssertTrue(contentGap > 0 && contentGap <= maximumGap,
+                    $"Expected settings action '{action.Name}' to follow the log level without an empty row; " +
+                    $"gap was {contentGap}px and the scaled limit was {maximumGap}px.");
+                AssertTrue(settings.ClientSize.Height - action.Bottom <= maximumGap,
+                    $"Expected settings action '{action.Name}' to retain a compact bottom margin.");
+            }
+        }
+
+        private static void MainWindowProfileDetailsRetainVisualOrderAfterScaling()
+        {
+            using (var host = new Panel
+            {
+                Padding = new Padding(8),
+                Size = new Size(600, 500)
+            })
+            using (var state = new GroupBox
+            {
+                Dock = DockStyle.Top,
+                Height = 70,
+                Text = "State",
+                Visible = false
+            })
+            using (var peer = new GroupBox
+            {
+                Dock = DockStyle.Top,
+                Height = 90,
+                Text = "Peer",
+                Visible = false
+            })
+            using (var interfaceGroup = new GroupBox
+            {
+                Dock = DockStyle.Top,
+                Height = 80,
+                Text = "Interface",
+                Visible = false
+            })
+            using (var prompt = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "Select a profile"
+            })
+            {
+                // Match the designer and runtime insertion sequence.
+                host.Controls.Add(state);
+                host.Controls.Add(peer);
+                host.Controls.Add(interfaceGroup);
+                host.Controls.Add(prompt);
+                prompt.BringToFront();
+
+                FrmMain.ArrangeProfileDetails(host, state, interfaceGroup, peer);
+                AssertEqual(0, host.Controls.GetChildIndex(prompt));
+
+                prompt.Visible = false;
+                interfaceGroup.Visible = true;
+                peer.Visible = true;
+                AssertProfileDetailOrder(host, state, interfaceGroup, peer, false, "initial inactive layout");
+
+                state.Visible = true;
+                host.PerformLayout();
+                AssertProfileDetailOrder(host, state, interfaceGroup, peer, true, "initial active layout");
+
+                host.Scale(new SizeF(1.5F, 1.5F));
+                host.PerformLayout();
+                AssertProfileDetailOrder(host, state, interfaceGroup, peer, true, "scaled active layout");
+
+                state.Visible = false;
+                host.PerformLayout();
+                AssertProfileDetailOrder(host, state, interfaceGroup, peer, false, "scaled inactive layout");
+
+                state.Visible = true;
+                host.PerformLayout();
+                AssertProfileDetailOrder(host, state, interfaceGroup, peer, true, "reshown scaled active layout");
+            }
+        }
+
+        private static void AssertProfileDetailOrder(
+            Panel host,
+            Control state,
+            Control interfaceGroup,
+            Control peer,
+            bool stateVisible,
+            string scenario)
+        {
+            host.PerformLayout();
+
+            var stateIndex = host.Controls.GetChildIndex(state);
+            var interfaceIndex = host.Controls.GetChildIndex(interfaceGroup);
+            var peerIndex = host.Controls.GetChildIndex(peer);
+            AssertTrue(stateIndex > interfaceIndex && interfaceIndex > peerIndex,
+                $"Expected deterministic State, Interface, Peer z-order for {scenario}.");
+
+            AssertTrue(interfaceGroup.Top < peer.Top && interfaceGroup.Bottom <= peer.Top,
+                $"Expected Interface to remain above Peer for {scenario}.");
+            if (stateVisible)
+            {
+                AssertTrue(state.Visible,
+                    $"Expected State to be visible for {scenario}.");
+                AssertTrue(state.Top < interfaceGroup.Top && state.Bottom <= interfaceGroup.Top,
+                    $"Expected State to remain above Interface for {scenario}.");
+            }
+            else
+            {
+                AssertFalse(state.Visible,
+                    $"Expected State to be hidden for {scenario}.");
+            }
+        }
+
+        private static void MainWindowActionRowsRemainVisibleAfterScaling()
+        {
+            using (var layout = new TableLayoutPanel
+            {
+                ColumnCount = 1,
+                RowCount = 2,
+                Size = new Size(800, 500)
+            })
+            using (var content = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Margin = Padding.Empty
+            })
+            using (var actions = new FlowLayoutPanel())
+            using (var button = new Button
+            {
+                Margin = Padding.Empty,
+                Size = new Size(90, 28),
+                Text = "Clear log"
+            })
+            {
+                layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
+                layout.Controls.Add(content, 0, 0);
+                layout.Controls.Add(actions, 0, 1);
+                actions.Controls.Add(button);
+
+                FrmMain.ConfigureBottomActionRow(layout, actions);
+                AssertActionButtonFits(layout, actions, button, "normal scale");
+
+                layout.Scale(new SizeF(1.5F, 1.5F));
+                layout.Size = new Size(1200, 750);
+                AssertActionButtonFits(layout, actions, button, "150% scale");
+
+                actions.Visible = false;
+                layout.PerformLayout();
+                AssertEqual(layout.ClientSize.Height, content.Height);
+            }
+        }
+
+        private static void AssertActionButtonFits(
+            TableLayoutPanel layout,
+            FlowLayoutPanel actions,
+            Button button,
+            string scenario)
+        {
+            layout.PerformLayout();
+            actions.PerformLayout();
+
+            AssertTrue(layout.RowStyles[1].SizeType == SizeType.AutoSize,
+                $"Expected a content-sized action row at {scenario}.");
+            AssertTrue(actions.Bottom <= layout.ClientSize.Height,
+                $"Expected the action row to remain inside the layout at {scenario}.");
+            AssertTrue(button.Top >= actions.Padding.Top,
+                $"Expected the action button to retain its top inset at {scenario}.");
+            AssertTrue(button.Bottom <= actions.ClientSize.Height - actions.Padding.Bottom,
+                $"Expected the action button to retain its bottom inset at {scenario}.");
+            AssertTrue(button.Right <= actions.ClientSize.Width - actions.Padding.Right,
+                $"Expected the action button to retain its right inset at {scenario}.");
+        }
+
+        private static void MainWindowConcealmentHidesBeforeHandleRecreation()
+        {
+            using (var form = new Form
+            {
+                Location = new Point(-32000, -32000),
+                ShowInTaskbar = true,
+                Size = new Size(320, 200),
+                StartPosition = FormStartPosition.Manual
+            })
+            {
+                var handleDestroyedWhileVisible = false;
+                var handleCreatedWhileVisible = false;
+                var recreatedHandleCount = 0;
+                form.HandleDestroyed += (sender, args) =>
+                    handleDestroyedWhileVisible |= form.Visible;
+
+                form.Show();
+                AssertTrue(form.Visible,
+                    "Expected the test window to be visible before concealment.");
+                AssertTrue(form.IsHandleCreated,
+                    "Expected the test window to own a native handle before concealment.");
+                form.HandleCreated += (sender, args) =>
+                {
+                    recreatedHandleCount++;
+                    handleCreatedWhileVisible |= form.Visible;
+                };
+
+                FrmMain.ConcealFromTaskbar(form);
+
+                AssertFalse(form.Visible,
+                    "Expected concealment to hide the window.");
+                AssertFalse(form.ShowInTaskbar,
+                    "Expected concealment to remove the window from the taskbar.");
+                AssertFalse(handleDestroyedWhileVisible,
+                    "Expected any ShowInTaskbar handle recreation to occur only after the window was hidden.");
+                AssertTrue(recreatedHandleCount > 0,
+                    "Expected changing ShowInTaskbar on .NET Framework to recreate the native window handle.");
+                AssertFalse(handleCreatedWhileVisible,
+                    "Expected the recreated native window never to become visible during concealment.");
+            }
+        }
+
+        private static void MainWindowActivationIsSuppressedDuringShutdown()
+        {
+            using (var form = new Form
+            {
+                Location = new Point(-32000, -32000),
+                ShowInTaskbar = false,
+                Size = new Size(320, 200),
+                StartPosition = FormStartPosition.Manual
+            })
+            {
+                AssertFalse(FrmMain.TryShowMainWindow(form, true, false),
+                    "Expected an exit request to suppress tray activation.");
+                AssertFalse(form.Visible,
+                    "Expected the exit-suppressed window to remain hidden.");
+                AssertFalse(form.TopMost,
+                    "Expected suppressed activation not to alter topmost state.");
+
+                AssertFalse(FrmMain.TryShowMainWindow(form, false, true),
+                    "Expected completed shutdown to suppress tray activation.");
+                AssertFalse(form.Visible,
+                    "Expected the shutdown-suppressed window to remain hidden.");
+                AssertFalse(form.TopMost,
+                    "Expected shutdown suppression not to alter topmost state.");
+
+                AssertTrue(FrmMain.TryShowMainWindow(form, false, false),
+                    "Expected tray activation to show a live main window.");
+                AssertTrue(form.Visible,
+                    "Expected a live main window to become visible.");
+                AssertTrue(form.ShowInTaskbar,
+                    "Expected a restored main window to return to the taskbar.");
+
+                FrmMain.ConcealFromTaskbar(form);
+            }
+
+            var disposedForm = new Form();
+            disposedForm.Dispose();
+            AssertFalse(FrmMain.TryShowMainWindow(disposedForm, false, false),
+                "Expected a disposed main window to reject activation.");
+        }
+
+        private static void SettingsCopiesSecuredProfilesPathWithoutShellActivation()
+        {
+            var folder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "WireSockUI",
+                "Configs");
+            AssertEqual(
+                Path.GetFullPath(folder),
+                FrmSettings.GetProfilesFolderPathForClipboard(folder));
+            AssertThrows<DirectoryNotFoundException>(
+                () => FrmSettings.GetProfilesFolderPathForClipboard("relative-profiles"),
+                "absolute path");
+
+            AssertTrue(
+                typeof(UnelevatedProcessLauncher).GetMethod(
+                    "OpenFolder",
+                    BindingFlags.NonPublic | BindingFlags.Static) == null,
+                "Expected the medium-integrity Explorer folder-launch surface to be removed.");
+
+            using (var settings = new FrmSettings())
+            {
+                var copyButton = typeof(FrmSettings).GetField(
+                        "btnCopyProfilesFolderPath",
+                        BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?.GetValue(settings) as Button;
+                if (copyButton == null)
+                    throw new InvalidOperationException(
+                        "The copy-profiles-folder-path button was not found.");
+
+                AssertTrue(
+                    copyButton.Text.IndexOf("copy", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Expected the profiles action to describe copying the path, got '{copyButton.Text}'.");
+            }
+        }
+
+        private static void EditorBoundsSynchronousSyntaxHighlighting()
+        {
+            AssertTrue(FrmEdit.ShouldApplySyntaxHighlighting(FrmEdit.MaximumSyntaxHighlightCharacters),
+                "Expected the editor to highlight content at the configured boundary.");
+            AssertFalse(FrmEdit.ShouldApplySyntaxHighlighting(FrmEdit.MaximumSyntaxHighlightCharacters + 1),
+                "Expected oversized profiles not to be reformatted synchronously on the UI thread.");
+            AssertFalse(FrmEdit.ShouldApplySyntaxHighlighting(-1),
+                "Expected invalid text lengths not to enter syntax highlighting.");
+        }
+
+        private static void EditorDerivesInterfacePublicKeyIndependentlyOfHighlighting()
+        {
+            var expectedPublicKey = Convert.ToBase64String(
+                Curve25519.GetPublicKey(Convert.FromBase64String(PrivateKey)));
+            AssertEqual(expectedPublicKey, FrmEdit.DeriveInterfacePublicKey(
+                $"[Interface]\nPrivateKey = {PrivateKey}\n[Peer]\nPublicKey = {PublicKey}\n"));
+            AssertTrue(FrmEdit.DeriveInterfacePublicKey(
+                    "[Interface]\nPrivateKey = invalid\n") == null,
+                "Expected an invalid private key to clear the derived public key.");
+            AssertTrue(FrmEdit.DeriveInterfacePublicKey(
+                    $"[Interface]\nPrivateKey = {PrivateKey}\n[Interface]\nAddress = 10.0.0.1/32\n") == null,
+                "Expected a repeated Interface section without a private key to clear the earlier value.");
+
+            using (var editor = new FrmEdit())
+            {
+                var editorText = GetRequiredPrivateControl<RichTextBox>(editor, "txtEditor");
+                var derivedPublicKey = GetRequiredPrivateControl<TextBox>(editor, "txtPublicKey");
+                AssertTrue(!string.IsNullOrWhiteSpace(derivedPublicKey.Text),
+                    "Expected a new profile to display its generated public key immediately.");
+
+                editorText.Text = $"[Interface]\nPrivateKey = {PrivateKey}\n";
+                editor.UpdateDerivedPublicKey();
+                AssertEqual(expectedPublicKey, derivedPublicKey.Text);
+
+                editorText.Text = "[Interface]\nPrivateKey = invalid\n";
+                editor.UpdateDerivedPublicKey();
+                AssertEqual(string.Empty, derivedPublicKey.Text);
+            }
+        }
+
+        private static void MainWindowPresentationRendersRecoveryConsistently()
+        {
+            var recovery = MainWindowStatePresentation.Create(
+                FrmMain.ConnectionState.Indeterminate, false, true);
+            var unrelatedProfile = recovery.ForSelectedProfile(false);
+
+            AssertTrue(unrelatedProfile.Status == MainWindowStatusKind.RecoveryRequired,
+                "Expected every selected profile to render the global recovery state.");
+            AssertFalse(unrelatedProfile.CanActivate,
+                "Expected recovery to block activation for every selected profile.");
+            AssertFalse(unrelatedProfile.ShowStatistics,
+                "Expected recovery to hide stale tunnel statistics.");
+            AssertFalse(recovery.IsTunnelMenuChecked(true),
+                "Expected non-connected states to clear every tunnel menu check.");
+            AssertTrue(recovery.CanResetNetworkLock,
+                "Expected recovery UI to offer reset when no cleanup is active.");
+
+            var connected = MainWindowStatePresentation.Create(
+                FrmMain.ConnectionState.Connected, false, false);
+            var activeProfile = connected.ForSelectedProfile(true);
+            AssertTrue(activeProfile.Status == MainWindowStatusKind.Active,
+                "Expected the connected tunnel profile to render as active.");
+            AssertTrue(activeProfile.CanActivate,
+                "Expected the active profile button to remain available for deactivation.");
+            AssertTrue(activeProfile.ShowStatistics,
+                "Expected the active connected profile to show statistics.");
+        }
+
+        private static void ProfileDisplayFormattingBoundsValues()
+        {
+            AssertTrue(ProfileDisplayFormatter.FormatIpAddresses(null) == null,
+                "Expected null profile values to remain null.");
+            AssertEqual(
+                $"a,b{Environment.NewLine}c,d...",
+                ProfileDisplayFormatter.FormatCommaSeparated("a,b,c,d,e", 4, 2, 128));
+            AssertEqual(
+                "a,b",
+                ProfileDisplayFormatter.FormatCommaSeparated("a,b,", 3, 2, 128));
+            AssertEqual(
+                ",a",
+                ProfileDisplayFormatter.FormatCommaSeparated(",a", 3, 2, 128));
+            AssertEqual(
+                $"a,{Environment.NewLine}b",
+                ProfileDisplayFormatter.FormatCommaSeparated("a,,b", 3, 2, 128));
+            AssertEqual(
+                "a,",
+                ProfileDisplayFormatter.FormatCommaSeparated("a,,", 3, 2, 128));
+
+            var oversized = ProfileDisplayFormatter.FormatApplications(new string('x', 10000));
+            AssertTrue(oversized.Length <= 4096,
+                "Expected displayed application values to remain bounded.");
+            AssertTrue(oversized.EndsWith("...", StringComparison.Ordinal),
+                "Expected bounded display values to identify truncation.");
+
+            AssertEqual(
+                "abcd...",
+                ProfileDisplayFormatter.FormatCommaSeparated("abcd\U0001f600z", 1, 1, 8));
+            AssertEqual(
+                "a...",
+                ProfileDisplayFormatter.FormatCommaSeparated("a,b", 2, 1, 5));
+        }
+
+        private static void LegacyMigrationAcceptsScriptsOnlyIntoQuarantine()
+        {
+            WithTemporaryLegacyMigrationFolders((legacyFolder, pendingFolder) =>
+            {
+                var source = Path.Combine(legacyFolder, "scripted.conf");
+                File.WriteAllText(source, "[Interface]\n" +
+                                          $"PrivateKey = {PrivateKey}\n" +
+                                          "Address = 10.0.0.2/32\n" +
+                                          "PostUp = powershell.exe -NoProfile -Command Write-Host test\n" +
+                                          "\n" +
+                                          "[Peer]\n" +
+                                          $"PublicKey = {PublicKey}\n" +
+                                          "Endpoint = example.com:51820\n" +
+                                          "AllowedIPs = 0.0.0.0/0\n");
+
+                LegacyProfileMigrationService.StageLegacyProfiles();
+
+                AssertTrue(File.Exists(Path.Combine(pendingFolder, "scripted.conf")),
+                    "Expected scripts to remain reviewable in quarantine.");
+                AssertFalse(File.Exists(Profile.GetProfilePath("scripted")),
+                    "Expected a scripted legacy profile never to be promoted without editor confirmation.");
+            });
+        }
+
+        private static void TunnelSessionCoordinatorEnforcesRecoveryInvariants()
+        {
+            var coordinator = new TunnelSessionCoordinator();
+
+            AssertTrue(coordinator.TryBeginOperation(out var blockReason),
+                "Expected the first tunnel operation to start.");
+            AssertEqual((int)TunnelOperationBlockReason.None, (int)blockReason);
+            AssertFalse(coordinator.TryBeginOperation(out blockReason),
+                "Expected overlapping tunnel operations to be rejected.");
+            AssertEqual((int)TunnelOperationBlockReason.OperationPending, (int)blockReason);
+
+            coordinator.EndOperation();
+            var generation = coordinator.AdvanceGeneration();
+            AssertTrue(coordinator.TryMarkConnectionTimedOut(generation),
+                "Expected the active generation to accept one timeout transition.");
+            AssertFalse(coordinator.TryMarkConnectionTimedOut(generation),
+                "Expected a duplicate timeout transition to be rejected.");
+            AssertTrue(coordinator.IsConnectionTimedOut(generation),
+                "Expected the active generation to remain marked as timed out.");
+
+            coordinator.AdvanceGeneration();
+            AssertFalse(coordinator.IsConnectionTimedOut(generation),
+                "Expected advancing the generation to clear the timeout marker.");
+
+            coordinator.BeginCleanup();
+            coordinator.BeginCleanup();
+            AssertFalse(coordinator.TryBeginOperation(out blockReason),
+                "Expected pending cleanup to block new operations.");
+            AssertEqual((int)TunnelOperationBlockReason.CleanupPending, (int)blockReason);
+            AssertFalse(coordinator.EndCleanup(),
+                "Expected the first completion to retain overlapping cleanup ownership.");
+            AssertTrue(coordinator.CleanupPending,
+                "Expected cleanup to remain pending until every owner completes.");
+            AssertTrue(coordinator.EndCleanup(),
+                "Expected the final completion to release cleanup ownership.");
+            AssertFalse(coordinator.EndCleanup(),
+                "Expected unmatched cleanup completion not to report an ownership release.");
+
+            AssertTrue(coordinator.RequireRecovery(), "Expected the first recovery transition to be observable.");
+            AssertFalse(coordinator.RequireRecovery(), "Expected duplicate recovery transitions to be idempotent.");
+            AssertFalse(coordinator.TryBeginOperation(out blockReason),
+                "Expected recovery mode to block new operations.");
+            AssertEqual((int)TunnelOperationBlockReason.RecoveryRequired, (int)blockReason);
+
+            AssertTrue(coordinator.TryBeginRecoveryOperation(out blockReason),
+                "Expected an explicit recovery operation to be allowed during recovery mode.");
+            AssertFalse(coordinator.TryBeginRecoveryOperation(out blockReason),
+                "Expected overlapping recovery operations to be rejected.");
+            AssertEqual((int)TunnelOperationBlockReason.OperationPending, (int)blockReason);
+            coordinator.EndOperation();
+
+            coordinator.BeginCleanup();
+            AssertFalse(coordinator.TryBeginRecoveryOperation(out blockReason),
+                "Expected pending cleanup to block explicit recovery operations.");
+            AssertEqual((int)TunnelOperationBlockReason.CleanupPending, (int)blockReason);
+            coordinator.EndCleanup();
+
+            coordinator.ClearRecovery();
+            AssertTrue(coordinator.TryBeginOperation(out blockReason),
+                "Expected operations to resume after explicit recovery reset.");
+            coordinator.EndOperation();
+        }
+
+        private static void TunnelSessionCoordinatorWaitsForPendingOperations()
+        {
+            var coordinator = new TunnelSessionCoordinator();
+            AssertTrue(coordinator.TryBeginOperation(out _),
+                "Expected the initial tunnel operation to start.");
+
+            var waitingOperation = coordinator.WaitToBeginOperationAsync(() => false, 1);
+            Thread.Sleep(20);
+            AssertFalse(waitingOperation.IsCompleted,
+                "Expected recovery handling to wait while another tunnel operation owns the coordinator.");
+
+            coordinator.EndOperation();
+            AssertTrue(waitingOperation.Wait(2000),
+                "Expected recovery handling to acquire the coordinator after the pending operation completed.");
+            AssertTrue(waitingOperation.Result,
+                "Expected the waiting tunnel operation to report successful acquisition.");
+            coordinator.EndOperation();
+
+            AssertTrue(coordinator.TryBeginOperation(out _),
+                "Expected a second initial operation to start.");
+            AssertFalse(coordinator.WaitToBeginOperationAsync(() => true, 1).GetAwaiter().GetResult(),
+                "Expected obsolete recovery handling to stop instead of waiting indefinitely.");
+            coordinator.EndOperation();
+        }
+
+        private static void DiagnosticLoggingRedactsCredentials()
+        {
+            var redacted = SecureRollingTraceListener.Redact(
+                "PrivateKey = secret\nPresharedKey=another\nSocks5ProxyPassword = password\n" +
+                "https://user:password@example.com/path");
+
+            AssertFalse(redacted.Contains("secret"), "Expected private keys to be redacted.");
+            AssertFalse(redacted.Contains("another"), "Expected preshared keys to be redacted.");
+            AssertFalse(redacted.Contains("password"), "Expected proxy credentials to be redacted.");
+            AssertTrue(redacted.Contains("PrivateKey = [REDACTED]"),
+                "Expected diagnostic output to preserve the redacted setting name.");
+            AssertTrue(redacted.Contains("https://[REDACTED]@example.com/path"),
+                "Expected URI user information to be redacted.");
+        }
+
+        private static void DiagnosticLoggingBoundsOversizedRecords()
+        {
+            WithTemporarySecureMainFolder(() =>
+            {
+                const int maximumBytes = 1024;
+                var originalOwnerWriteFailure = SecureFileSystem.AllowOwnerWriteFailureForTests;
+                var originalAutoFlush = Trace.AutoFlush;
+                var logPath = Path.Combine(Global.SecureMainFolder, "bounded.log");
+                try
+                {
+                    SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                    using (var listener = new SecureRollingTraceListener(logPath, maximumBytes, 1))
+                        listener.WriteLine(new string('\u20ac', maximumBytes));
+
+                    var bytes = File.ReadAllBytes(logPath);
+                    AssertTrue(bytes.Length <= maximumBytes,
+                        $"Expected a diagnostic record no larger than {maximumBytes} bytes, got {bytes.Length}.");
+                    AssertTrue(File.ReadAllText(logPath).Contains("[truncated]"),
+                        "Expected the oversized diagnostic record to be marked as truncated.");
+
+                    Trace.AutoFlush = false;
+                    var bufferedLogPath = Path.Combine(Global.SecureMainFolder, "buffered.log");
+                    using (var listener = new SecureRollingTraceListener(bufferedLogPath, maximumBytes, 1))
+                    {
+                        listener.WriteLine(new string('a', 700));
+                        listener.WriteLine(new string('b', 700));
+                    }
+
+                    AssertTrue(File.Exists(bufferedLogPath + ".1"),
+                        "Expected buffered records to rotate before exceeding the configured size.");
+                    AssertTrue(new FileInfo(bufferedLogPath).Length <= maximumBytes,
+                        "Expected the active buffered diagnostic log to remain bounded.");
+                    AssertTrue(new FileInfo(bufferedLogPath + ".1").Length <= maximumBytes,
+                        "Expected the buffered diagnostic archive to remain bounded.");
+
+                    var formattingLogPath = Path.Combine(Global.SecureMainFolder, "formatting.log");
+                    using (var listener = new SecureRollingTraceListener(formattingLogPath, maximumBytes, 1))
+                    {
+                        listener.TraceData(null, "test", TraceEventType.Warning, 1, new ThrowingToStringValue());
+                        listener.TraceEvent(null, "test", TraceEventType.Warning, 2, "Value: {0}",
+                            new ThrowingToStringValue());
+                    }
+
+                    var formattingLog = File.ReadAllText(formattingLogPath);
+                    AssertTrue(formattingLog.Contains("diagnostic value formatting failed"),
+                        "Expected diagnostic value formatting failures to be contained.");
+                    AssertTrue(formattingLog.Contains("diagnostic formatting failed"),
+                        "Expected diagnostic composite-format failures to be contained.");
+
+                    var invalidLogPath = Path.Combine(Global.SecureMainFolder, "invalid.log");
+                    Directory.CreateDirectory(invalidLogPath);
+                    using (var listener = new SecureRollingTraceListener(invalidLogPath, maximumBytes, 1))
+                        AssertThrows<IOException>(listener.PrepareForUse, "not a regular file");
+                }
+                finally
+                {
+                    Trace.AutoFlush = originalAutoFlush;
+                    SecureFileSystem.AllowOwnerWriteFailureForTests = originalOwnerWriteFailure;
+                }
+            });
+        }
+
+        private static void LegacyMigrationCompletionRemovesStagedSources()
+        {
+            WithTemporaryLegacyMigrationFolders((legacyFolder, pendingFolder) =>
+            {
+                var legacy = Path.Combine(legacyFolder, "office.conf");
+                var pending = Path.Combine(pendingFolder, "office.conf");
+                File.WriteAllText(legacy, ValidConfig());
+                LegacyProfileMigrationService.StageLegacyProfiles();
+                AssertTrue(File.Exists(pending), "Expected the profile to be staged before completion.");
+
+                LegacyProfileMigrationService.CompleteApprovedMigration("office");
+                AssertFalse(File.Exists(pending), "Expected approval to remove the staged copy.");
+                AssertFalse(File.Exists(legacy), "Expected approval to remove the original legacy copy.");
+            });
+        }
+
+        private static void AppUserModelIdMatchesInstallerShortcut()
+        {
+            var buildDefaultAppUserModelId = typeof(WindowsApplicationContext).GetMethod(
+                "BuildDefaultAppUserModelId", BindingFlags.NonPublic | BindingFlags.Static);
+            if (buildDefaultAppUserModelId == null)
+                throw new InvalidOperationException("BuildDefaultAppUserModelId helper was not found.");
+
+            var first = (string)buildDefaultAppUserModelId.Invoke(null,
+                new object[] { "WireSock UI" });
+            var firstAgain = (string)buildDefaultAppUserModelId.Invoke(null,
+                new object[] { "WireSock UI" });
+
+            AssertEqual("WireSock.Foundation.WireSock.UI", first);
+            AssertEqual(first, firstAgain);
+            AssertTrue(first.Length <= 128, "Expected AppUserModelID to fit the Windows shell length limit.");
+        }
+
+        private static void NotificationShortcutUsesCleanDisplayName()
+        {
+            AssertEqual("WireSock UI.lnk",
+                WindowsApplicationContext.BuildShortcutFileName("WireSock UI"));
+            AssertEqual(
+                @"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\WireSock UI.lnk",
+                WindowsApplicationContext.BuildInstalledShortcutPath(
+                    @"C:\ProgramData\Microsoft\Windows\Start Menu\Programs",
+                    "WireSock UI"));
+            AssertThrows<ArgumentException>(
+                () => WindowsApplicationContext.BuildInstalledShortcutPath(" ", "WireSock UI"),
+                "all-users Start Menu path");
+
+            var untrustedName = WindowsApplicationContext.BuildShortcutFileName(
+                @"..\WireSockUI/Bad:Name");
+            AssertFalse(untrustedName.Contains("..") || untrustedName.Contains("\\") || untrustedName.Contains("/") ||
+                        untrustedName.Contains(":"),
+                "Expected shortcut filenames to remove path and device-name metacharacters.");
+
+            var firstLegacy = WindowsApplicationContext.BuildLegacyShortcutFileName(
+                "WireSockUI", @"C:\Program Files\WireSockUI\WireSockUI.exe");
+            var secondLegacy = WindowsApplicationContext.BuildLegacyShortcutFileName(
+                "WireSockUI", @"D:\Tools\WireSockUI\WireSockUI.exe");
+            AssertFalse(string.Equals(firstLegacy, secondLegacy, StringComparison.Ordinal),
+                "Expected legacy notification shortcuts to remain discoverable by their path seed during migration.");
+        }
+
+        private static void NotificationImagePathsUseFileUris()
+        {
+            var path = Path.Combine(Path.GetTempPath(), "WireSock UI", "WireSock.ico");
+            var uri = NotificationContent.BuildLocalImageUri(path);
+
+            AssertTrue(uri.StartsWith("file:///", StringComparison.OrdinalIgnoreCase),
+                $"Expected a desktop notification file URI, got '{uri}'.");
+            AssertTrue(uri.Contains("WireSock%20UI"), "Expected spaces in notification image paths to be escaped.");
+            AssertThrows<ArgumentException>(() => NotificationContent.BuildLocalImageUri(" "), "path");
+
+            var windows81Toast = XDocument.Parse(NotificationContent.BuildToastXml(
+                "Tunnel active",
+                "Connected",
+                path,
+                "WireSock UI",
+                new Version(6, 3)));
+            var windows81Binding = windows81Toast.Descendants("binding").Single();
+            AssertEqual("ToastImageAndText02", (string)windows81Binding.Attribute("template"));
+            AssertTrue(windows81Binding.Elements("text").Select(element => (string)element.Attribute("id"))
+                    .SequenceEqual(new[] { "1", "2" }),
+                "Expected the Windows 8.1 toast to use numbered text elements.");
+            AssertFalse(windows81Binding.Descendants("image").Attributes("placement").Any(),
+                "Windows 8.1 toast XML must not contain the Windows 10 app-logo placement attribute.");
+
+            var windows10Toast = XDocument.Parse(NotificationContent.BuildToastXml(
+                "Tunnel active",
+                "Connected",
+                path,
+                "WireSock UI",
+                new Version(10, 0)));
+            var windows10Binding = windows10Toast.Descendants("binding").Single();
+            AssertEqual("ToastGeneric", (string)windows10Binding.Attribute("template"));
+            AssertTrue(windows10Binding.Descendants("image").Any(element =>
+                    string.Equals((string)element.Attribute("placement"), "appLogoOverride",
+                        StringComparison.Ordinal)),
+                "Expected the Windows 10 toast to use adaptive app-logo placement.");
+            AssertThrows<ArgumentNullException>(() => NotificationContent.BuildToastXml(
+                "Tunnel active", "Connected", path, "WireSock UI", null), "windowsVersion");
+        }
+
+        private static void WindowsCompatibilityManifestEnablesModernBehavior()
+        {
+            var manifest =
+                XDocument.Load(FindRepositoryFile("WireSockUI.Bootstrap", "bootstrap.manifest"));
+            var elements = manifest.Descendants().ToArray();
+            var expectedSupportedOsIds = new[]
+            {
+                "{35138b9a-5d96-4fbd-8e2d-a2440225f93a}", // Windows 7
+                "{1f676c76-80e1-4239-95bb-83d0f6d0da78}", // Windows 8.1
+                "{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"  // Windows 10/11
+            };
+            var supportedOsElements = elements
+                .Where(element => element.Name.LocalName == "supportedOS")
+                .ToArray();
+            AssertEqual(expectedSupportedOsIds.Length, supportedOsElements.Length);
+            foreach (var expectedSupportedOsId in expectedSupportedOsIds)
+            {
+                AssertTrue(supportedOsElements.Any(element =>
+                        string.Equals((string)element.Attribute("Id"), expectedSupportedOsId,
+                            StringComparison.OrdinalIgnoreCase)),
+                    $"Expected compatibility declaration {expectedSupportedOsId} to be enabled.");
+            }
+            AssertTrue(elements.Any(element => element.Name.LocalName == "dpiAwareness" &&
+                                               element.Value.Contains("PerMonitorV2")),
+                "Expected PerMonitorV2 DPI awareness to be enabled.");
+            AssertTrue(elements.Any(element => element.Name.LocalName == "longPathAware" &&
+                                               string.Equals(element.Value, "true", StringComparison.OrdinalIgnoreCase)),
+                "Expected long-path awareness to be enabled.");
+            AssertTrue(elements.Any(element => element.Name.LocalName == "assemblyIdentity" &&
+                                               string.Equals((string)element.Attribute("name"),
+                                                   "Microsoft.Windows.Common-Controls",
+                                                   StringComparison.OrdinalIgnoreCase)),
+                "Expected the modern common-controls dependency to be enabled.");
+
+            var appConfig = XDocument.Load(FindRepositoryFile("WireSockUI", "app.config"));
+            AssertTrue(appConfig.Descendants("add").Any(element =>
+                    string.Equals((string)element.Attribute("key"), "DpiAwareness", StringComparison.Ordinal) &&
+                    string.Equals((string)element.Attribute("value"), "PerMonitorV2", StringComparison.Ordinal)),
+                "Expected the .NET Framework WinForms DPI switch to match the manifest.");
+
+            var configurationMap = new ExeConfigurationFileMap
+            {
+                ExeConfigFilename = FindRepositoryFile("WireSockUI", "app.config")
+            };
+            var configuration = ConfigurationManager.OpenMappedExeConfiguration(configurationMap,
+                ConfigurationUserLevel.None);
+            AssertTrue(configuration.GetSection("System.Windows.Forms.ApplicationConfigurationSection") != null,
+                "Expected .NET Framework to recognize the WinForms application configuration section.");
+
+            var unicodePathCapacity = typeof(ShellLink).GetField("UnicodePathCapacity",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            AssertTrue(unicodePathCapacity != null, "Expected the long shell-link path buffer constant.");
+            AssertEqual(32768, (int)unicodePathCapacity.GetRawConstantValue());
+        }
+
+        private static void ElevationManifestEstablishesNativePreClrBoundary()
+        {
+            var nativeManifest =
+                XDocument.Load(FindRepositoryFile("WireSockUI.Bootstrap", "bootstrap.manifest"));
+            var nativeExecutionLevel = nativeManifest.Descendants()
+                .Single(element => element.Name.LocalName == "requestedExecutionLevel");
+            AssertEqual("requireAdministrator", (string)nativeExecutionLevel.Attribute("level"));
+
+            var project = XDocument.Load(FindRepositoryFile("WireSockUI", "WireSockUI.csproj"));
+            AssertTrue(project.Descendants("AssemblyName")
+                           .Any(element => string.Equals(
+                               element.Value,
+                               "WireSockUI.Managed",
+                               StringComparison.Ordinal)),
+                "Expected the managed payload to have a distinct, non-launcher filename.");
+            AssertTrue(project.Descendants("OutputType")
+                           .Any(element => string.Equals(
+                               element.Value,
+                               "Library",
+                               StringComparison.Ordinal)),
+                "Expected the managed payload not to be directly executable.");
+            AssertFalse(project.Descendants("ApplicationManifest").Any(),
+                "The managed library must not retain a second, ineffective application manifest.");
+            AssertFalse(project.Descendants()
+                    .Any(element =>
+                        string.Equals(
+                            (string)element.Attribute("Include"),
+                            @"Properties\app.manifest",
+                            StringComparison.OrdinalIgnoreCase)),
+                "The obsolete managed application manifest must not remain in the project.");
+            AssertTrue(project.Descendants("AutoGenerateBindingRedirects")
+                           .Any(element => string.Equals(
+                               element.Value,
+                               "true",
+                               StringComparison.OrdinalIgnoreCase)),
+                "Expected the native-host configuration to retain generated binding redirects.");
+            var buildNativeBootstrap = project.Descendants("Target")
+                .Single(element => string.Equals(
+                    (string)element.Attribute("Name"),
+                    "BuildNativeBootstrap",
+                    StringComparison.Ordinal));
+            AssertTrue(
+                ((string)buildNativeBootstrap.Attribute("Condition") ?? string.Empty)
+                    .IndexOf(
+                        "'$(_IsPublishing)' != 'true'",
+                        StringComparison.Ordinal) >= 0,
+                "Publish builds must not create a misleading TargetDir launcher beside the reserved publish subtree.");
+            var removePublishIntermediateNativeBootstrap = project.Descendants("Target")
+                .Single(element => string.Equals(
+                    (string)element.Attribute("Name"),
+                    "RemovePublishIntermediateNativeBootstrap",
+                    StringComparison.Ordinal));
+            AssertTrue(
+                string.Equals(
+                    (string)removePublishIntermediateNativeBootstrap.Attribute("BeforeTargets"),
+                    "PrepareForPublish",
+                    StringComparison.Ordinal) &&
+                (((string)removePublishIntermediateNativeBootstrap.Attribute("Condition") ??
+                  string.Empty).IndexOf(
+                    "'$(_IsPublishing)' == 'true'",
+                    StringComparison.Ordinal) >= 0) &&
+                removePublishIntermediateNativeBootstrap.Elements("Delete").Any(element =>
+                    string.Equals(
+                        (string)element.Attribute("Files"),
+                        "$(TargetDir)WireSockUI.exe",
+                        StringComparison.Ordinal)),
+                "Normal and no-build publishes must remove a stale TargetDir launcher before producing the validated PublishDir launcher.");
+
+            var bootstrapSource =
+                File.ReadAllText(FindRepositoryFile("WireSockUI.Bootstrap", "bootstrap.cpp"));
+            foreach (var requiredBoundary in new[]
+                     {
+                         "WireSockUI.Managed.dll",
+                         "WireSockUI.exe.config",
+                         "FILE_FLAG_OPEN_REPARSE_POINT",
+                         "ACCESS_ALLOWED_CALLBACK_ACE_TYPE",
+                         "ACCESS_ALLOWED_COMPOUND_ACE_TYPE",
+                         "BCryptHashData",
+                         "ParsePayloadManifest",
+                         "CompareStringOrdinal",
+                         "seenPayloadFiles",
+                         "Unexpected payload file",
+                         "IsIgnoredDevelopmentMetadataFile",
+                         "SanitizeRuntimeEnvironment",
+                         "SetDefaultDllDirectories",
+                         "SetDefaultStartupFlags",
+                         "ExecuteInDefaultAppDomain",
+                         "COINIT_APARTMENTTHREADED",
+                         "MinimumNetFrameworkRelease = 533320",
+                         "CORECLR_",
+                         "COMPLUS_",
+                         "APPDOMAIN_MANAGER_ASM"
+                     })
+                AssertTrue(
+                    bootstrapSource.IndexOf(requiredBoundary, StringComparison.Ordinal) >= 0,
+                    $"Expected the native pre-CLR boundary to contain '{requiredBoundary}'.");
+
+            foreach (var obsoleteBoundary in new[]
+                     {
+                         "WireSockUI.Managed.exe\"",
+                         "CreateProcessW(",
+                         "AssignProcessToJobObject",
+                         "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
+                         "signed installer",
+                         "signed launcher"
+                     })
+                AssertFalse(
+                    bootstrapSource.IndexOf(obsoleteBoundary, StringComparison.Ordinal) >= 0,
+                    $"Expected the obsolete child-process boundary '{obsoleteBoundary}' to be absent.");
+
+            var bootstrapBuild =
+                File.ReadAllText(FindRepositoryFile("scripts", "Build-NativeBootstrap.ps1"));
+            foreach (var requiredBuildControl in new[]
+                     {
+                         "/DEPENDENTLOADFLAG:0x800",
+                         "/DELAYLOAD:bcrypt.dll",
+                         ".staging.tmp",
+                         "Assert-NativeBootstrap",
+                         "Assert-ManagedAssemblyPlatform",
+                         "Assert-PayloadSnapshot",
+                         "Test-IsIgnoredBuildMetadataPath"
+                     })
+                AssertTrue(
+                    bootstrapBuild.IndexOf(requiredBuildControl, StringComparison.Ordinal) >= 0,
+                    $"Expected native bootstrap construction to enforce '{requiredBuildControl}'.");
+
+            var bootstrapValidation =
+                File.ReadAllText(FindRepositoryFile("scripts", "NativeBootstrap.Validation.psm1"));
+            foreach (var requiredValidation in new[]
+                     {
+                         "DependentLoadFlags",
+                         "allowedNormalImports",
+                         "RequireProductionBuild",
+                         "Get-NativeBootstrapManifest"
+                     })
+                AssertTrue(
+                    bootstrapValidation.IndexOf(requiredValidation, StringComparison.Ordinal) >= 0,
+                    $"Expected native bootstrap validation to enforce '{requiredValidation}'.");
+
+            AssertEqual(
+                WireSockUI.Program.NativeLauncherFileName,
+                Path.GetFileName(WireSockUI.Program.ApplicationLauncherPath));
+            AssertEqual(
+                WireSockUI.Program.NativeLauncherFileName + ".config",
+                Path.GetFileName(WireSockUI.Program.ApplicationConfigurationPath));
+        }
+
+        private static void MsiBuildsMaterializeOrdinaryOutputFiles()
+        {
+            var buildScript = File.ReadAllText(FindRepositoryFile("scripts", "Build-Msi.ps1"));
+            AssertTrue(
+                buildScript.IndexOf(
+                    "--property:CreateHardLinksForCopyFilesToOutputDirectoryIfPossible=false",
+                    StringComparison.Ordinal) >= 0,
+                "MSI builds must disable WiX's default output hard links so release validators receive ordinary files.");
+        }
+
+        private static void BrowserActivationPermitsOnlyCredentialFreeHttps()
+        {
+            AssertTrue(
+                UnelevatedProcessLauncher.TryValidateHttpsUrl(
+                    "https://example.com/releases?q=stable",
+                    out var uri,
+                    out var diagnostic),
+                diagnostic ?? "Expected a valid HTTPS address.");
+            AssertEqual("https", uri.Scheme);
+
+            foreach (var rejected in new[]
+                     {
+                         "http://example.com/",
+                         "file:///C:/Windows/System32/cmd.exe",
+                         "https://user:password@example.com/",
+                         "https://",
+                         "https://example.com/\r\nignored"
+                     })
+                AssertFalse(
+                    UnelevatedProcessLauncher.TryValidateHttpsUrl(
+                        rejected,
+                        out _,
+                        out _),
+                    $"Expected unsafe shell target '{rejected}' to be rejected.");
+        }
+
+        private static void WindowsArgumentQuotingPreservesShellTargets()
+        {
+            AssertEqual("plain", UnelevatedProcessLauncher.QuoteWindowsArgument("plain"));
+            AssertEqual(
+                "\"two words\"",
+                UnelevatedProcessLauncher.QuoteWindowsArgument("two words"));
+            AssertEqual(
+                "\"C:\\path with space\\\\\"",
+                UnelevatedProcessLauncher.QuoteWindowsArgument(@"C:\path with space\"));
+            AssertEqual(
+                "\"a\\\"b\"",
+                UnelevatedProcessLauncher.QuoteWindowsArgument("a\"b"));
+        }
+
+        private static void ProgramRejectsNonLocalApplicationPaths()
+        {
+            AssertFalse(
+                WireSockUI.Program.TryValidateLocalFixedPath(
+                    @"\\server\share\WireSockUI.Managed.exe",
+                    "Application",
+                    out var networkDiagnostic),
+                "Expected UNC application paths to be rejected before ACL inspection.");
+            AssertTrue(
+                networkDiagnostic?.IndexOf("local", StringComparison.OrdinalIgnoreCase) >= 0,
+                $"Expected a local-volume diagnostic, got '{networkDiagnostic}'.");
+
+            AssertFalse(
+                WireSockUI.Program.TryValidateLocalFixedPath(
+                    @"\\?\C:\WireSockUI.Managed.exe",
+                    "Application",
+                    out _),
+                "Expected device-namespace application paths to be rejected.");
+        }
+
+        private static void AutoRunTaskNameIsPathAndUserSeeded()
+        {
+            var isSameExecutablePath = typeof(FrmSettings).GetMethod(
+                "IsSameExecutablePath", BindingFlags.NonPublic | BindingFlags.Static);
+            if (isSameExecutablePath == null)
+                throw new InvalidOperationException("IsSameExecutablePath helper was not found.");
+
+            var firstUserSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value;
+            var secondUserSid = new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null).Value;
+            const string firstPath = @"C:\Program Files\WireSockUI\WireSockUI.exe";
+            var first = FrmSettings.BuildAutoRunTaskNameForUser(firstPath, firstUserSid);
+            var firstAgain = FrmSettings.BuildAutoRunTaskNameForUser(firstPath, firstUserSid);
+            var secondPath = FrmSettings.BuildAutoRunTaskNameForUser(
+                @"D:\Tools\WireSockUI\WireSockUI.exe", firstUserSid);
+            var secondUser = FrmSettings.BuildAutoRunTaskNameForUser(firstPath, secondUserSid);
+            var legacyPathScopedName = FrmSettings.BuildLegacyPathScopedAutoRunTaskName(firstPath);
+
+            AssertEqual(first, firstAgain);
+            AssertFalse(string.Equals(first, secondPath, StringComparison.Ordinal),
+                "Expected autorun task names to differ for side-by-side executable paths.");
+            AssertFalse(string.Equals(first, secondUser, StringComparison.Ordinal),
+                "Expected users sharing one installation to receive distinct autorun task names.");
+            AssertTrue(first.StartsWith("WireSockUI-", StringComparison.Ordinal),
+                $"Expected autorun task name to include the application prefix, got '{first}'.");
+            AssertTrue(first.StartsWith(legacyPathScopedName + "-", StringComparison.Ordinal),
+                "Expected the per-user task name to retain the legacy path seed for deterministic migration.");
+            AssertTrue(FrmSettings.IsRootAutoRunTaskPath($@"\{first}", first),
+                "Expected the canonical autorun task to resolve only at the Task Scheduler root.");
+            AssertFalse(FrmSettings.IsRootAutoRunTaskPath($@"\ForeignFolder\{first}", first),
+                "Expected a same-named task in a subfolder not to alias the root autorun task.");
+            AssertTrue(FrmSettings.ShouldDeleteAutoRunTaskAfterEnableFailure(true, false, false),
+                "Expected a pre-cleanup registration failure to remove a newly created autorun task.");
+            AssertFalse(FrmSettings.ShouldDeleteAutoRunTaskAfterEnableFailure(true, false, true),
+                "Expected a canonical task to be retained after legacy cleanup has begun.");
+            AssertFalse(FrmSettings.ShouldDeleteAutoRunTaskAfterEnableFailure(true, true, false),
+                "Expected failed legacy cleanup to retain a safely upgraded pre-existing autorun task.");
+            AssertTrue((bool)isSameExecutablePath.Invoke(null, new object[]
+                {
+                    @"C:\Program Files\WireSockUI\WireSockUI.exe",
+                    @"""c:\program files\wiresockui\wiresockui.exe"""
+                }),
+                "Expected autorun ownership checks to tolerate quoted task action paths.");
+            AssertFalse((bool)isSameExecutablePath.Invoke(null, new object[]
+                {
+                    string.Empty,
+                    @"C:\Program Files\WireSockUI\WireSockUI.exe"
+                }),
+                "Expected empty autorun paths not to match the current executable.");
+        }
+
+        private static void WireSockDisconnectForwardsNetworkLockPreservation()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi();
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+
+                        AssertTrue(manager.Connect("office"), "Expected the fake tunnel to connect.");
+                        AssertTrue(manager.Disconnect(true),
+                            "Expected fake disconnect with preserved network lock to succeed.");
+                        AssertEqual(1, nativeApi.ReleaseCount);
+                        AssertTrue(nativeApi.LastPreserveNetworkLock == true,
+                            "Expected preserved reconnect cleanup to pass preserveNetworkLock=true to wgbooster.");
+
+                        AssertTrue(manager.Connect("office"), "Expected the fake tunnel to reconnect.");
+                        AssertTrue(manager.Disconnect(), "Expected fake default disconnect to succeed.");
+                        AssertEqual(2, nativeApi.ReleaseCount);
+                        AssertTrue(nativeApi.LastPreserveNetworkLock == false,
+                            "Expected explicit disconnect cleanup to pass preserveNetworkLock=false to wgbooster.");
+                    }
+                    finally
+                    {
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void LifecycleResetsPreservedLockAfterHandleCreationFails()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi { CreateHandleResult = IntPtr.Zero };
+                var networkLockApi = new FakeNetworkLockApi { Active = true };
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    try
+                    {
+                        TestKillSwitch = true;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+                        var controller = new TunnelLifecycleController(manager, networkLockApi);
+
+                        var result = controller.ConnectAsync("office", true, 5000).GetAwaiter().GetResult();
+
+                        AssertFalse(result.Succeeded, "Expected handle creation failure to fail the connection.");
+                        AssertFalse(result.TimedOut, "Expected the failed fake connection to complete normally.");
+                        AssertFalse(result.Value.RecoveryRequired,
+                            "Expected a successful preserved-lock reset not to require recovery.");
+                        AssertEqual(1, networkLockApi.ResetCount);
+                        AssertFalse(networkLockApi.Active,
+                            "Expected failed reconnect cleanup to release the preserved network lock.");
+
+                        networkLockApi.Active = true;
+                        networkLockApi.ResetResult = false;
+                        var failedReset = controller.ConnectAsync("office", true, 5000).GetAwaiter().GetResult();
+                        AssertTrue(failedReset.Value.RecoveryRequired,
+                            "Expected an unreset preserved lock to require explicit recovery.");
+                        AssertTrue(failedReset.Diagnostic?.Contains("simulated reset failure") == true,
+                            "Expected the preserved-lock reset diagnostic to be retained.");
+                    }
+                    finally
+                    {
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void LegacyStartupShortcutIsHandledWithoutShellParsing()
+        {
+            var testDirectory = Path.Combine(
+                Path.GetTempPath(), $"wiresockui-legacy-startup-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(testDirectory);
+            var legacyShortcut = Path.Combine(testDirectory, "WireSockUI.lnk");
+            try
+            {
+                File.WriteAllBytes(legacyShortcut, new byte[] { 0xff, 0x00, 0xff });
+                AssertTrue(
+                    FrmSettings.InspectLegacyStartupShortcutPath(legacyShortcut, false) ==
+                    FrmSettings.LegacyStartupShortcutStatus.Unverified,
+                    "Expected the reserved legacy artifact to remain unauthenticated without parsing its bytes.");
+                AssertTrue(
+                    FrmSettings.InspectLegacyStartupShortcutPath(legacyShortcut, true) ==
+                    FrmSettings.LegacyStartupShortcutStatus.Unverified,
+                    "Expected explicit migration to remove the reserved legacy artifact.");
+                AssertFalse(File.Exists(legacyShortcut),
+                    "Expected explicit autorun migration to remove the reserved legacy file by validated handle.");
+            }
+            finally
+            {
+                if (File.Exists(legacyShortcut))
+                    File.Delete(legacyShortcut);
+                if (Directory.Exists(testDirectory))
+                    Directory.Delete(testDirectory);
+            }
+        }
+
+        private static void LegacyStartupShortcutMetadataFailuresFailClosed()
+        {
+            const string shortcutPath = @"C:\unreadable\WireSockUI.lnk";
+
+            AssertTrue(
+                FrmSettings.InspectLegacyStartupShortcutPath(
+                    shortcutPath,
+                    false,
+                    _ => throw new UnauthorizedAccessException("simulated access denial")) ==
+                FrmSettings.LegacyStartupShortcutStatus.Unknown,
+                "Expected an access-denied metadata inspection to produce an unknown autorun state.");
+            AssertTrue(
+                FrmSettings.InspectLegacyStartupShortcutPath(
+                    shortcutPath,
+                    false,
+                    _ => throw new IOException("simulated metadata failure")) ==
+                FrmSettings.LegacyStartupShortcutStatus.Unknown,
+                "Expected an unreadable shortcut to produce an unknown autorun state.");
+            AssertTrue(
+                FrmSettings.InspectLegacyStartupShortcutPath(
+                    shortcutPath,
+                    false,
+                    _ => throw new Win32Exception(5, "simulated access denial")) ==
+                FrmSettings.LegacyStartupShortcutStatus.Unknown,
+                "Expected a Win32 access-denied result to produce an unknown autorun state.");
+            AssertTrue(
+                FrmSettings.InspectLegacyStartupShortcutPath(
+                    shortcutPath,
+                    false,
+                    _ => throw new FileNotFoundException("simulated removal race")) ==
+                FrmSettings.LegacyStartupShortcutStatus.Absent,
+                "Expected a shortcut that disappeared during inspection to remain classified as absent.");
+            AssertTrue(
+                FrmSettings.InspectLegacyStartupShortcutPath(
+                    shortcutPath,
+                    false,
+                    _ => throw new Win32Exception(3, "simulated missing parent")) ==
+                FrmSettings.LegacyStartupShortcutStatus.Absent,
+                "Expected a missing-parent Win32 result to remain classified as absent.");
+
+            AssertThrows<IOException>(
+                () => FrmSettings.EnsureLegacyStartupShortcutCleanupCompleted(
+                    FrmSettings.LegacyStartupShortcutStatus.Unknown,
+                    shortcutPath),
+                "could not be inspected");
+            var unknownDiagnostic = FrmSettings.GetLegacyStartupShortcutDiagnostic(
+                FrmSettings.LegacyStartupShortcutStatus.Unknown,
+                shortcutPath);
+            AssertTrue(
+                unknownDiagnostic.IndexOf(shortcutPath, StringComparison.OrdinalIgnoreCase) >= 0 &&
+                unknownDiagnostic.IndexOf("left unchanged", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                unknownDiagnostic.IndexOf("reopen Settings", StringComparison.OrdinalIgnoreCase) >= 0,
+                "Expected unknown metadata failures to produce an actionable autorun diagnostic.");
+            AssertFalse(
+                FrmSettings.RequiresLegacyStartupShortcutMigrationConsent(
+                    FrmSettings.LegacyStartupShortcutStatus.Unknown),
+                "Expected unreadable metadata not to be mistaken for an unverified regular file or cleanup consent.");
+            AssertThrows<InvalidOperationException>(
+                () => FrmSettings.InspectLegacyStartupShortcutPath(
+                    shortcutPath,
+                    false,
+                    _ => throw new InvalidOperationException("simulated programming failure")),
+                "simulated programming failure");
+        }
+
+        private static void LegacyStartupShortcutCommitIsConsentAndPathBound()
+        {
+            var testDirectory = Path.Combine(
+                Path.GetTempPath(),
+                $"wiresockui-legacy-commit-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(testDirectory);
+            var inspectedShortcutPath = Path.Combine(testDirectory, "inspected", "WireSockUI.lnk");
+            var changedKnownFolderPath = Path.Combine(testDirectory, "changed", "WireSockUI.lnk");
+            var lateShortcutPath = Path.Combine(testDirectory, "late", "WireSockUI.lnk");
+            try
+            {
+                AssertEqual(
+                    inspectedShortcutPath,
+                    FrmSettings.GetLegacyStartupShortcutPathForCommit(
+                        true,
+                        true,
+                        inspectedShortcutPath));
+                AssertFalse(
+                    string.Equals(
+                        changedKnownFolderPath,
+                        FrmSettings.GetLegacyStartupShortcutPathForCommit(
+                            true,
+                            true,
+                            inspectedShortcutPath),
+                        StringComparison.OrdinalIgnoreCase),
+                    "Expected commit to retain the exact inspected path rather than use a later known-folder value.");
+                AssertEqual(
+                    null,
+                    FrmSettings.GetLegacyStartupShortcutPathForCommit(
+                        true,
+                        false,
+                        inspectedShortcutPath));
+
+                Directory.CreateDirectory(Path.GetDirectoryName(lateShortcutPath));
+                File.WriteAllText(lateShortcutPath, "arrived after inspection");
+                AssertEqual(
+                    null,
+                    FrmSettings.GetLegacyStartupShortcutPathForCommit(
+                        false,
+                        true,
+                        lateShortcutPath));
+                AssertTrue(
+                    File.Exists(lateShortcutPath),
+                    "Expected a shortcut that appeared after an absent inspection to remain untouched.");
+
+                AssertThrows<InvalidOperationException>(
+                    () => FrmSettings.GetLegacyStartupShortcutPathForCommit(
+                        true,
+                        true,
+                        @"relative\WireSockUI.lnk"),
+                    "not absolute");
+                AssertThrows<InvalidOperationException>(
+                    () => FrmSettings.GetLegacyStartupShortcutPathForCommit(
+                        true,
+                        true,
+                        null),
+                    "no inspected path");
+            }
+            finally
+            {
+                if (File.Exists(lateShortcutPath))
+                    File.Delete(lateShortcutPath);
+                if (Directory.Exists(testDirectory))
+                    Directory.Delete(testDirectory, true);
+            }
+        }
+
+        private static void LifecycleMonitorDefersQueriesDuringSlowNativeConnect()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi
+                {
+                    StartEntered = new ManualResetEventSlim(false),
+                    ContinueStart = new ManualResetEventSlim(false)
+                };
+                using (nativeApi.StartEntered)
+                using (nativeApi.ContinueStart)
+                using (var connectedUpdate = new ManualResetEventSlim(false))
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+                        var controller = new TunnelLifecycleController(manager, new FakeNetworkLockApi());
+                        var generation = 7;
+                        var connectTask = controller.ConnectAsync("office", false, 30000);
+
+                        using (var monitor = new TunnelMonitor(
+                                   controller.GetConnectedAsync,
+                                   controller.GetStateAsync,
+                                   () => generation,
+                                   update =>
+                                   {
+                                       if (update.Kind == TunnelMonitorUpdateKind.Connected)
+                                           connectedUpdate.Set();
+                                       if (update.Kind == TunnelMonitorUpdateKind.QueryFailed)
+                                           throw new InvalidOperationException(
+                                               "The monitor queried native state before the slow connect completed.");
+                                       return Task.CompletedTask;
+                                   },
+                                   5000,
+                                   30000,
+                                   10,
+                                   10))
+                        {
+                            monitor.StartConnecting(generation, connectTask);
+                            AssertTrue(nativeApi.StartEntered.Wait(1000),
+                                "Expected the fake native connect to enter start_tunnel.");
+
+                            Thread.Sleep(6000);
+                            AssertEqual(0, nativeApi.TunnelActiveQueryCount);
+
+                            nativeApi.ContinueStart.Set();
+                            var connectResult = connectTask.GetAwaiter().GetResult();
+                            AssertTrue(connectResult.Succeeded && connectResult.Value.Connected,
+                                "Expected the six-second native connect to succeed inside the 30-second budget.");
+                            AssertTrue(connectedUpdate.Wait(1000),
+                                "Expected monitoring to begin after native connect completion.");
+                            AssertEqual(1, nativeApi.TunnelActiveQueryCount);
+                        }
+                    }
+                    finally
+                    {
+                        nativeApi.ContinueStart.Set();
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void VirtualAdapterRenameDoesNotHoldLifecycleLocks()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi();
+                var renamer = new BlockingVirtualAdapterRenamer();
+                using (renamer.RenameEntered)
+                using (renamer.ContinueRename)
+                using (renamer.RenameCompleted)
+                using (var manager = new WireSockManager(nativeApi, renamer, null))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+                        manager.TunnelMode = WireSockManager.Mode.VirtualAdapter;
+                        var controller = new TunnelLifecycleController(manager, new FakeNetworkLockApi());
+
+                        var connectTask = controller.ConnectAsync("office", false, 1000);
+                        var connectResult = connectTask.GetAwaiter().GetResult();
+                        AssertTrue(connectResult.Succeeded && connectResult.Value.Connected,
+                            connectResult.Diagnostic ??
+                            "Expected optional adapter renaming not to extend the native connect timeout.");
+                        AssertTrue(renamer.RenameEntered.Wait(1000),
+                            "Expected virtual-adapter rename to begin after tunnel activation.");
+                        AssertTrue(manager.ConnectionSequence == 1,
+                            "Expected tunnel state to be committed before adapter renaming.");
+                        AssertTrue(manager.TryGetConnected(out var connected, out var diagnostic) && connected,
+                            diagnostic ?? "Expected tunnel queries not to wait for adapter renaming.");
+
+                        renamer.ContinueRename.Set();
+                        AssertTrue(renamer.RenameCompleted.Wait(1000),
+                            "Expected the released adapter rename worker to complete.");
+                        AssertEqual(1, renamer.RenameCount);
+                        AssertEqual("Wiresock Virtual Adapter", renamer.AdapterFriendlyName);
+                        AssertEqual("office", renamer.NewName);
+                        AssertTrue(renamer.ConnectionWasCurrent,
+                            "Expected the adapter rename to verify the originating connection sequence.");
+                    }
+                    finally
+                    {
+                        renamer.ContinueRename.Set();
+                        renamer.RenameCompleted.Wait(1000);
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void VirtualAdapterReadinessRejectsMissingAndAmbiguousCandidates()
+        {
+            AssertTrue(
+                WmiVirtualAdapterRenamer.ClassifyCandidates(0, null) ==
+                WmiVirtualAdapterRenamer.CandidateReadiness.Missing,
+                "Expected an unpublished WMI adapter to be retried.");
+            AssertTrue(
+                WmiVirtualAdapterRenamer.ClassifyCandidates(1, null) ==
+                WmiVirtualAdapterRenamer.CandidateReadiness.NotReady,
+                "Expected an adapter without NetConnectionID to be retried.");
+            AssertTrue(
+                WmiVirtualAdapterRenamer.ClassifyCandidates(1, "Ethernet 7") ==
+                WmiVirtualAdapterRenamer.CandidateReadiness.Ready,
+                "Expected one fully published adapter to be renameable.");
+            AssertTrue(
+                WmiVirtualAdapterRenamer.ClassifyCandidates(2, "stale") ==
+                WmiVirtualAdapterRenamer.CandidateReadiness.Ambiguous,
+                "Expected a ready stale adapter plus a not-yet-ready adapter to remain ambiguous.");
+        }
+
+        private static void VirtualAdapterRenameQueueKeepsOnlyLatestGeneration()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi();
+                var renamer = new LatestWinsVirtualAdapterRenamer();
+                using (renamer.FirstCommitChecked)
+                using (renamer.ReleaseFirstCommit)
+                using (renamer.LatestCommitCompleted)
+                using (var manager = new WireSockManager(nativeApi, renamer, null))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        foreach (var profile in new[] { "one", "two", "three" })
+                            File.WriteAllText(Profile.GetProfilePath(profile), ValidConfig());
+                        manager.TunnelMode = WireSockManager.Mode.VirtualAdapter;
+
+                        AssertTrue(manager.Connect("one"), "Expected the first virtual-adapter connection.");
+                        AssertTrue(renamer.FirstCommitChecked.Wait(1000),
+                            "Expected the first rename to pause after its generation check.");
+                        AssertTrue(manager.Connect("two"), "Expected a newer connection during the stale commit window.");
+                        AssertTrue(manager.Connect("three"), "Expected the latest connection to replace the queued rename.");
+
+                        renamer.ReleaseFirstCommit.Set();
+                        AssertTrue(renamer.LatestCommitCompleted.Wait(2000),
+                            "Expected the latest queued generation to repair the stale rename.");
+                        AssertEqual(2, renamer.RenameCount);
+                        AssertEqual("one", renamer.AttemptedNames[0]);
+                        AssertEqual("three", renamer.AttemptedNames[1]);
+                        AssertTrue(renamer.FirstCommitBecameStale,
+                            "Expected the first non-cancelable commit window to detect its stale generation.");
+                    }
+                    finally
+                    {
+                        renamer.ReleaseFirstCommit.Set();
+                        renamer.LatestCommitCompleted.Wait(1000);
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void VirtualAdapterRenameProviderStallsAreCapacityBounded()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi();
+                var renamer = new StallingVirtualAdapterRenamer();
+                using (renamer.FirstRenameEntered)
+                using (renamer.ReleaseProvider)
+                using (renamer.LatestRenameEntered)
+                using (var manager = new WireSockManager(nativeApi, renamer, null, 100))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        foreach (var profile in new[] { "one", "two", "three" })
+                            File.WriteAllText(Profile.GetProfilePath(profile), ValidConfig());
+                        manager.TunnelMode = WireSockManager.Mode.VirtualAdapter;
+
+                        AssertTrue(manager.Connect("one"), "Expected the first connection despite a stalled rename.");
+                        AssertTrue(renamer.FirstRenameEntered.Wait(1000),
+                            "Expected the fake provider to receive one rename.");
+                        AssertTrue(SpinWait.SpinUntil(
+                                () => manager.AdapterRenameOperationHungForTests, 1000),
+                            "Expected the external adapter-rename deadline to suspend the queue.");
+
+                        AssertTrue(manager.Connect("two"), "Expected a reconnect while the provider is stalled.");
+                        AssertTrue(manager.Connect("three"), "Expected another reconnect to replace the pending rename.");
+                        Thread.Sleep(150);
+                        AssertEqual(1, renamer.RenameCount);
+
+                        renamer.ReleaseProvider.Set();
+                        AssertTrue(renamer.LatestRenameEntered.Wait(2000),
+                            "Expected the queue to resume with only the latest generation.");
+                        AssertEqual(2, renamer.RenameCount);
+                        AssertEqual("three", renamer.LatestName);
+                    }
+                    finally
+                    {
+                        renamer.ReleaseProvider.Set();
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void VirtualAdapterRenameQueueRejectsOutOfOrderStaleEnqueues()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi();
+                var renamer = new StallingVirtualAdapterRenamer();
+                using (renamer.FirstRenameEntered)
+                using (renamer.ReleaseProvider)
+                using (renamer.LatestRenameEntered)
+                using (var manager = new WireSockManager(nativeApi, renamer, null, 100))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        foreach (var profile in new[] { "one", "two" })
+                            File.WriteAllText(Profile.GetProfilePath(profile), ValidConfig());
+                        manager.TunnelMode = WireSockManager.Mode.VirtualAdapter;
+
+                        AssertTrue(manager.Connect("one"), "Expected the first virtual-adapter connection.");
+                        var staleSequence = manager.ConnectionSequence;
+                        AssertTrue(renamer.FirstRenameEntered.Wait(1000),
+                            "Expected the first adapter rename to enter the fake provider.");
+                        AssertTrue(SpinWait.SpinUntil(
+                                () => manager.AdapterRenameOperationHungForTests, 1000),
+                            "Expected the external rename deadline to suspend the queue.");
+
+                        AssertTrue(manager.Connect("two"), "Expected the newer virtual-adapter connection.");
+                        AssertTrue(manager.ConnectionSequence > staleSequence,
+                            "Expected the reconnect to advance the connection generation.");
+
+                        var queueMethod = typeof(WireSockManager).GetMethod(
+                            "QueueVirtualAdapterRename",
+                            BindingFlags.Instance | BindingFlags.NonPublic);
+                        AssertTrue(queueMethod != null,
+                            "Expected to locate the adapter rename enqueue boundary.");
+                        queueMethod.Invoke(manager, new object[] { "one", staleSequence });
+
+                        renamer.ReleaseProvider.Set();
+                        AssertTrue(renamer.LatestRenameEntered.Wait(2000),
+                            "Expected an out-of-order stale enqueue not to replace the pending current generation.");
+                        AssertEqual(2, renamer.RenameCount);
+                        AssertEqual("two", renamer.LatestName);
+                    }
+                    finally
+                    {
+                        renamer.ReleaseProvider.Set();
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void LifecycleTracksLateDisconnectCompletionAfterTimeout()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi
+                {
+                    DropEntered = new ManualResetEventSlim(false),
+                    ContinueDrop = new ManualResetEventSlim(false)
+                };
+                using (nativeApi.DropEntered)
+                using (nativeApi.ContinueDrop)
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+                        var controller = new TunnelLifecycleController(manager, new FakeNetworkLockApi());
+                        AssertTrue(manager.Connect("office"), "Expected the fake tunnel to connect.");
+
+                        var result = controller.DisconnectAsync(null, false, 50).GetAwaiter().GetResult();
+                        AssertTrue(result.TimedOut, "Expected the blocked native disconnect to time out.");
+                        AssertTrue(result.PendingCompletion != null,
+                            "Expected timed-out native cleanup to retain its late completion task.");
+                        AssertTrue(nativeApi.DropEntered.Wait(1000),
+                            "Expected the fake native drop operation to start.");
+
+                        nativeApi.ContinueDrop.Set();
+                        var lateResult = result.PendingCompletion.GetAwaiter().GetResult();
+                        AssertTrue(lateResult.Succeeded, "Expected late native disconnect cleanup to succeed.");
+                        AssertFalse(manager.HasTunnelHandle,
+                            "Expected late disconnect completion to release the native handle.");
+                    }
+                    finally
+                    {
+                        nativeApi.ContinueDrop.Set();
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void LifecycleShutdownQueuesCleanupBehindInFlightNativeWork()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi
+                {
+                    StartEntered = new ManualResetEventSlim(false),
+                    ContinueStart = new ManualResetEventSlim(false)
+                };
+                using (nativeApi.StartEntered)
+                using (nativeApi.ContinueStart)
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+                        var controller = new TunnelLifecycleController(manager, new FakeNetworkLockApi());
+
+                        var connectTask = controller.ConnectAsync("office", false, 5000);
+                        AssertTrue(nativeApi.StartEntered.Wait(1000),
+                            "Expected the fake native connect operation to start.");
+
+                        var shutdownResult = controller.ShutdownAsync(50).GetAwaiter().GetResult();
+                        AssertTrue(shutdownResult.TimedOut,
+                            "Expected shutdown to return its own deadline while waiting behind native work.");
+                        AssertFalse(shutdownResult.Busy,
+                            "Expected shutdown cleanup to remain queued rather than being discarded as busy.");
+                        AssertTrue(shutdownResult.PendingCompletion != null,
+                            "Expected queued shutdown cleanup to expose its eventual completion.");
+
+                        var rejectedQuery = controller.GetConnectedAsync(1000).GetAwaiter().GetResult();
+                        AssertFalse(rejectedQuery.Succeeded,
+                            "Expected new native work to be rejected once shutdown begins.");
+                        AssertTrue(
+                            rejectedQuery.Diagnostic?.IndexOf(
+                                "shutting down",
+                                StringComparison.OrdinalIgnoreCase) >= 0,
+                            $"Expected an actionable shutdown rejection, got '{rejectedQuery.Diagnostic}'.");
+
+                        nativeApi.ContinueStart.Set();
+                        AssertTrue(connectTask.GetAwaiter().GetResult().Succeeded,
+                            "Expected the already-running native connect operation to finish authoritatively.");
+                        var completedShutdown = shutdownResult.PendingCompletion.GetAwaiter().GetResult();
+                        AssertTrue(completedShutdown.Succeeded,
+                            completedShutdown.Diagnostic ??
+                            "Expected queued shutdown cleanup to run after the native connect operation.");
+                        AssertFalse(manager.HasTunnelHandle,
+                            "Expected queued shutdown cleanup to release the newly created native handle.");
+                    }
+                    finally
+                    {
+                        nativeApi.ContinueStart.Set();
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void LifecycleAwaitsLateNetworkLockReset()
+        {
+            var networkLockApi = new FakeNetworkLockApi
+            {
+                Active = true,
+                ResetEntered = new ManualResetEventSlim(false),
+                ContinueReset = new ManualResetEventSlim(false)
+            };
+            using (networkLockApi.ResetEntered)
+            using (networkLockApi.ContinueReset)
+            using (var manager = new WireSockManager(new FakeWireSockNativeApi()))
+            {
+                try
+                {
+                    var controller = new TunnelLifecycleController(manager, networkLockApi);
+                    var resetResult = controller.ResetNetworkLockAsync(50).GetAwaiter().GetResult();
+                    AssertTrue(resetResult.TimedOut,
+                        "Expected the blocked network-lock reset to exceed its query timeout.");
+                    AssertTrue(networkLockApi.ResetEntered.Wait(1000),
+                        "Expected the fake network-lock reset to start.");
+
+                    var lateCompletion =
+                        NativeOperationRecoveryPolicy.AwaitTimedOutCompletionAsync(
+                            resetResult, "native network-lock reset");
+                    AssertFalse(lateCompletion.IsCompleted,
+                        "Expected recovery to retain ownership while the timed-out reset is still running.");
+
+                    networkLockApi.ContinueReset.Set();
+                    var completedResult = lateCompletion.GetAwaiter().GetResult();
+                    AssertTrue(completedResult.Succeeded,
+                        completedResult.Diagnostic ?? "Expected the late network-lock reset to remain authoritative.");
+                    AssertFalse(networkLockApi.Active,
+                        "Expected the late successful reset to clear the network lock.");
+                    AssertEqual(1, networkLockApi.ResetCount);
+                }
+                finally
+                {
+                    networkLockApi.ContinueReset.Set();
+                }
+            }
+        }
+
+        private static void LifecycleShutdownPreservesActiveLockWhenHandleCleanupFails()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi
+                {
+                    DropResult = false,
+                    DropError = 32
+                };
+                var networkLockApi = new FakeNetworkLockApi { Active = true };
+                var manager = new WireSockManager(nativeApi);
+                try
+                {
+                    TestKillSwitch = false;
+                    File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+                    AssertTrue(manager.Connect("office"), "Expected the fake tunnel to connect.");
+                    var controller = new TunnelLifecycleController(manager, networkLockApi);
+
+                    var shutdownResult = controller.ShutdownAsync(1000).GetAwaiter().GetResult();
+
+                    AssertFalse(shutdownResult.Succeeded,
+                        "Expected shutdown to report the retained native handle.");
+                    AssertFalse(shutdownResult.TimedOut,
+                        "Expected the simulated cleanup failure to complete within the shutdown budget.");
+                    AssertEqual(0, networkLockApi.QueryCount);
+                    AssertEqual(0, networkLockApi.ResetCount);
+                    AssertTrue(networkLockApi.Active,
+                        "Expected the network lock to remain active while the native tunnel handle is retained.");
+                }
+                finally
+                {
+                    nativeApi.DropResult = true;
+                    manager.Disconnect();
+                    manager.Dispose();
+                    TestKillSwitch = originalKillSwitch;
+                }
+            });
+        }
+
+        private static void LifecycleShutdownResetsPreservedLockAfterReleaseRetry()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi { ReleaseFailuresRemaining = 1 };
+                var networkLockApi = new FakeNetworkLockApi { Active = true };
+                var manager = new WireSockManager(nativeApi);
+                try
+                {
+                    TestKillSwitch = false;
+                    File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+                    var controller = new TunnelLifecycleController(manager, networkLockApi);
+                    AssertTrue(manager.Connect("office"), "Expected the fake tunnel to connect.");
+                    AssertFalse(manager.Disconnect(true),
+                        "Expected the preserved drop to retain the handle after release_handle failed.");
+                    AssertTrue(manager.HasTunnelHandle,
+                        "Expected the dropped handle to remain available for a release-only shutdown retry.");
+                    AssertEqual(1, nativeApi.DropCount);
+                    AssertTrue(nativeApi.LastPreserveNetworkLock == true,
+                        "Expected the first native drop to preserve the global network lock.");
+
+                    var shutdownResult = controller.ShutdownAsync(1000).GetAwaiter().GetResult();
+
+                    AssertTrue(shutdownResult.Succeeded,
+                        shutdownResult.Diagnostic ??
+                        "Expected shutdown to release the dropped handle and reset its preserved lock.");
+                    AssertFalse(manager.HasTunnelHandle,
+                        "Expected shutdown's release-only retry to clear the native handle.");
+                    AssertEqual(1, nativeApi.DropCount);
+                    AssertEqual(2, nativeApi.ReleaseCount);
+                    AssertEqual(1, networkLockApi.QueryCount);
+                    AssertEqual(1, networkLockApi.ResetCount);
+                    AssertFalse(networkLockApi.Active,
+                        "Expected shutdown to clear the network lock preserved by the earlier drop.");
+                }
+                finally
+                {
+                    manager.Dispose();
+                    TestKillSwitch = originalKillSwitch;
+                }
+            });
+        }
+
+        private static void LifecycleShutdownAvoidsSynchronizationContextDeadlocks()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi
+                {
+                    DropEntered = new ManualResetEventSlim(false),
+                    ContinueDrop = new ManualResetEventSlim(false)
+                };
+                using (nativeApi.DropEntered)
+                using (nativeApi.ContinueDrop)
+                using (var completion = new ManualResetEventSlim(false))
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+                        var controller = new TunnelLifecycleController(manager, new FakeNetworkLockApi());
+                        AssertTrue(manager.Connect("office"), "Expected the fake tunnel to connect.");
+
+                        NativeOperationResult<bool> shutdownResult = null;
+                        Exception shutdownException = null;
+                        var shutdownThread = new Thread(() =>
+                        {
+                            SynchronizationContext.SetSynchronizationContext(
+                                new NonPumpingSynchronizationContext());
+                            try
+                            {
+                                shutdownResult = controller.ShutdownAsync(100).GetAwaiter().GetResult();
+                            }
+                            catch (Exception ex)
+                            {
+                                shutdownException = ex;
+                            }
+                            finally
+                            {
+                                SynchronizationContext.SetSynchronizationContext(null);
+                                completion.Set();
+                            }
+                        })
+                        {
+                            IsBackground = true
+                        };
+
+                        shutdownThread.Start();
+                        AssertTrue(nativeApi.DropEntered.Wait(1000),
+                            "Expected the fake native shutdown cleanup to start.");
+
+                        var completedWithoutPumping = completion.Wait(2000);
+                        nativeApi.ContinueDrop.Set();
+
+                        AssertTrue(completedWithoutPumping,
+                            "Expected shutdown timeout handling not to require a synchronization-context pump.");
+                        if (shutdownException != null)
+                            throw new InvalidOperationException("The shutdown workflow failed unexpectedly.",
+                                shutdownException);
+
+                        AssertTrue(shutdownResult != null && shutdownResult.TimedOut,
+                            "Expected the blocked native shutdown cleanup to return a timeout result.");
+                        AssertTrue(shutdownResult.PendingCompletion != null,
+                            "Expected the timed-out shutdown to retain its late completion task.");
+                        AssertTrue(shutdownResult.PendingCompletion.GetAwaiter().GetResult().Succeeded,
+                            "Expected the released native shutdown cleanup to complete successfully.");
+                        AssertTrue(shutdownThread.Join(1000),
+                            "Expected the synchronous shutdown caller to exit after receiving the timeout result.");
+                    }
+                    finally
+                    {
+                        nativeApi.ContinueDrop.Set();
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void WireSockManagerSurfacesNativeQueryFailures()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi();
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+                        AssertTrue(manager.Connect("office"), "Expected the fake tunnel to connect.");
+
+                        nativeApi.TunnelActive = false;
+                        nativeApi.TunnelActiveError = 5;
+                        AssertFalse(manager.TryGetConnected(out _, out var activeDiagnostic),
+                            "Expected the manager to reject a false tunnel sentinel with a native error.");
+                        AssertTrue(activeDiagnostic?.Contains("5") == true,
+                            "Expected the tunnel query diagnostic to retain the native error.");
+
+                        nativeApi.NetworkLockMode = WireguardBoosterExports.WgbNetworkLockMode.Disabled;
+                        nativeApi.NetworkLockModeError = 6;
+                        AssertFalse(manager.TryGetKillSwitchEnabled(out _, out var lockDiagnostic),
+                            "Expected the manager to reject a disabled lock sentinel with a native error.");
+                        AssertTrue(lockDiagnostic?.Contains("6") == true,
+                            "Expected the lock query diagnostic to retain the native error.");
+
+                        nativeApi.NetworkLockMode = (WireguardBoosterExports.WgbNetworkLockMode)99;
+                        nativeApi.NetworkLockModeError = 0;
+                        AssertFalse(manager.TryGetKillSwitchEnabled(out _, out var invalidModeDiagnostic),
+                            "Expected the manager to reject unknown SDK network-lock enum values.");
+                        AssertTrue(invalidModeDiagnostic?.Contains("99") == true,
+                            "Expected the invalid SDK enum value in the diagnostic.");
+
+                        nativeApi.TunnelState = new WireguardBoosterExports.WgbStats();
+                        nativeApi.TunnelStateError = 21;
+                        AssertFalse(manager.TryGetState(out _, out var statsDiagnostic),
+                            "Expected the manager to reject empty statistics with a native error.");
+                        AssertTrue(statsDiagnostic?.Contains("21") == true,
+                            "Expected the statistics diagnostic to retain the native error.");
+                    }
+                    finally
+                    {
+                        nativeApi.TunnelActiveError = 0;
+                        nativeApi.NetworkLockModeError = 0;
+                        nativeApi.TunnelStateError = 0;
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void WireSockManagerCleansUpFailedStarts()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi
+                {
+                    StartResult = false,
+                    StartError = 31
+                };
+
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+
+                        AssertFalse(manager.Connect("office"), "Expected the failed native start to fail connect.");
+                        AssertFalse(manager.HasTunnelHandle, "Expected failed connect cleanup to clear the handle.");
+                        AssertTrue(nativeApi.DropCount == 1, "Expected failed connect cleanup to drop the tunnel once.");
+                        AssertTrue(nativeApi.ReleaseCount == 1,
+                            "Expected failed connect cleanup to release its independently owned SDK handle.");
+                        AssertFalse(nativeApi.LastEnableAnalytics,
+                            "Expected WireSock UI to disable SDK analytics unless the user explicitly opts in.");
+                        AssertTrue(manager.LastError?.Contains("31") == true,
+                            "Expected the native start error in the connection diagnostic.");
+                    }
+                    finally
+                    {
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void WireSockManagerRetainsHandlesWhenCleanupFails()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi
+                {
+                    StartResult = false,
+                    StartError = 31,
+                    DropResult = false,
+                    DropError = 32
+                };
+                var manager = new WireSockManager(nativeApi);
+
+                try
+                {
+                    TestKillSwitch = false;
+                    File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+
+                    AssertFalse(manager.Connect("office"), "Expected the failed native start to fail connect.");
+                    AssertTrue(manager.HasTunnelHandle,
+                        "Expected failed cleanup to retain the native handle and prevent duplicate ownership.");
+                    AssertTrue(manager.LastError?.Contains("blocked") == true,
+                        "Expected the connection diagnostic to explain that replacement connections are blocked.");
+                    AssertTrue(manager.LastError?.Contains("32") == true,
+                        "Expected the native drop error in the retained-handle diagnostic.");
+
+                    AssertFalse(manager.Connect("office"),
+                        "Expected a second connect to stop when the retained handle still cannot be dropped.");
+                    AssertTrue(nativeApi.GetHandleCount == 1,
+                        "Expected the manager not to allocate a replacement native handle after failed cleanup.");
+
+                    nativeApi.DropResult = true;
+                    nativeApi.DropError = 0;
+                    AssertTrue(manager.Disconnect(), "Expected retained-handle cleanup to be retryable.");
+                    AssertFalse(manager.HasTunnelHandle, "Expected successful retry cleanup to clear the handle.");
+                    AssertEqual(1, nativeApi.ReleaseCount);
+                }
+                finally
+                {
+                    nativeApi.DropResult = true;
+                    nativeApi.DropError = 0;
+                    manager.Dispose();
+                    TestKillSwitch = originalKillSwitch;
+                }
+            });
+        }
+
+        private static void WireSockManagerRetriesReleaseWithoutDroppingTwice()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi { ReleaseFailuresRemaining = 1 };
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+
+                        AssertTrue(manager.Connect("office"), "Expected the fake tunnel to connect.");
+                        AssertFalse(manager.Disconnect(),
+                            "Expected the first release attempt to retain the independently owned handle.");
+                        AssertTrue(manager.HasTunnelHandle,
+                            "Expected a failed release_handle call to keep the handle available for retry.");
+                        AssertEqual(1, nativeApi.DropCount);
+
+                        AssertTrue(manager.Disconnect(), "Expected the release-only retry to succeed.");
+                        AssertFalse(manager.HasTunnelHandle, "Expected the successful release retry to clear the handle.");
+                        AssertEqual(1, nativeApi.DropCount);
+                        AssertEqual(2, nativeApi.ReleaseCount);
+                    }
+                    finally
+                    {
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void WireSockManagerQuarantinesDroppedHandles()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi { ReleaseFailuresRemaining = 1 };
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+
+                        AssertThrows<ArgumentOutOfRangeException>(
+                            () => manager.TunnelMode = WireSockManager.Mode.Undefined, "must be");
+                        AssertTrue(manager.Connect("office"), "Expected the fake tunnel to connect.");
+                        AssertFalse(manager.Disconnect(), "Expected the first release attempt to fail.");
+
+                        AssertFalse(manager.TryGetConnected(out _, out var connectedDiagnostic),
+                            "Expected active-state queries to reject a dropped handle.");
+                        AssertTrue(connectedDiagnostic.Contains("already dropped"),
+                            "Expected a useful dropped-handle active-state diagnostic.");
+                        AssertFalse(manager.TryGetState(out _, out var stateDiagnostic),
+                            "Expected statistics queries to reject a dropped handle.");
+                        AssertTrue(stateDiagnostic.Contains("already dropped"),
+                            "Expected a useful dropped-handle statistics diagnostic.");
+                        AssertFalse(manager.TryGetKillSwitchEnabled(out _, out var lockDiagnostic),
+                            "Expected network-lock queries to reject a dropped handle.");
+                        AssertTrue(lockDiagnostic.Contains("already dropped"),
+                            "Expected a useful dropped-handle network-lock diagnostic.");
+                        AssertThrows<InvalidOperationException>(
+                            () => manager.LogLevel = WireguardBoosterExports.WgbLogLevel.Debug, "already dropped");
+                        AssertThrows<InvalidOperationException>(() => manager.KillSwitchEnabled = true,
+                            "already dropped");
+
+                        AssertEqual(0, nativeApi.TunnelActiveQueryCount);
+                        AssertEqual(0, nativeApi.TunnelStateQueryCount);
+                        AssertEqual(0, nativeApi.NetworkLockQueryCount);
+                        AssertEqual(0, nativeApi.SetLogLevelCount);
+                        AssertEqual(0, nativeApi.SetNetworkLockCount);
+
+                        AssertTrue(manager.Disconnect(), "Expected a release-only retry to clean up the handle.");
+                        manager.Dispose();
+                        AssertFalse(manager.TryGetConnected(out _, out var disposedDiagnostic),
+                            "Expected queries on a disposed manager to fail explicitly.");
+                        AssertTrue(disposedDiagnostic.Contains("disposed"),
+                            "Expected a useful disposed-manager diagnostic.");
+                    }
+                    finally
+                    {
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void TunnelMonitorStopsAfterBoundedQueryTimeout()
+        {
+            var generation = 1;
+            var queryCount = 0;
+            var pendingQuery = new TaskCompletionSource<NativeOperationResult<bool>>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var updateSource = new TaskCompletionSource<TunnelMonitorUpdate>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            using (var monitor = new TunnelMonitor(
+                       _ =>
+                       {
+                           Interlocked.Increment(ref queryCount);
+                           return Task.FromResult(NativeOperationResult<bool>.Timeout(
+                               "simulated native query timeout", pendingQuery.Task));
+                       },
+                       _ => Task.FromResult(NativeOperationResult<WireguardBoosterExports.WgbStats>.Success(
+                           new WireguardBoosterExports.WgbStats())),
+                       () => generation,
+                       update =>
+                       {
+                           updateSource.TrySetResult(update);
+                           return Task.CompletedTask;
+                       },
+                       10,
+                       100,
+                       1,
+                       1))
+            {
+                monitor.StartConnected(generation);
+                AssertTrue(updateSource.Task.Wait(2000), "Expected the monitor to report the timed-out query.");
+
+                var update = updateSource.Task.GetAwaiter().GetResult();
+                AssertEqual((int)TunnelMonitorUpdateKind.QueryFailed, (int)update.Kind);
+                AssertTrue(update.ConnectionQuery?.TimedOut == true,
+                    "Expected the complete timeout result, including pending completion, to be preserved.");
+
+                Thread.Sleep(25);
+                AssertEqual(1, Volatile.Read(ref queryCount));
+                pendingQuery.TrySetResult(NativeOperationResult<bool>.Failure("simulated completion"));
+            }
+        }
+
+        private static void TunnelMonitorBoundsBusyConnectingState()
+        {
+            var generation = 1;
+            var queryCount = 0;
+            var updateSource = new TaskCompletionSource<TunnelMonitorUpdate>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            using (var monitor = new TunnelMonitor(
+                       _ =>
+                       {
+                           Interlocked.Increment(ref queryCount);
+                           return Task.FromResult(NativeOperationResult<bool>.OperationBusy(
+                               "simulated busy native scheduler"));
+                       },
+                       _ => Task.FromResult(NativeOperationResult<WireguardBoosterExports.WgbStats>.Success(
+                           new WireguardBoosterExports.WgbStats())),
+                       () => generation,
+                       update =>
+                       {
+                           updateSource.TrySetResult(update);
+                           return Task.CompletedTask;
+                       },
+                       10,
+                       25,
+                       1,
+                       1))
+            {
+                monitor.StartConnecting(generation);
+                AssertTrue(updateSource.Task.Wait(2000),
+                    "Expected a continuously busy native scheduler to reach the connection deadline.");
+
+                var update = updateSource.Task.GetAwaiter().GetResult();
+                AssertEqual((int)TunnelMonitorUpdateKind.ConnectionTimedOut, (int)update.Kind);
+                AssertTrue(Volatile.Read(ref queryCount) > 0,
+                    "Expected the connection monitor to poll before reporting its bounded timeout.");
+            }
+        }
+
+        private static void ProgramReportsAttributeInspectionFailures()
+        {
+            var missingPath = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", $"{Guid.NewGuid():N}.dll");
+            AssertFalse(WireSockUI.Program.TryGetExistingAttributes(
+                    missingPath, out _, out var missingDiagnostic),
+                "Expected missing attribute inspection targets to fail.");
+            AssertTrue(missingDiagnostic == null,
+                $"Expected missing attribute inspection targets to remain silent, got '{missingDiagnostic}'.");
+
+            var malformedPath = "invalid\0wgbooster.dll";
+
+            AssertFalse(WireSockUI.Program.TryGetExistingAttributes(
+                    malformedPath, out _, out var diagnostic),
+                "Expected malformed attribute inspection to fail.");
+            AssertTrue(!string.IsNullOrWhiteSpace(diagnostic),
+                "Expected unexpected attribute inspection failures to produce a diagnostic.");
+            AssertTrue(diagnostic.IndexOf("Unable to inspect file system attributes",
+                           StringComparison.OrdinalIgnoreCase) >= 0,
+                $"Expected an actionable attribute inspection diagnostic, got '{diagnostic}'.");
+            AssertFalse(diagnostic.Contains("\0"),
+                $"Expected attribute inspection diagnostics to escape embedded NULs, got '{diagnostic}'.");
+            AssertTrue(diagnostic.Contains("\\0"),
+                $"Expected attribute inspection diagnostics to include the escaped NUL marker, got '{diagnostic}'.");
+
+            AssertFalse(WireSockUI.Program.TryValidateApplicationPayloadDirectory(
+                    malformedPath, out var payloadDiagnostic),
+                "Expected malformed application payload paths to fail validation.");
+            AssertTrue(payloadDiagnostic.IndexOf("Unable to inspect file system attributes",
+                           StringComparison.OrdinalIgnoreCase) >= 0,
+                $"Expected payload validation to preserve the attribute diagnostic, got '{payloadDiagnostic}'.");
+            AssertFalse(payloadDiagnostic.Contains("\0"),
+                $"Expected payload diagnostics to escape embedded NULs, got '{payloadDiagnostic}'.");
+            AssertTrue(payloadDiagnostic.Contains("\\0"),
+                $"Expected payload diagnostics to include the escaped NUL marker, got '{payloadDiagnostic}'.");
+
+            const string sdkDirectory = "sdk\nfolder";
+            AssertFalse(WireSockUI.Program.TryValidateTrustedWireSockCompanionFiles(
+                    sdkDirectory, "wgbooster.dll", out var sdkDiagnostic),
+                "Expected missing SDK directories to fail validation.");
+            AssertFalse(sdkDiagnostic.Contains("\n"),
+                $"Expected SDK diagnostics to escape embedded line breaks, got '{sdkDiagnostic}'.");
+            AssertTrue(sdkDiagnostic.Contains("\\n"),
+                $"Expected SDK diagnostics to include the escaped line-break marker, got '{sdkDiagnostic}'.");
+
+            const string surrogateSdkDirectory = "sdk\uD800folder";
+            AssertFalse(WireSockUI.Program.TryValidateTrustedWireSockCompanionFiles(
+                    surrogateSdkDirectory, "wgbooster.dll", out var surrogateDiagnostic),
+                "Expected malformed SDK directories to fail validation.");
+            AssertFalse(surrogateDiagnostic.Any(char.IsSurrogate),
+                $"Expected SDK diagnostics to escape surrogate code units, got '{surrogateDiagnostic}'.");
+            AssertTrue(surrogateDiagnostic.Contains("\\uD800"),
+                $"Expected SDK diagnostics to include the escaped surrogate marker, got '{surrogateDiagnostic}'.");
+        }
+
+        private static void TunnelMonitorPreservesStatisticsQueryTimeouts()
+        {
+            var generation = 1;
+            var pendingQuery = new TaskCompletionSource<NativeOperationResult<WireguardBoosterExports.WgbStats>>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var updateSource = new TaskCompletionSource<TunnelMonitorUpdate>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            using (var monitor = new TunnelMonitor(
+                       _ => Task.FromResult(NativeOperationResult<bool>.Success(true)),
+                       _ => Task.FromResult(NativeOperationResult<WireguardBoosterExports.WgbStats>.Timeout(
+                           "simulated statistics timeout", pendingQuery.Task)),
+                       () => generation,
+                       update =>
+                       {
+                           updateSource.TrySetResult(update);
+                           return Task.CompletedTask;
+                       },
+                       10,
+                       100,
+                       1,
+                       1))
+            {
+                monitor.StartConnected(generation);
+                AssertTrue(updateSource.Task.Wait(2000),
+                    "Expected the monitor to report the timed-out statistics query.");
+
+                var update = updateSource.Task.GetAwaiter().GetResult();
+                AssertEqual((int)TunnelMonitorUpdateKind.QueryFailed, (int)update.Kind);
+                AssertTrue(update.StatisticsQuery?.TimedOut == true,
+                    "Expected the statistics timeout and pending completion to be preserved.");
+                pendingQuery.TrySetResult(
+                    NativeOperationResult<WireguardBoosterExports.WgbStats>.Failure("simulated completion"));
+            }
+        }
+
+        private static void TunnelMonitorSuppressesCanceledQueryUpdates()
+        {
+            var generation = 1;
+            var queryStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var queryCompletion = new TaskCompletionSource<NativeOperationResult<bool>>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var updateCount = 0;
+
+            using (var monitor = new TunnelMonitor(
+                       _ =>
+                       {
+                           queryStarted.TrySetResult(true);
+                           return queryCompletion.Task;
+                       },
+                       _ => Task.FromResult(NativeOperationResult<WireguardBoosterExports.WgbStats>.Success(
+                           new WireguardBoosterExports.WgbStats())),
+                       () => generation,
+                       _ =>
+                       {
+                           Interlocked.Increment(ref updateCount);
+                           return Task.CompletedTask;
+                       },
+                       100,
+                       100,
+                       1,
+                       1))
+            {
+                monitor.StartConnected(generation);
+                AssertTrue(queryStarted.Task.Wait(2000), "Expected the native query to start.");
+
+                monitor.Cancel();
+                queryCompletion.TrySetResult(NativeOperationResult<bool>.Success(false));
+                Thread.Sleep(25);
+
+                AssertEqual(0, Volatile.Read(ref updateCount));
+            }
+        }
+
+        private static void TunnelMonitorClassifiesUnexpectedStatisticsFailures()
+        {
+            var generation = 1;
+            var updateSource = new TaskCompletionSource<TunnelMonitorUpdate>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            using (var monitor = new TunnelMonitor(
+                       _ => Task.FromResult(NativeOperationResult<bool>.Success(true)),
+                       _ => Task.FromException<NativeOperationResult<WireguardBoosterExports.WgbStats>>(
+                           new InvalidOperationException("simulated statistics failure")),
+                       () => generation,
+                       update =>
+                       {
+                           updateSource.TrySetResult(update);
+                           return Task.CompletedTask;
+                       },
+                       100,
+                       100,
+                       1,
+                       1))
+            {
+                monitor.StartConnected(generation);
+                AssertTrue(updateSource.Task.Wait(2000),
+                    "Expected the monitor to report the unexpected statistics failure.");
+
+                var update = updateSource.Task.GetAwaiter().GetResult();
+                AssertTrue(update.ConnectionQuery == null,
+                    "Expected a statistics failure not to be classified as a connection query failure.");
+                AssertTrue(update.StatisticsQuery?.Succeeded == false,
+                    "Expected the unexpected failure to retain statistics-query context.");
+                AssertTrue(update.StatisticsQuery.Diagnostic.Contains(nameof(InvalidOperationException)),
+                    "Expected the unexpected failure diagnostic to preserve the exception type.");
+                AssertTrue(update.StatisticsQuery.Diagnostic.Contains("simulated statistics failure"),
+                    "Expected the original statistics failure diagnostic to be preserved.");
+            }
+
+            var emptyMessageDiagnostic = TunnelMonitor.FormatUnexpectedFailureDiagnostic(
+                "Tunnel state monitor", new InvalidOperationException(string.Empty));
+            AssertEqual("Tunnel state monitor stopped unexpectedly (InvalidOperationException).",
+                emptyMessageDiagnostic);
+
+            var malformedMessageDiagnostic = TunnelMonitor.FormatUnexpectedFailureDiagnostic(
+                "Tunnel state monitor", new InvalidOperationException("invalid\0state"));
+            AssertFalse(malformedMessageDiagnostic.Contains("\0"),
+                "Expected unexpected monitor failure diagnostics to escape embedded NULs.");
+            AssertTrue(malformedMessageDiagnostic.Contains("invalid\\0state"),
+                "Expected unexpected monitor failure diagnostics to preserve the escaped message.");
+        }
+
+        private static void TunnelMonitorHandlerFailuresFailClosed()
+        {
+            string recoveryDiagnostic = null;
+            var recoveryRequired = FrmMain.TryRequireTunnelMonitorRecovery(
+                new InvalidOperationException("simulated UI handler failure"),
+                "tunnel monitor update handling failure",
+                () => true,
+                diagnostic => recoveryDiagnostic = diagnostic);
+
+            AssertTrue(recoveryRequired,
+                "Expected an active monitor-handler failure to require native recovery.");
+            AssertTrue(recoveryDiagnostic != null &&
+                       recoveryDiagnostic.Contains("tunnel monitor update handling failure") &&
+                       recoveryDiagnostic.Contains("simulated UI handler failure"),
+                "Expected fail-closed recovery to retain actionable handler context.");
+
+            recoveryDiagnostic = null;
+            recoveryRequired = FrmMain.TryRequireTunnelMonitorRecovery(
+                new InvalidOperationException("stale handler failure"),
+                "tunnel monitor update handling failure",
+                () => false,
+                diagnostic => recoveryDiagnostic = diagnostic);
+            AssertFalse(recoveryRequired,
+                "Expected stale or shutdown monitor callbacks not to alter recovery state.");
+            AssertTrue(recoveryDiagnostic == null,
+                "Expected a suppressed stale failure not to invoke recovery.");
+        }
+
+        private static void TunnelMonitorUiDispatchAwaitsMarshaledUpdates()
+        {
+            var actionStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var actionRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var synchronizer = new QueuedSynchronizeInvoke();
+            try
+            {
+                var dispatchTask = FrmMain.InvokeOnUiThreadAsync(synchronizer, async () =>
+                {
+                    actionStarted.TrySetResult(true);
+                    await actionRelease.Task;
+                },
+                Thread.CurrentThread.ManagedThreadId + 1,
+                () => true,
+                CancellationToken.None,
+                Timeout.Infinite);
+
+                AssertFalse(actionStarted.Task.IsCompleted, "Expected the queued UI callback not to run early.");
+
+                synchronizer.RunCallback();
+                AssertTrue(actionStarted.Task.Wait(2000), "Expected the marshaled UI callback to start.");
+                AssertFalse(dispatchTask.IsCompleted,
+                    "Expected the dispatch task to wait for the asynchronous UI callback.");
+
+                actionRelease.TrySetResult(true);
+                AssertTrue(dispatchTask.Wait(2000),
+                    "Expected the dispatch task to complete with the UI callback.");
+            }
+            finally
+            {
+                actionRelease.TrySetResult(true);
+            }
+        }
+
+        private static void UiDispatchNeverRunsInlineOnWorkerWithoutHandle()
+        {
+            var uiThreadId = Thread.CurrentThread.ManagedThreadId;
+            var actionCount = 0;
+            var synchronizer = new QueuedSynchronizeInvoke(invokeRequired: false);
+
+            var dispatched = Task.Run(() => FrmMain.TryDispatchOnUiThread(
+                    synchronizer,
+                    () => Interlocked.Increment(ref actionCount),
+                    uiThreadId,
+                    isHandleCreated: false,
+                    CancellationToken.None))
+                .GetAwaiter()
+                .GetResult();
+
+            AssertFalse(dispatched,
+                "Expected a worker callback without a live UI handle not to be dispatched.");
+            AssertEqual(0, Volatile.Read(ref actionCount));
+            AssertEqual(0, synchronizer.BeginInvokeCount);
+
+            var asyncActionCount = 0;
+            AssertThrows<InvalidOperationException>(
+                () => Task.Run(() => FrmMain.InvokeOnUiThreadAsync(
+                        synchronizer,
+                        () =>
+                        {
+                            Interlocked.Increment(ref asyncActionCount);
+                            return Task.CompletedTask;
+                        },
+                        uiThreadId,
+                        () => false,
+                        CancellationToken.None,
+                        Timeout.Infinite))
+                    .GetAwaiter()
+                    .GetResult(),
+                "live window handle");
+            AssertEqual(0, Volatile.Read(ref asyncActionCount));
+            AssertEqual(0, synchronizer.BeginInvokeCount);
+
+            var destroyedSynchronizer = new QueuedSynchronizeInvoke
+            {
+                BeginInvokeException = new InvalidOperationException("dispatcher destroyed")
+            };
+            AssertThrows<InvalidOperationException>(
+                () => Task.Run(() => FrmMain.InvokeOnUiThreadAsync(
+                        destroyedSynchronizer,
+                        () =>
+                        {
+                            Interlocked.Increment(ref asyncActionCount);
+                            return Task.CompletedTask;
+                        },
+                        uiThreadId,
+                        () => true,
+                        CancellationToken.None,
+                        Timeout.Infinite))
+                    .GetAwaiter()
+                    .GetResult(),
+                "dispatcher destroyed");
+            AssertEqual(0, Volatile.Read(ref asyncActionCount));
+
+            using (var handleGenerationCancellation = new CancellationTokenSource())
+            {
+                var canceledActionCount = 0;
+                var canceledDispatch = FrmMain.InvokeOnUiThreadAsync(
+                    synchronizer,
+                    () =>
+                    {
+                        Interlocked.Increment(ref canceledActionCount);
+                        return Task.CompletedTask;
+                    },
+                    uiThreadId + 1,
+                    () => true,
+                    handleGenerationCancellation.Token,
+                    Timeout.Infinite);
+
+                handleGenerationCancellation.Cancel();
+                AssertThrows<OperationCanceledException>(
+                    () => canceledDispatch.GetAwaiter().GetResult(),
+                    string.Empty);
+                synchronizer.RunCallback();
+                AssertEqual(0, Volatile.Read(ref canceledActionCount));
+            }
+        }
+
+        private static void WireSockManagerBoundsNativeLogBackpressure()
+        {
+            var callbackEntered = new ManualResetEventSlim();
+            var releaseCallback = new ManualResetEventSlim();
+            var finalMessageReceived = new ManualResetEventSlim();
+            var messages = new List<string>();
+            var syncRoot = new object();
+
+            using (var manager = new WireSockManager(
+                       new FakeWireSockNativeApi(),
+                       message =>
+                       {
+                           lock (syncRoot)
+                               messages.Add(message.Message);
+
+                           if (message.Message == "blocked")
+                           {
+                               callbackEntered.Set();
+                               releaseCallback.Wait(5000);
+                           }
+                           else if (message.Message == "message-2499")
+                           {
+                               finalMessageReceived.Set();
+                           }
+                       }))
+            {
+                var printLog = typeof(WireSockManager).GetMethod(
+                    "PrintLog",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                AssertTrue(printLog != null, "Expected the private log queue entry point to exist.");
+
+                printLog.Invoke(manager, new object[] { "blocked" });
+                AssertTrue(callbackEntered.Wait(2000), "Expected the log worker callback to start.");
+
+                for (var index = 0; index < 2500; index++)
+                    printLog.Invoke(manager, new object[] { $"message-{index}" });
+
+                releaseCallback.Set();
+                AssertTrue(finalMessageReceived.Wait(5000), "Expected the bounded log queue to drain.");
+
+                string[] captured;
+                lock (syncRoot)
+                    captured = messages.ToArray();
+
+                AssertEqual(1002, captured.Length);
+                AssertTrue(captured[1].Contains("1500 messages dropped"),
+                    "Expected the manager queue to report its exact drop count.");
+                AssertEqual("message-1500", captured[2]);
+                AssertEqual("message-2499", captured[captured.Length - 1]);
+            }
+        }
+
+        private static void WireSockManagerBoundsRetainedLogRecords()
+        {
+            AssertEqual(string.Empty, WireSockManager.BoundLogMessage(null));
+            AssertEqual("short message", WireSockManager.BoundLogMessage("short message"));
+
+            var oversizedMessage = new string('x', WireSockManager.MaximumRetainedLogMessageCharacters + 100);
+            var boundedMessage = WireSockManager.BoundLogMessage(oversizedMessage);
+            AssertEqual(WireSockManager.MaximumRetainedLogMessageCharacters, boundedMessage.Length);
+            AssertTrue(boundedMessage.EndsWith("[truncated]", StringComparison.Ordinal),
+                "Expected oversized native records to carry an explicit truncation diagnostic.");
+
+            const string suffix = " ... [truncated]";
+            var retainedLength = WireSockManager.MaximumRetainedLogMessageCharacters - suffix.Length;
+            var surrogateBoundaryMessage = new string('x', retainedLength - 1) +
+                                           char.ConvertFromUtf32(0x1F600) +
+                                           new string('y', suffix.Length + 10);
+            var surrogateSafeMessage = WireSockManager.BoundLogMessage(surrogateBoundaryMessage);
+            new UTF8Encoding(false, true).GetBytes(surrogateSafeMessage);
+            AssertTrue(surrogateSafeMessage.Length <= WireSockManager.MaximumRetainedLogMessageCharacters,
+                "Expected truncation not to retain a dangling UTF-16 surrogate.");
+        }
+
+        private static void UiLogBufferingCoalescesAndBoundsDispatch()
+        {
+            var scheduled = new Queue<Action>();
+            var consumed = new List<WireSockManager.LogMessage>();
+            var scheduleCount = 0;
+            using (var buffer = new UiLogMessageBuffer(
+                       1000,
+                       128,
+                       action =>
+                       {
+                           scheduleCount++;
+                           scheduled.Enqueue(action);
+                           return true;
+                       },
+                       batch => consumed.AddRange(batch)))
+            {
+                for (var index = 0; index < 10000; index++)
+                    buffer.Enqueue(new WireSockManager.LogMessage { Message = $"message-{index}" });
+
+                AssertEqual(1, scheduleCount);
+                AssertEqual(1, scheduled.Count);
+
+                while (scheduled.Count > 0)
+                    scheduled.Dequeue()();
+
+                AssertTrue(scheduleCount <= 9,
+                    $"Expected batched UI dispatch, but {scheduleCount} callbacks were scheduled.");
+                AssertEqual(1001, consumed.Count);
+                AssertTrue(consumed[0].Message.Contains("dropped 9000"),
+                    "Expected the bounded UI queue to report the exact number of dropped messages.");
+                AssertEqual("message-9000", consumed[1].Message);
+                AssertEqual("message-9999", consumed[consumed.Count - 1].Message);
+
+                buffer.Dispose();
+                buffer.Enqueue(new WireSockManager.LogMessage { Message = "late message" });
+                AssertEqual(0, scheduled.Count);
+            }
+
+            var recoveryDispatches = new Queue<Action>();
+            var recoveredMessages = new List<WireSockManager.LogMessage>();
+            var failFirstBatch = true;
+            using (var buffer = new UiLogMessageBuffer(
+                       4,
+                       2,
+                       action =>
+                       {
+                           recoveryDispatches.Enqueue(action);
+                           return true;
+                       },
+                       batch =>
+                       {
+                           if (failFirstBatch)
+                           {
+                               failFirstBatch = false;
+                               throw new InvalidOperationException("consumer failed");
+                           }
+
+                           recoveredMessages.AddRange(batch);
+                       }))
+            {
+                buffer.Enqueue(new WireSockManager.LogMessage { Message = "first" });
+                buffer.Enqueue(new WireSockManager.LogMessage { Message = "second" });
+                buffer.Enqueue(new WireSockManager.LogMessage { Message = "third" });
+
+                AssertThrows<InvalidOperationException>(() => recoveryDispatches.Dequeue()(), "consumer failed");
+                AssertEqual(1, recoveryDispatches.Count);
+                recoveryDispatches.Dequeue()();
+                AssertEqual(1, recoveredMessages.Count);
+                AssertEqual("third", recoveredMessages[0].Message);
+            }
+
+            var retryDispatches = new Queue<Action>();
+            var retriedMessages = new List<WireSockManager.LogMessage>();
+            var schedulingAvailable = false;
+            using (var buffer = new UiLogMessageBuffer(
+                       4,
+                       2,
+                       action =>
+                       {
+                           if (!schedulingAvailable)
+                               return false;
+
+                           retryDispatches.Enqueue(action);
+                           return true;
+                       },
+                       batch => retriedMessages.AddRange(batch)))
+            {
+                buffer.Enqueue(new WireSockManager.LogMessage { Message = "before-handle" });
+                AssertEqual(0, retryDispatches.Count);
+
+                schedulingAvailable = true;
+                buffer.RetryPendingDispatch();
+                AssertEqual(1, retryDispatches.Count);
+                retryDispatches.Dequeue()();
+                AssertEqual(1, retriedMessages.Count);
+                AssertEqual("before-handle", retriedMessages[0].Message);
+            }
+
+            var throwingDispatches = new Queue<Action>();
+            var messagesAfterScheduleFailure = new List<WireSockManager.LogMessage>();
+            var throwWhileScheduling = true;
+            using (var buffer = new UiLogMessageBuffer(
+                       4,
+                       2,
+                       action =>
+                       {
+                           if (throwWhileScheduling)
+                               throw new InvalidOperationException("dispatcher unavailable");
+
+                           throwingDispatches.Enqueue(action);
+                           return true;
+                       },
+                       batch => messagesAfterScheduleFailure.AddRange(batch)))
+            {
+                buffer.Enqueue(new WireSockManager.LogMessage { Message = "after-schedule-failure" });
+                AssertEqual(0, throwingDispatches.Count);
+
+                throwWhileScheduling = false;
+                buffer.RetryPendingDispatch();
+                AssertEqual(1, throwingDispatches.Count);
+                throwingDispatches.Dequeue()();
+                AssertEqual(1, messagesAfterScheduleFailure.Count);
+                AssertEqual("after-schedule-failure", messagesAfterScheduleFailure[0].Message);
+            }
+
+            var clearDispatches = new Queue<Action>();
+            var messagesAfterClear = new List<WireSockManager.LogMessage>();
+            using (var buffer = new UiLogMessageBuffer(
+                       4,
+                       2,
+                       action =>
+                       {
+                           clearDispatches.Enqueue(action);
+                           return true;
+                       },
+                       batch => messagesAfterClear.AddRange(batch)))
+            {
+                buffer.Enqueue(new WireSockManager.LogMessage { Message = "before-clear" });
+                buffer.Clear();
+                clearDispatches.Dequeue()();
+                AssertEqual(0, messagesAfterClear.Count);
+
+                buffer.Enqueue(new WireSockManager.LogMessage { Message = "after-clear" });
+                clearDispatches.Dequeue()();
+                AssertEqual(1, messagesAfterClear.Count);
+                AssertEqual("after-clear", messagesAfterClear[0].Message);
+            }
+        }
+
+        private static void UiLogPresentationFiltersNoisyNativeRecords()
+        {
+            var error = WireguardBoosterExports.WgbLogLevel.Error;
+            var warning = WireguardBoosterExports.WgbLogLevel.Warning;
+            var info = WireguardBoosterExports.WgbLogLevel.Info;
+            var debug = WireguardBoosterExports.WgbLogLevel.Debug;
+
+            AssertFalse(UiLogMessagePresentation.ShouldDisplay(
+                    "{\"message\":\"[FILTER]: UDP : 10.0.0.1:5000 -> 8.8.8.8:443\"}", error),
+                "Error logging should suppress SDK filter traffic that is classified as debug output.");
+            AssertFalse(UiLogMessagePresentation.ShouldDisplay("[WARN]: retrying", error),
+                "Error logging should suppress warning output.");
+            AssertFalse(UiLogMessagePresentation.ShouldDisplay(
+                    "{ \"level\": \"info\", \"message\": \"connected\" }", error),
+                "Error logging should suppress structured info output.");
+            AssertTrue(UiLogMessagePresentation.ShouldDisplay("[ERROR]: tunnel failed", error),
+                "Error logging should retain explicitly classified errors.");
+            AssertTrue(UiLogMessagePresentation.ShouldDisplay(
+                    "[ERROR]: [FILTER] failed to install packet rule", error),
+                "An error that names the filter component must not be reclassified as debug output.");
+            AssertTrue(UiLogMessagePresentation.ShouldDisplay(
+                    "[FILTER]: failed to install packet rule", error),
+                "Unclassified filter-component failures must remain visible at the error level.");
+            AssertTrue(UiLogMessagePresentation.ShouldDisplay(
+                    "Tunnel failed while processing [DEBUG] metadata", error),
+                "Severity markers embedded in diagnostic text must not reclassify the record.");
+            AssertTrue(UiLogMessagePresentation.ShouldDisplay(
+                    "Failed to parse response: {\"level\":\"debug\"}", error),
+                "Embedded JSON fragments must not supply the severity of an unstructured diagnostic.");
+            AssertTrue(UiLogMessagePresentation.ShouldDisplay(
+                    "{\"message\":\"Tunnel failed\",\"context\":{\"level\":\"debug\"}}", error),
+                "Nested JSON properties must not override the severity of the top-level record.");
+            AssertFalse(UiLogMessagePresentation.ShouldDisplay(
+                    "{\"level\":\"debug\",\"message\":\"packet\",\"context\":[true,2,{\"ok\":null}]}",
+                    error),
+                "A valid top-level structured severity should still be honored with nested context.");
+            AssertTrue(UiLogMessagePresentation.ShouldDisplay("Unable to query tunnel state", error),
+                "Unclassified manager diagnostics should remain visible rather than hiding possible errors.");
+
+            AssertTrue(UiLogMessagePresentation.ShouldDisplay("[WARNING]: retrying", warning),
+                "Warning logging should retain warning output.");
+            AssertFalse(UiLogMessagePresentation.ShouldDisplay("[INFO]: connected", warning),
+                "Warning logging should suppress info output.");
+            AssertTrue(UiLogMessagePresentation.ShouldDisplay("[INFO]: connected", info),
+                "Info logging should retain info output.");
+            AssertFalse(UiLogMessagePresentation.ShouldDisplay("[DEBUG]: packet", info),
+                "Info logging should suppress debug output.");
+            AssertTrue(UiLogMessagePresentation.ShouldDisplay("[FILTER]: packet", debug),
+                "Debug logging should retain filter output.");
+
+            AssertEqual("line\n\"quoted\"", UiLogMessagePresentation.FormatForDisplay(
+                "{\"message\":\"line\\n\\\"quoted\\\"\"}"));
+            const string prefixedJson = "Diagnostic prefix {\"message\":\"inner detail\"}";
+            AssertEqual(prefixedJson, UiLogMessagePresentation.FormatForDisplay(prefixedJson));
+            const string trailingJson = "{\"message\":\"inner detail\"} trailing";
+            AssertEqual(trailingJson, UiLogMessagePresentation.FormatForDisplay(trailingJson));
+            const string invalidEnvelope = "{\"message\":\"inner detail\",\"context\":[1,]}";
+            AssertEqual(invalidEnvelope, UiLogMessagePresentation.FormatForDisplay(invalidEnvelope));
+            const string malformed = "{\"message\":\"unterminated}";
+            AssertEqual(malformed, UiLogMessagePresentation.FormatForDisplay(malformed));
+        }
+
+        private static void VisibleLogStorageOverwritesWithoutGrowth()
+        {
+            var buffer = new BoundedRingBuffer<int>(3);
+            buffer.AddRange(new[] { 1, 2, 3, 4, 5 });
+
+            AssertEqual(3, buffer.Count);
+            AssertEqual(3, buffer[0]);
+            AssertEqual(4, buffer[1]);
+            AssertEqual(5, buffer[2]);
+            AssertThrows<ArgumentOutOfRangeException>(() =>
+            {
+                var ignored = buffer[3];
+                GC.KeepAlive(ignored);
+            }, "index");
+
+            buffer.Clear();
+            AssertEqual(0, buffer.Count);
+        }
+
+        private static void VirtualLogListInvalidatesAfterItemCountTransitions()
+        {
+            using (var logList = new ListView
+            {
+                VirtualMode = true,
+                View = View.Details
+            })
+            {
+                logList.Columns.Add("Time");
+                logList.Columns.Add("Message");
+                logList.RetrieveVirtualItem += (sender, args) =>
+                    args.Item = new ListViewItem(new[] { args.ItemIndex.ToString(), "message" });
+
+                GC.KeepAlive(logList.Handle);
+                var invalidationCount = 0;
+                logList.Invalidated += (sender, args) => invalidationCount++;
+
+                FrmMain.SynchronizeVirtualLogList(logList, 3, false);
+                AssertEqual(3, logList.VirtualListSize);
+                AssertTrue(invalidationCount > 0,
+                    "Expected the empty-to-populated virtual log transition to invalidate the native list.");
+
+                invalidationCount = 0;
+                FrmMain.SynchronizeVirtualLogList(logList, 3, false);
+                AssertTrue(invalidationCount > 0,
+                    "Expected new backing records to invalidate the virtual list even when its size is unchanged.");
+
+                FrmMain.SynchronizeVirtualLogList(logList, 0, false);
+                AssertEqual(0, logList.VirtualListSize);
+            }
+        }
+
+        private static void WireSockManagerUpdatesActiveLogLevelsWithoutReconnect()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var originalKillSwitch = TestKillSwitch;
+                var nativeApi = new FakeWireSockNativeApi();
+                using (var manager = new WireSockManager(nativeApi))
+                {
+                    try
+                    {
+                        TestKillSwitch = false;
+                        File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+                        manager.LogLevel = WireguardBoosterExports.WgbLogLevel.Info;
+                        AssertTrue(manager.Connect("office"), "Expected the fake tunnel to connect.");
+
+                        var handleCount = nativeApi.GetHandleCount;
+                        manager.LogLevel = WireguardBoosterExports.WgbLogLevel.Debug;
+                        AssertEqual(1, nativeApi.SetLogLevelCount);
+                        AssertEqual(handleCount, nativeApi.GetHandleCount);
+                        AssertEqual(0, nativeApi.DropCount);
+                        AssertEqual((int)WireguardBoosterExports.WgbLogLevel.Debug, (int)manager.LogLevel);
+
+                        nativeApi.SetLogLevelFailuresRemaining = 1;
+                        AssertThrows<InvalidOperationException>(
+                            () => manager.LogLevel = WireguardBoosterExports.WgbLogLevel.Info,
+                            "Simulated set_log_level failure");
+                        AssertEqual((int)WireguardBoosterExports.WgbLogLevel.Debug, (int)manager.LogLevel);
+
+                        AssertTrue(manager.Disconnect(), "Expected the fake tunnel to disconnect.");
+                        AssertTrue(manager.Connect("office"), "Expected the fake tunnel to reconnect.");
+                        AssertEqual((int)WireguardBoosterExports.WgbLogLevel.Debug,
+                            (int)nativeApi.LastCreateLogLevel);
+                    }
+                    finally
+                    {
+                        TestKillSwitch = originalKillSwitch;
+                    }
+                }
+            });
+        }
+
+        private static void ProfileRenameCommitsAndRollsBackTransactionally()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var original = Path.Combine(directory, "original.conf");
+            var destination = Path.Combine(directory, "renamed.conf");
+            var temporary = Path.Combine(directory, "profile.tmp");
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(original, "old");
+                File.WriteAllText(temporary, "new");
+
+                ProfileFileTransaction.Commit(temporary, destination, original);
+                AssertFalse(File.Exists(original), "Expected the old profile name to disappear after commit.");
+                AssertEqual("new", File.ReadAllText(destination));
+                AssertFalse(File.Exists(temporary), "Expected the temporary profile to be consumed.");
+
+                var distinctOriginal = Path.Combine(directory, "identity-original.conf");
+                var distinctDestination = Path.Combine(directory, "identity-destination.conf");
+                File.WriteAllText(distinctOriginal, "identity-original");
+                File.WriteAllText(distinctDestination, "identity-destination");
+                AssertThrows<IOException>(
+                    () => ProfileFileTransaction.ValidateCaseOnlyRenameDestination(
+                        distinctOriginal, distinctDestination),
+                    "different file");
+                AssertEqual("identity-original", File.ReadAllText(distinctOriginal));
+                AssertEqual("identity-destination", File.ReadAllText(distinctDestination));
+
+                var caseOriginal = Path.Combine(directory, "Office.conf");
+                var caseDestination = Path.Combine(directory, "office.conf");
+                var caseTemporary = Path.Combine(directory, "case-profile.tmp");
+                File.WriteAllText(caseOriginal, "old-case");
+                File.WriteAllText(caseTemporary, "new-case");
+                ProfileFileTransaction.Commit(caseTemporary, caseDestination, caseOriginal);
+                AssertEqual("new-case", File.ReadAllText(caseDestination));
+                AssertEqual("office.conf", Path.GetFileName(Directory.GetFiles(directory, "office.conf").Single()));
+
+                var caseRollbackOriginal = Path.Combine(directory, "Rollback.conf");
+                var caseRollbackDestination = Path.Combine(directory, "rollback.conf");
+                var caseRollbackTemporary = Path.Combine(directory, "case-rollback.tmp");
+                File.WriteAllText(caseRollbackOriginal, "case-preserved");
+                File.WriteAllText(caseRollbackTemporary, "case-replacement");
+                using (new FileStream(caseRollbackTemporary, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    AssertThrows<IOException>(
+                        () => ProfileFileTransaction.Commit(caseRollbackTemporary, caseRollbackDestination,
+                            caseRollbackOriginal),
+                        string.Empty);
+                }
+
+                AssertEqual("case-preserved", File.ReadAllText(caseRollbackOriginal));
+                AssertEqual("Rollback.conf",
+                    Path.GetFileName(Directory.GetFiles(directory, "rollback.conf").Single()));
+                AssertEqual("case-replacement", File.ReadAllText(caseRollbackTemporary));
+
+                var rollbackOriginal = Path.Combine(directory, "rollback-original.conf");
+                var rollbackDestination = Path.Combine(directory, "rollback-renamed.conf");
+                var missingTemporary = Path.Combine(directory, "missing.tmp");
+                File.WriteAllText(rollbackOriginal, "preserved");
+
+                AssertThrows<IOException>(
+                    () => ProfileFileTransaction.Commit(missingTemporary, rollbackDestination, rollbackOriginal),
+                    "does not exist");
+                AssertEqual("preserved", File.ReadAllText(rollbackOriginal));
+                AssertFalse(File.Exists(rollbackDestination),
+                    "Expected a failed replacement to restore the original profile name.");
+
+                var lockedOriginal = Path.Combine(directory, "locked-original.conf");
+                var lockedDestination = Path.Combine(directory, "locked-renamed.conf");
+                var lockedTemporary = Path.Combine(directory, "locked.tmp");
+                File.WriteAllText(lockedOriginal, "locked");
+                File.WriteAllText(lockedTemporary, "replacement");
+                using (new FileStream(lockedOriginal, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    AssertThrows<IOException>(
+                        () => ProfileFileTransaction.Commit(
+                            lockedTemporary, lockedDestination, lockedOriginal),
+                        string.Empty);
+                }
+
+                AssertEqual("locked", File.ReadAllText(lockedOriginal));
+                AssertFalse(File.Exists(lockedDestination),
+                    "Expected a failed original deletion to remove the new profile destination.");
+                AssertEqual("replacement", File.ReadAllText(lockedTemporary));
+
+                var invalidTemporary = Path.Combine(directory, "invalid.tmp");
+                var invalidDestination = Path.Combine(directory, "invalid.conf");
+                Directory.CreateDirectory(invalidTemporary);
+                AssertThrows<IOException>(
+                    () => ProfileFileTransaction.Commit(invalidTemporary, invalidDestination),
+                    "directory");
+                AssertTrue(Directory.Exists(invalidTemporary),
+                    "Expected temporary-path validation to leave the invalid source untouched.");
+                AssertFalse(File.Exists(invalidDestination),
+                    "Expected temporary-path validation to run before mutating the destination.");
+
+                var existingDestination = Path.Combine(directory, "existing.conf");
+                var createTemporary = Path.Combine(directory, "create.tmp");
+                File.WriteAllText(existingDestination, "existing");
+                File.WriteAllText(createTemporary, "replacement");
+                AssertThrows<IOException>(
+                    () => ProfileFileTransaction.Commit(createTemporary, existingDestination),
+                    "already exists");
+                AssertEqual("existing", File.ReadAllText(existingDestination));
+                AssertEqual("replacement", File.ReadAllText(createTemporary));
+
+                var editedProfile = Path.Combine(directory, "edited.conf");
+                var editTemporary = Path.Combine(directory, "edit.tmp");
+                File.WriteAllText(editedProfile, "before edit");
+                File.WriteAllText(editTemporary, "after edit");
+                ProfileFileTransaction.Commit(editTemporary, editedProfile, editedProfile);
+                AssertEqual("after edit", File.ReadAllText(editedProfile));
+                AssertFalse(File.Exists(editTemporary),
+                    "Expected a same-name profile edit to consume its temporary file.");
+            }
+            finally
+            {
+                TryDeleteDirectory(directory, true);
+            }
+        }
+
+        private static void ProfileRenameRecoveryCompletesInterruptedTransactions()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var original = Profile.GetProfilePath("original");
+                var destination = Profile.GetProfilePath("renamed");
+                File.WriteAllText(original, "old");
+                var temporary = ProfileFileTransaction.WriteTemporaryProfile("new");
+                var journal = ProfileFileTransaction.CreateRenameJournalForTests(original, destination, temporary);
+
+                File.Move(original, destination);
+                ProfileFileTransaction.RecoverInterruptedTransactions();
+
+                AssertFalse(File.Exists(original),
+                    "Expected interrupted rename recovery to keep the original name retired.");
+                AssertEqual("new", File.ReadAllText(destination));
+                AssertFalse(File.Exists(temporary),
+                    "Expected interrupted rename recovery to consume the staged profile.");
+                AssertFalse(File.Exists(journal),
+                    "Expected interrupted rename recovery to remove its journal.");
+
+                var preparedOriginal = Profile.GetProfilePath("prepared");
+                var preparedDestination = Profile.GetProfilePath("prepared-renamed");
+                File.WriteAllText(preparedOriginal, "preserved");
+                var preparedTemporary = ProfileFileTransaction.WriteTemporaryProfile("uncommitted");
+                var preparedJournal = ProfileFileTransaction.CreateRenameJournalForTests(
+                    preparedOriginal, preparedDestination, preparedTemporary);
+
+                ProfileFileTransaction.RecoverInterruptedTransactions();
+
+                AssertEqual("preserved", File.ReadAllText(preparedOriginal));
+                AssertFalse(File.Exists(preparedDestination),
+                    "Expected recovery to abandon a rename that had not moved the original profile.");
+                AssertFalse(File.Exists(preparedTemporary),
+                    "Expected recovery to remove abandoned staged profile contents.");
+                AssertFalse(File.Exists(preparedJournal),
+                    "Expected recovery to remove an abandoned rename journal.");
+
+                var uppercaseActualPath = Path.Combine(Global.ConfigsFolder, "UPPER.CONF");
+                var uppercaseLookupPath = Profile.GetProfilePath("UPPER");
+                var uppercaseDestination = Profile.GetProfilePath("upper-renamed");
+                File.WriteAllText(uppercaseActualPath, "uppercase preserved");
+                var uppercaseTemporary = ProfileFileTransaction.WriteTemporaryProfile("uppercase replacement");
+                var uppercaseJournal = ProfileFileTransaction.CreateRenameJournalForTests(
+                    uppercaseLookupPath, uppercaseDestination, uppercaseTemporary);
+
+                ProfileFileTransaction.RecoverInterruptedTransactions();
+
+                AssertEqual("uppercase preserved", File.ReadAllText(uppercaseActualPath));
+                AssertFalse(File.Exists(uppercaseDestination),
+                    "Expected a prepared uppercase-extension rename to remain uncommitted.");
+                AssertFalse(File.Exists(uppercaseTemporary),
+                    "Expected uppercase-extension recovery to remove abandoned staged contents.");
+                AssertFalse(File.Exists(uppercaseJournal),
+                    "Expected uppercase-extension recovery to remove its journal.");
+
+                var caseOriginal = Profile.GetProfilePath("Office");
+                var caseDestination = Profile.GetProfilePath("office");
+                File.WriteAllText(caseOriginal, "case-old");
+                var caseTemporary = ProfileFileTransaction.WriteTemporaryProfile("case-new");
+                var caseJournal = ProfileFileTransaction.CreateRenameJournalForTests(
+                    caseOriginal, caseDestination, caseTemporary);
+                AssertTrue(MoveFileEx(caseOriginal, caseDestination, MoveFileWriteThrough),
+                    "Expected the test to reach the interrupted case-only rename state.");
+
+                ProfileFileTransaction.RecoverInterruptedTransactions();
+
+                AssertEqual("case-new", File.ReadAllText(caseDestination));
+                AssertEqual("office.conf",
+                    Path.GetFileName(Directory.GetFiles(Global.ConfigsFolder, "office.conf").Single()));
+                AssertFalse(File.Exists(caseJournal),
+                    "Expected case-only rename recovery to remove its journal.");
+            });
+        }
+
+        private static void ProfileRenameRecoveryRejectsAmbiguousStates()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var original = Profile.GetProfilePath("original");
+                var destination = Profile.GetProfilePath("renamed");
+                File.WriteAllText(original, "original");
+                File.WriteAllText(destination, "unrelated destination");
+                var temporary = ProfileFileTransaction.WriteTemporaryProfile("replacement");
+                var journal = ProfileFileTransaction.CreateRenameJournalForTests(original, destination, temporary);
+
+                AssertThrows<InvalidDataException>(
+                    () => ProfileFileTransaction.RecoverInterruptedTransactions(),
+                    "both");
+                AssertEqual("original", File.ReadAllText(original));
+                AssertEqual("unrelated destination", File.ReadAllText(destination));
+                AssertEqual("replacement", File.ReadAllText(temporary));
+                AssertTrue(File.Exists(journal),
+                    "Expected ambiguous recovery to retain its journal for diagnosis.");
+            });
+        }
+
+        private static void ProfileTransactionRecoveryRemovesOrphanedTemporaryFiles()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                var managedTemporary = ProfileFileTransaction.WriteTemporaryProfile("orphaned");
+                var legacyTemporary = Path.Combine(Global.ConfigsFolder, Guid.NewGuid().ToString("N") + ".tmp");
+                File.WriteAllText(legacyTemporary, "legacy orphan");
+                File.WriteAllText(Profile.GetProfilePath("office"), ValidConfig());
+
+                ProfileFileTransaction.RecoverInterruptedTransactions();
+                var profiles = Profile.GetProfiles();
+
+                AssertEqual("office", profiles.Single());
+                AssertFalse(File.Exists(managedTemporary),
+                    "Expected startup recovery to remove managed orphaned profile contents.");
+                AssertFalse(File.Exists(legacyTemporary),
+                    "Expected startup recovery to remove temporary files left by older WireSock UI versions.");
+            });
+        }
+
+        private static void ProfileTransactionRecoveryBoundsAllDirectoryEntries()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                Global.EnsureProfileTransactionsFolderExists();
+                for (var index = 0; index < Profile.MaxProfileCatalogEntries; index++)
+                    File.WriteAllText(Path.Combine(Global.ConfigsFolder, $"entry-{index:D4}.tmp"), string.Empty);
+
+                AssertThrows<InvalidDataException>(
+                    () => ProfileFileTransaction.RecoverInterruptedTransactions(),
+                    $"more than {Profile.MaxProfileCatalogEntries} entries");
+            });
+        }
+
+        private static void ProfileRenameRecoveryRejectsActiveXmlContent()
+        {
+            WithTemporaryConfigFolder(() =>
+            {
+                Global.EnsureProfileTransactionsFolderExists();
+                var journal = Path.Combine(Global.ProfileTransactionsFolder,
+                    "rename-" + Guid.NewGuid().ToString("N") + ".xml");
+                File.WriteAllText(journal,
+                    "<!DOCTYPE ProfileRename [<!ENTITY source 'original.conf'>]>" +
+                    "<ProfileRename Version='1'><Original>&source;</Original>" +
+                    "<Destination>renamed.conf</Destination><Temporary>" +
+                    Guid.NewGuid().ToString("N") + ".profile.tmp</Temporary></ProfileRename>");
+
+                AssertThrows<XmlException>(
+                    () => ProfileFileTransaction.RecoverInterruptedTransactions(),
+                    "DTD");
+                AssertTrue(File.Exists(journal),
+                    "Expected rejected recovery metadata to remain available for diagnosis.");
+            });
+        }
+
+        private static void TestExecutionTimeoutPolicyIsBounded()
+        {
+            var success = ExecuteTestWithTimeout(() => { }, 1000);
+            AssertFalse(success.TimedOut, "Expected a completed test not to time out.");
+            AssertTrue(success.Exception == null, "Expected a completed test not to report an exception.");
+
+            var failure = ExecuteTestWithTimeout(() => throw new InvalidOperationException("expected"), 1000);
+            AssertFalse(failure.TimedOut, "Expected a failed test not to be mislabeled as timed out.");
+            AssertTrue(failure.Exception is InvalidOperationException,
+                "Expected the timeout wrapper to preserve the original test exception.");
+
+            var skipped = ExecuteTestWithTimeout(() => throw new TestSkippedException("unavailable"), 1000);
+            AssertFalse(skipped.TimedOut, "Expected a skipped test not to be mislabeled as timed out.");
+            AssertTrue(skipped.Exception is TestSkippedException,
+                "Expected the timeout wrapper to preserve an explicit skipped result.");
+
+            using (var release = new ManualResetEventSlim(false))
+            using (var finished = new ManualResetEventSlim(false))
+            {
+                var timeout = ExecuteTestWithTimeout(() =>
+                {
+                    try
+                    {
+                        release.Wait();
+                    }
+                    finally
+                    {
+                        finished.Set();
+                    }
+                }, 20);
+
+                AssertTrue(timeout.TimedOut, "Expected a blocked test to hit the configured timeout.");
+                AssertTrue(timeout.Exception == null,
+                    "Expected a timeout not to fabricate an unrelated test exception.");
+                release.Set();
+                AssertTrue(finished.Wait(1000), "Expected the timed-out test worker to finish after release.");
+            }
+        }
+
+        private static void SingleInstanceEventRejectsBroadAccess()
+        {
+            var untrustedIdentity = new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null);
+            var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+            var everyone = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            var security = new EventWaitHandleSecurity();
+            security.SetOwner(administrators);
+            security.SetAccessRuleProtection(true, false);
+            security.AddAccessRule(new EventWaitHandleAccessRule(
+                administrators, EventWaitHandleRights.FullControl, AccessControlType.Allow));
+
+            AssertTrue(FrmMain.IsSingleInstanceEventSecurityTrusted(security, out var diagnostic),
+                diagnostic ?? "Expected an administrator-only event ACL to be trusted.");
+
+            security.AddAccessRule(new EventWaitHandleAccessRule(
+                everyone, EventWaitHandleRights.Synchronize, AccessControlType.Allow));
+            AssertFalse(FrmMain.IsSingleInstanceEventSecurityTrusted(security, out diagnostic),
+                "Expected a globally writable/openable ownership event to be rejected.");
+            AssertTrue(diagnostic?.IndexOf("untrusted identity", StringComparison.OrdinalIgnoreCase) >= 0,
+                $"Expected an actionable event ACL diagnostic, got '{diagnostic}'.");
+
+            security = new EventWaitHandleSecurity();
+            security.SetOwner(untrustedIdentity);
+            security.SetAccessRuleProtection(true, false);
+            security.AddAccessRule(new EventWaitHandleAccessRule(
+                untrustedIdentity, EventWaitHandleRights.FullControl, AccessControlType.Allow));
+            security.AddAccessRule(new EventWaitHandleAccessRule(
+                administrators, EventWaitHandleRights.FullControl, AccessControlType.Allow));
+
+            AssertFalse(FrmMain.IsSingleInstanceEventSecurityTrusted(security, out diagnostic),
+                "Expected a LocalService-owned event to be rejected.");
+            AssertTrue(diagnostic?.IndexOf("not owned", StringComparison.OrdinalIgnoreCase) >= 0,
+                $"Expected an actionable untrusted-owner diagnostic, got '{diagnostic}'.");
+
+            security.SetOwner(administrators);
+            AssertFalse(FrmMain.IsSingleInstanceEventSecurityTrusted(security, out diagnostic),
+                "Expected an event granting LocalService direct access to be rejected.");
+            AssertTrue(diagnostic?.IndexOf("untrusted identity", StringComparison.OrdinalIgnoreCase) >= 0,
+                $"Expected an actionable untrusted ACE diagnostic, got '{diagnostic}'.");
+        }
+
+        private static void TunnelProfileStateMatchesSelectionsCaseInsensitively()
+        {
+            AssertTrue(FrmMain.IsTunnelProfileSelected("Office", "office"),
+                "Expected profile selection matching to follow the case-insensitive Windows filename contract.");
+            AssertFalse(FrmMain.IsTunnelProfileSelected("Home", "office"),
+                "Expected a different selected profile not to display the active tunnel state.");
+            AssertFalse(FrmMain.IsTunnelProfileSelected(null, "office"),
+                "Expected a missing selection not to display the active tunnel state.");
+            AssertFalse(FrmMain.IsTunnelProfileSelected("Office", null),
+                "Expected a missing active profile not to mark a selection as active.");
+        }
+
+        private static void NetworkLockEnumMatchesWgboosterAbi()
+        {
+            AssertEqual(0, (int)WireguardBoosterExports.WgbNetworkLockMode.Disabled);
+            AssertEqual(1, (int)WireguardBoosterExports.WgbNetworkLockMode.Enabled);
+        }
+
+        private static void WireSockExportsUseRestrictedDllSearch()
+        {
+            var methods = typeof(WireguardBoosterExports)
+                .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Where(method =>
+                {
+                    var dllImport = method.GetCustomAttributes(typeof(DllImportAttribute), false)
+                        .OfType<DllImportAttribute>()
+                        .SingleOrDefault();
+                    return string.Equals(dllImport?.Value, "wgbooster.dll", StringComparison.OrdinalIgnoreCase);
+                })
+                .ToList();
+
+            AssertTrue(methods.Count > 0, "Expected wgbooster export methods to be discovered.");
+
+            foreach (var method in methods)
+            {
+                var attribute = method.GetCustomAttributes(typeof(DefaultDllImportSearchPathsAttribute), false)
+                    .OfType<DefaultDllImportSearchPathsAttribute>()
+                    .SingleOrDefault();
+
+                if (attribute == null)
+                    throw new InvalidOperationException(
+                        $"Expected wgbooster export '{method.Name}' to declare restricted DLL search paths.");
+
+                var paths = attribute.Paths;
+                AssertTrue((paths & DllImportSearchPath.UserDirectories) != 0,
+                    $"Expected '{method.Name}' to search only explicitly added user directories.");
+                AssertTrue((paths & DllImportSearchPath.System32) != 0,
+                    $"Expected '{method.Name}' to allow System32 dependency resolution.");
+                AssertFalse((paths & DllImportSearchPath.AssemblyDirectory) != 0,
+                    $"Expected '{method.Name}' not to fall back to the executable directory.");
+            }
+        }
+
+        private static void WireSockHandleBooleansMatchCppAbi()
+        {
+            foreach (var methodName in new[] { "wgb_get_handle_ex", "wgbp_get_handle_ex" })
+            {
+                var method = typeof(WireguardBoosterExports).GetMethod(methodName,
+                    BindingFlags.Public | BindingFlags.Static);
+                if (method == null)
+                    throw new InvalidOperationException($"Expected export '{methodName}' to exist.");
+
+                var parameters = method.GetParameters();
+                AssertEqual(5, parameters.Length);
+                foreach (var parameter in parameters.Skip(3))
+                {
+                    var marshalAs = parameter.GetCustomAttributes(typeof(MarshalAsAttribute), false)
+                        .OfType<MarshalAsAttribute>()
+                        .SingleOrDefault();
+                    AssertTrue(marshalAs?.Value == UnmanagedType.I1,
+                        $"Expected '{methodName}' parameter '{parameter.Name}' to marshal C++ bool as one byte.");
+                }
+            }
+        }
+
+        private static void WireSockLogCallbackDecodesUtf8Explicitly()
+        {
+            var parameter = typeof(WireguardBoosterExports.LogPrinter).GetMethod("Invoke")?.GetParameters().Single();
+
+            AssertTrue(parameter?.ParameterType == typeof(IntPtr),
+                "Expected the native log callback to receive the char* as an IntPtr on .NET Framework.");
+            AssertFalse(parameter.GetCustomAttributes(typeof(MarshalAsAttribute), false).Any(),
+                "Expected UTF-8 callback decoding to avoid runtime string marshaling.");
+
+            const string expected = "wgbooster: \u041F\u0440\u0438\u0432\u0435\u0442 \u4E16\u754C";
+            var bytes = Encoding.UTF8.GetBytes(expected);
+            var message = Marshal.AllocHGlobal(bytes.Length + 1);
+            try
+            {
+                Marshal.Copy(bytes, 0, message, bytes.Length);
+                Marshal.WriteByte(message, bytes.Length, 0);
+                AssertEqual(expected, WireguardBoosterExports.DecodeLogMessage(message));
+                AssertEqual(string.Empty, WireguardBoosterExports.DecodeLogMessage(IntPtr.Zero));
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(message);
+            }
+
+            var unterminatedBytes = Enumerable.Repeat((byte)'x',
+                WireguardBoosterExports.MaxLogMessageBytes + 1).ToArray();
+            var unterminatedMessage = Marshal.AllocHGlobal(unterminatedBytes.Length);
+            try
+            {
+                Marshal.Copy(unterminatedBytes, 0, unterminatedMessage, unterminatedBytes.Length);
+                AssertThrows<ArgumentException>(
+                    () => WireguardBoosterExports.DecodeLogMessage(unterminatedMessage),
+                    "not null-terminated");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(unterminatedMessage);
+            }
+        }
+
+        private static void StatsStructMatchesWgboosterAbi()
+        {
+            AssertEqual(32, Marshal.SizeOf<WireguardBoosterExports.WgbStats>());
+            AssertEqual(0, Marshal.OffsetOf<WireguardBoosterExports.WgbStats>("time_since_last_handshake").ToInt32());
+            AssertEqual(8, Marshal.OffsetOf<WireguardBoosterExports.WgbStats>("tx_bytes").ToInt32());
+            AssertEqual(16, Marshal.OffsetOf<WireguardBoosterExports.WgbStats>("rx_bytes").ToInt32());
+            AssertEqual(24, Marshal.OffsetOf<WireguardBoosterExports.WgbStats>("estimated_loss").ToInt32());
+            AssertEqual(28, Marshal.OffsetOf<WireguardBoosterExports.WgbStats>("estimated_rtt").ToInt32());
+        }
+
+        private static void SdkSmokeRejectsUnsafeIntegrationProfiles()
+        {
+            var profilePath = WriteConfig(
+                "[Interface]\n" +
+                $"PrivateKey = {PrivateKey}\n" +
+                "Address = 10.0.0.2/32\n" +
+                "PreUp = cmd.exe /c echo unsafe\n" +
+                "\n" +
+                "[Peer]\n" +
+                $"PublicKey = {PublicKey}\n" +
+                "Endpoint = example.com:51820\n" +
+                "AllowedIPs = 0.0.0.0/0\n");
+
+            AssertThrows<InvalidOperationException>(
+                () => ValidateSdkIntegrationProfileContents(profilePath, "WIRESOCKUI_TEST_PROFILE"),
+                "script hooks");
+
+            const string variableName = "WIRESOCKUI_TEST_PROFILE_UNTRUSTED_TEST";
+            var originalValue = Environment.GetEnvironmentVariable(variableName);
+            try
+            {
+                Environment.SetEnvironmentVariable(variableName, profilePath);
+                AssertThrows<InvalidOperationException>(
+                    () => GetRequiredSdkProfilePath(variableName),
+                    "writable by or owned by non-administrative users");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variableName, originalValue);
+            }
+        }
+
+        private static void SdkSmokeCleansUpFailedTunnelCreation()
+        {
+            var api = new FakeWireSockNativeApi { CreateTunnelResult = false };
+            WireguardBoosterExports.LogPrinter logPrinter = message => { };
+
+            AssertThrows<Win32Exception>(
+                () => RunSdkModeSmoke(api, WireSockManager.Mode.VirtualAdapter, "test.conf", logPrinter),
+                "failed to create");
+            AssertEqual(1, api.DropCount);
+            AssertEqual(1, api.ReleaseCount);
+            AssertTrue(api.LastPreserveNetworkLock == false,
+                "Expected failed SDK smoke cleanup to release rather than preserve network lock state.");
+
+            var failedLockCleanupApi = new FakeWireSockNativeApi
+            {
+                CreateTunnelResult = false,
+                SetNetworkLockFailureOnCall = 4,
+                SetNetworkLockError = 5
+            };
+            AssertThrows<AggregateException>(
+                () => RunSdkModeSmoke(failedLockCleanupApi, WireSockManager.Mode.Transparent, "test.conf", logPrinter),
+                "");
+            AssertEqual(1, failedLockCleanupApi.DropCount);
+            AssertEqual(1, failedLockCleanupApi.ReleaseCount);
+        }
+
+        private static void ImageListsCloneIconsBeforeDelayedHandleCreation()
+        {
+            AssertEqual(
+                ApartmentState.STA.ToString(),
+                Thread.CurrentThread.GetApartmentState().ToString());
+
+            using (var images = new ImageList())
+            {
+                var sourceIcon = new Icon(SystemIcons.Application, new Size(24, 24));
+                try
+                {
+                    images.Images.AddClonedIcon("profile", sourceIcon);
+                }
+                finally
+                {
+                    sourceIcon.Dispose();
+                }
+
+                AssertTrue(images.Handle != IntPtr.Zero,
+                    "Expected delayed ImageList handle creation to succeed after the source icon was disposed.");
+                AssertTrue(images.Images.ContainsKey("profile"),
+                    "Expected the cloned icon to retain its profile key.");
+            }
+        }
+
+        private static void ManagedHostBoundaryReturnsDeterministicStartupFailures()
+        {
+            var hostedMain = typeof(WireSockUI.Program).GetMethod(
+                "HostedMain",
+                BindingFlags.Public | BindingFlags.Static,
+                null,
+                new[] { typeof(string) },
+                null);
+            AssertTrue(hostedMain != null,
+                "Expected the CLR host to find one public static HostedMain(string) method.");
+            AssertTrue(hostedMain.ReturnType == typeof(int),
+                "Expected the managed host entry point to return an integer exit code.");
+            AssertTrue(hostedMain.GetCustomAttributes(typeof(STAThreadAttribute), false).Any(),
+                "Expected the managed host entry point to retain its STA contract.");
+
+            Exception reported = null;
+            var success = WireSockUI.Program.ExecuteHostedMainBoundary(
+                "normal",
+                argument => string.Equals(argument, "normal", StringComparison.Ordinal) ? 17 : 18,
+                exception => reported = exception,
+                71);
+            AssertEqual(17, success);
+            AssertTrue(reported == null, "A successful managed entry point must not report a failure.");
+
+            var failure = new ArgumentException("Windows 7 startup failure");
+            var failed = WireSockUI.Program.ExecuteHostedMainBoundary(
+                "normal",
+                argument =>
+                {
+                    throw failure;
+                },
+                exception => reported = exception,
+                72);
+            AssertEqual(72, failed);
+            AssertTrue(ReferenceEquals(failure, reported),
+                "Expected the host boundary to report the original managed exception.");
+
+            var reporterFailed = WireSockUI.Program.ExecuteHostedMainBoundary(
+                "normal",
+                argument =>
+                {
+                    throw new InvalidOperationException("managed failure");
+                },
+                exception =>
+                {
+                    throw new InvalidOperationException("reporter failure");
+                },
+                73);
+            AssertEqual(73, reporterFailed);
+
+            var formatted = WireSockUI.Program.FormatStartupException(
+                new ArgumentException(new string('x', 4096)));
+            AssertTrue(formatted.StartsWith(
+                    typeof(ArgumentException).FullName + ": ",
+                    StringComparison.Ordinal),
+                "Expected the bounded startup diagnostic to identify the exception type.");
+            AssertTrue(formatted.Length <= 2051,
+                "Expected the startup diagnostic to remain bounded.");
+            AssertEqual(
+                "An unknown managed startup error occurred.",
+                WireSockUI.Program.FormatStartupException(null));
+        }
+
+        private static void WindowsShellIconsAreOptionalOnLegacyWindows()
+        {
+            AssertTrue(WindowsIcons.IsRecoverableIconException(
+                    new ArgumentException("invalid legacy icon")),
+                "Legacy icon format failures should be recoverable.");
+            AssertTrue(WindowsIcons.IsRecoverableIconException(
+                    new ExternalException("GDI rejected icon")),
+                "GDI conversion failures should be recoverable.");
+            AssertTrue(WindowsIcons.IsRecoverableIconException(
+                    new IOException("resource unavailable")),
+                "Shell resource I/O failures should be recoverable.");
+            AssertTrue(WindowsIcons.IsRecoverableIconException(
+                    new UnauthorizedAccessException("resource unavailable")),
+                "Shell resource access failures should be recoverable.");
+            AssertTrue(!WindowsIcons.IsRecoverableIconException(
+                    new InvalidOperationException("programming error")),
+                "Unrelated programming errors must not be swallowed.");
+
+            using (var missingIcon = WindowsIcons.TryLoadOptionalResource<Icon>(() =>
+                   {
+                       throw new ArgumentException("legacy icon conversion failed");
+                   }))
+            {
+                AssertTrue(missingIcon == null,
+                    "A rejected legacy shell icon must remain optional.");
+            }
+            using (var missingBitmap = WindowsIcons.TryLoadOptionalResource<Bitmap>(() =>
+                   {
+                       throw new ExternalException("legacy bitmap conversion failed");
+                   }))
+            {
+                AssertTrue(missingBitmap == null,
+                    "A rejected legacy shell bitmap must remain optional.");
+            }
+
+            AssertThrows<InvalidOperationException>(() =>
+                WindowsIcons.TryLoadOptionalResource<Icon>(() =>
+                {
+                    throw new InvalidOperationException("programming error");
+                }), "programming error");
+
+            AssertThrows<ArgumentOutOfRangeException>(() =>
+                WindowsIcons.GetWindowsIcon(WindowsIcons.Icons.Refresh, 0), null);
+            AssertThrows<ArgumentOutOfRangeException>(() =>
+                WindowsIcons.GetWindowsIconBitmap(WindowsIcons.Icons.Refresh, 0), null);
+            AssertThrows<ArgumentOutOfRangeException>(() =>
+                WindowsIcons.GetWindowsIcon((WindowsIcons.Icons)int.MaxValue, 16), null);
+            AssertThrows<ArgumentOutOfRangeException>(() =>
+                WindowsIcons.GetWindowsIconBitmap((WindowsIcons.Icons)int.MaxValue, 16), null);
+        }
+
+        private static void WindowsMessageFontIsOptionalOnLegacyWindows()
+        {
+            AssertFalse(
+                UiFonts.TryGetMessageBoxFont(
+                    () => throw new ArgumentException("Font '?' cannot be found."),
+                    out var missingFont),
+                "Expected an unavailable Windows message font to be optional.");
+            AssertTrue(missingFont == null,
+                "Expected an unavailable Windows message font to return no font.");
+
+            AssertFalse(
+                UiFonts.TryGetMessageBoxFont(
+                    () => throw new ExternalException("GDI+ could not resolve the system font."),
+                    out var failedFont),
+                "Expected a recoverable GDI+ font failure to be optional.");
+            AssertTrue(failedFont == null,
+                "Expected a recoverable GDI+ font failure to return no font.");
+
+            var existingFont = Control.DefaultFont;
+            AssertTrue(
+                UiFonts.TryGetMessageBoxFont(() => existingFont, out var selectedFont),
+                "Expected a valid Windows message font to be selected.");
+            AssertTrue(ReferenceEquals(existingFont, selectedFont),
+                "Expected font selection to retain the provider-owned font instance.");
+
+            AssertFalse(
+                UiFonts.TryApplyMessageBoxFont(
+                    () => existingFont,
+                    _ => throw new ArgumentException("Font '?' cannot be found.")),
+                "Expected a failure while applying a Windows message font to be optional.");
+        }
+
+        private static void WinFormsDefaultFontsFallbackBeforeControlConstruction()
+        {
+            var helperPath = Assembly.GetExecutingAssembly().Location;
+            var startInfo = new ProcessStartInfo(helperPath, WinFormsFontFallbackHelperSwitch)
+            {
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false
+            };
+            using (var helper = new Process { StartInfo = startInfo })
+            {
+                AssertTrue(helper.Start(),
+                    "Expected the real WinForms font fallback helper to start.");
+                var standardOutputTask = helper.StandardOutput.ReadToEndAsync();
+                var standardErrorTask = helper.StandardError.ReadToEndAsync();
+                if (!helper.WaitForExit(30000))
+                {
+                    try
+                    {
+                        helper.Kill();
+                        helper.WaitForExit(5000);
+                    }
+                    catch
+                    {
+                        // The timeout remains the primary test failure.
+                    }
+
+                    throw new Exception("The real WinForms font fallback helper timed out.");
+                }
+
+                AssertTrue(
+                    Task.WaitAll(
+                        new Task[] { standardOutputTask, standardErrorTask },
+                        5000),
+                    "Expected the real WinForms font fallback helper output to drain.");
+                var standardOutput = standardOutputTask.Result;
+                var standardError = standardErrorTask.Result;
+                AssertTrue(helper.ExitCode == 0,
+                    $"The real WinForms font fallback helper failed with exit code " +
+                    $"{helper.ExitCode}. stdout='{standardOutput}' stderr='{standardError}'");
+            }
+
+            var mainDesignerSource = File.ReadAllText(
+                FindRepositoryFile("WireSockUI", "Forms", "frmMain.Designer.cs"));
+            var contextMenuConstruction = mainDesignerSource.IndexOf(
+                "this.mnuContext = new System.Windows.Forms.ContextMenuStrip",
+                StringComparison.Ordinal);
+            var firstExplicitFontConstruction = mainDesignerSource.IndexOf(
+                "new System.Drawing.Font(",
+                StringComparison.Ordinal);
+            AssertTrue(contextMenuConstruction >= 0,
+                "Expected the main form designer to construct its context menu.");
+            AssertTrue(firstExplicitFontConstruction < 0 ||
+                       firstExplicitFontConstruction > contextMenuConstruction,
+                "The main form designer must not resolve an explicit font before its context menu.");
+
+            var editDesignerSource = File.ReadAllText(
+                FindRepositoryFile("WireSockUI", "Forms", "frmEdit.Designer.cs"));
+            AssertFalse(
+                editDesignerSource.Contains("new System.Drawing.Font(\""),
+                "The edit-form designer must not perform an unguarded font-family lookup.");
+            var editFormSource = File.ReadAllText(
+                FindRepositoryFile("WireSockUI", "Forms", "frmEdit.cs"));
+            AssertFalse(
+                editFormSource.Contains("new Font(txtEditor.Font"),
+                "The edit form must guard optional font-style creation.");
+
+            var profileScriptWarningSource = File.ReadAllText(
+                FindRepositoryFile("WireSockUI", "Forms", "ProfileScriptWarning.cs"));
+            AssertFalse(
+                profileScriptWarningSource.Contains("FontFamily.Generic"),
+                "The profile-script warning must not perform an unguarded generic-font lookup.");
+
+            var programSource = File.ReadAllText(
+                FindRepositoryFile("WireSockUI", "Program.cs"));
+            var defaultFontInitialization = programSource.IndexOf(
+                "UiFonts.TryEnsureWinFormsDefaultFonts(",
+                StringComparison.Ordinal);
+            var mainFormConstruction = programSource.IndexOf(
+                "new FrmMain()",
+                StringComparison.Ordinal);
+            AssertTrue(defaultFontInitialization >= 0,
+                "Expected startup to initialize the WinForms default fonts.");
+            AssertTrue(mainFormConstruction >= 0,
+                "Expected startup to construct the main form.");
+            AssertTrue(defaultFontInitialization < mainFormConstruction,
+                "Startup must initialize WinForms default fonts before constructing the main form.");
+        }
+
+        private static void SdkSyntheticSmokePermitsInactiveTunnel()
+        {
+            WireguardBoosterExports.LogPrinter logPrinter = message => { };
+            var syntheticApi = new FakeWireSockNativeApi { TunnelActive = false };
+
+            RunSdkModeSmoke(syntheticApi, WireSockManager.Mode.Transparent, "test.conf", logPrinter, false);
+            AssertEqual(1, syntheticApi.TunnelActiveQueryCount);
+            AssertEqual(1, syntheticApi.TunnelStateQueryCount);
+            AssertEqual(1, syntheticApi.DropCount);
+            AssertEqual(1, syntheticApi.ReleaseCount);
+
+            var connectedApi = new FakeWireSockNativeApi { TunnelActive = false };
+            AssertThrows<InvalidOperationException>(
+                () => RunSdkModeSmoke(connectedApi, WireSockManager.Mode.Transparent, "test.conf", logPrinter),
+                "did not report");
+            AssertEqual(1, connectedApi.DropCount);
+            AssertEqual(1, connectedApi.ReleaseCount);
+
+            var failedQueryApi = new FakeWireSockNativeApi
+            {
+                TunnelActive = false,
+                TunnelActiveError = 5
+            };
+            AssertThrows<Win32Exception>(
+                () => RunSdkModeSmoke(
+                    failedQueryApi, WireSockManager.Mode.Transparent, "test.conf", logPrinter, false),
+                "failed to query");
+        }
+
+        private static void SdkSmokeRunsFinalCleanupAfterFailures()
+        {
+            var cleanupCalled = false;
+            AssertThrows<InvalidOperationException>(
+                () => RunWithFinalCleanup(
+                    () => throw new InvalidOperationException("mode failed"),
+                    () => cleanupCalled = true),
+                "mode failed");
+            AssertTrue(cleanupCalled, "Expected final SDK cleanup to run after a mode failure.");
+
+            AssertThrows<AggregateException>(
+                () => RunWithFinalCleanup(
+                    () => throw new InvalidOperationException("mode failed"),
+                    () => throw new InvalidOperationException("cleanup failed")),
+                "");
+        }
+
+        private sealed class FakeWireSockNativeApi : IWireSockNativeApi
+        {
+            public IntPtr CreateHandleResult { get; set; } = new IntPtr(1234);
+            public bool CreateTunnelResult { get; set; } = true;
+            public bool StartResult { get; set; } = true;
+            public int StartError { get; set; }
+            public bool TunnelActive { get; set; } = true;
+            public int TunnelActiveError { get; set; }
+            public WireguardBoosterExports.WgbStats TunnelState { get; set; } =
+                new WireguardBoosterExports.WgbStats { time_since_last_handshake = -1, estimated_rtt = -1 };
+            public int TunnelStateError { get; set; }
+            public WireguardBoosterExports.WgbNetworkLockMode NetworkLockMode { get; set; }
+            public int NetworkLockModeError { get; set; }
+            public bool DropResult { get; set; } = true;
+            public int DropError { get; set; }
+            public bool? LastPreserveNetworkLock { get; private set; }
+            public int DropCount { get; private set; }
+            public int GetHandleCount { get; private set; }
+            public int ReleaseCount { get; private set; }
+            public int ReleaseFailuresRemaining { get; set; }
+            public bool LastEnableAnalytics { get; private set; }
+            public int TunnelActiveQueryCount { get; private set; }
+            public int TunnelStateQueryCount { get; private set; }
+            public int NetworkLockQueryCount { get; private set; }
+            public int SetLogLevelCount { get; private set; }
+            public int SetLogLevelFailuresRemaining { get; set; }
+            public WireguardBoosterExports.WgbLogLevel LastCreateLogLevel { get; private set; }
+            public int SetNetworkLockCount { get; private set; }
+            public int SetNetworkLockFailureOnCall { get; set; }
+            public int SetNetworkLockError { get; set; }
+            public ManualResetEventSlim StartEntered { get; set; }
+            public ManualResetEventSlim ContinueStart { get; set; }
+            public ManualResetEventSlim DropEntered { get; set; }
+            public ManualResetEventSlim ContinueDrop { get; set; }
+
+            public IntPtr CreateHandle(WireSockManager.Mode mode, WireguardBoosterExports.LogPrinter logPrinter,
+                WireguardBoosterExports.WgbLogLevel logLevel, bool enableTrafficCapture, bool enableAnalytics)
+            {
+                SetLastErrorForTest(0);
+                GetHandleCount++;
+                LastEnableAnalytics = enableAnalytics;
+                LastCreateLogLevel = logLevel;
+                return CreateHandleResult;
+            }
+
+            public void ReleaseHandle(WireSockManager.Mode mode, IntPtr handle)
+            {
+                SetLastErrorForTest(0);
+                ReleaseCount++;
+                if (ReleaseFailuresRemaining > 0)
+                {
+                    ReleaseFailuresRemaining--;
+                    throw new InvalidOperationException("Simulated release_handle failure.");
+                }
+            }
+
+            public void SetLogLevel(WireSockManager.Mode mode, IntPtr handle,
+                WireguardBoosterExports.WgbLogLevel logLevel)
+            {
+                SetLastErrorForTest(0);
+                SetLogLevelCount++;
+                if (SetLogLevelFailuresRemaining > 0)
+                {
+                    SetLogLevelFailuresRemaining--;
+                    throw new InvalidOperationException("Simulated set_log_level failure.");
+                }
+            }
+
+            public bool CreateTunnelFromFile(WireSockManager.Mode mode, IntPtr handle, string fileName)
+            {
+                SetLastErrorForTest(0);
+                return CreateTunnelResult;
+            }
+
+            public bool StartTunnel(WireSockManager.Mode mode, IntPtr handle)
+            {
+                SetLastErrorForTest((uint)StartError);
+                StartEntered?.Set();
+                ContinueStart?.Wait();
+                return StartResult;
+            }
+
+            public bool StopTunnel(WireSockManager.Mode mode, IntPtr handle)
+            {
+                SetLastErrorForTest(0);
+                return true;
+            }
+
+            public bool DropTunnel(WireSockManager.Mode mode, IntPtr handle, bool preserveNetworkLock)
+            {
+                SetLastErrorForTest((uint)DropError);
+                LastPreserveNetworkLock = preserveNetworkLock;
+                DropCount++;
+                DropEntered?.Set();
+                ContinueDrop?.Wait();
+                return DropResult;
+            }
+
+            public bool GetTunnelActive(WireSockManager.Mode mode, IntPtr handle)
+            {
+                SetLastErrorForTest((uint)TunnelActiveError);
+                TunnelActiveQueryCount++;
+                return TunnelActive;
+            }
+
+            public WireguardBoosterExports.WgbStats GetTunnelState(WireSockManager.Mode mode, IntPtr handle)
+            {
+                SetLastErrorForTest((uint)TunnelStateError);
+                TunnelStateQueryCount++;
+                return TunnelState;
+            }
+
+            public bool SetNetworkLockMode(WireSockManager.Mode mode, IntPtr handle,
+                WireguardBoosterExports.WgbNetworkLockMode networkLockMode)
+            {
+                SetNetworkLockCount++;
+                if (SetNetworkLockFailureOnCall == SetNetworkLockCount)
+                {
+                    SetLastErrorForTest((uint)SetNetworkLockError);
+                    return false;
+                }
+
+                SetLastErrorForTest(0);
+                NetworkLockMode = networkLockMode;
+                return true;
+            }
+
+            public WireguardBoosterExports.WgbNetworkLockMode GetNetworkLockMode(WireSockManager.Mode mode,
+                IntPtr handle)
+            {
+                SetLastErrorForTest((uint)NetworkLockModeError);
+                NetworkLockQueryCount++;
+                return NetworkLockMode;
+            }
+        }
+
+        private sealed class ShortReadMemoryStream : MemoryStream
+        {
+            internal ShortReadMemoryStream(byte[] buffer) : base(buffer)
+            {
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                return base.Read(buffer, offset, Math.Min(count, 1));
+            }
+        }
+
+        private sealed class FakeNetworkLockApi : INetworkLockApi
+        {
+            public bool Active { get; set; }
+            public bool QueryResult { get; set; } = true;
+            public bool ResetResult { get; set; } = true;
+            public int QueryCount { get; private set; }
+            public int ResetCount { get; private set; }
+            public ManualResetEventSlim ResetEntered { get; set; }
+            public ManualResetEventSlim ContinueReset { get; set; }
+
+            public bool TryIsActive(out bool active, out string diagnostic)
+            {
+                QueryCount++;
+                active = Active;
+                diagnostic = QueryResult ? null : "simulated query failure";
+                return QueryResult;
+            }
+
+            public bool TryReset(out string diagnostic)
+            {
+                ResetCount++;
+                ResetEntered?.Set();
+                ContinueReset?.Wait();
+                diagnostic = ResetResult ? null : "simulated reset failure";
+                if (ResetResult)
+                    Active = false;
+                return ResetResult;
+            }
+        }
+
+        private sealed class BlockingVirtualAdapterRenamer : IVirtualAdapterRenamer
+        {
+            public ManualResetEventSlim RenameEntered { get; } = new ManualResetEventSlim(false);
+            public ManualResetEventSlim ContinueRename { get; } = new ManualResetEventSlim(false);
+            public ManualResetEventSlim RenameCompleted { get; } = new ManualResetEventSlim(false);
+            public int RenameCount { get; private set; }
+            public string AdapterFriendlyName { get; private set; }
+            public string NewName { get; private set; }
+            public bool ConnectionWasCurrent { get; private set; }
+
+            public void Rename(string adapterFriendlyName, string newName, Func<bool> shouldContinue)
+            {
+                try
+                {
+                    RenameCount++;
+                    AdapterFriendlyName = adapterFriendlyName;
+                    NewName = newName;
+                    RenameEntered.Set();
+                    ContinueRename.Wait();
+                    ConnectionWasCurrent = shouldContinue();
+                }
+                finally
+                {
+                    RenameCompleted.Set();
+                }
+            }
+        }
+
+        private sealed class LatestWinsVirtualAdapterRenamer : IVirtualAdapterRenamer
+        {
+            private readonly object _syncRoot = new object();
+            private readonly List<string> _attemptedNames = new List<string>();
+            private int _renameCount;
+
+            public ManualResetEventSlim FirstCommitChecked { get; } = new ManualResetEventSlim(false);
+            public ManualResetEventSlim ReleaseFirstCommit { get; } = new ManualResetEventSlim(false);
+            public ManualResetEventSlim LatestCommitCompleted { get; } = new ManualResetEventSlim(false);
+            public int RenameCount => Volatile.Read(ref _renameCount);
+            public bool FirstCommitBecameStale { get; private set; }
+
+            public IReadOnlyList<string> AttemptedNames
+            {
+                get
+                {
+                    lock (_syncRoot)
+                        return _attemptedNames.ToArray();
+                }
+            }
+
+            public void Rename(string adapterFriendlyName, string newName, Func<bool> shouldContinue)
+            {
+                var invocation = Interlocked.Increment(ref _renameCount);
+                lock (_syncRoot)
+                    _attemptedNames.Add(newName);
+
+                if (invocation == 1)
+                {
+                    var currentBeforeCommit = shouldContinue();
+                    FirstCommitChecked.Set();
+                    ReleaseFirstCommit.Wait();
+                    FirstCommitBecameStale = currentBeforeCommit && !shouldContinue();
+                    return;
+                }
+
+                shouldContinue();
+                LatestCommitCompleted.Set();
+            }
+        }
+
+        private sealed class StallingVirtualAdapterRenamer : IVirtualAdapterRenamer
+        {
+            private int _renameCount;
+
+            public ManualResetEventSlim FirstRenameEntered { get; } = new ManualResetEventSlim(false);
+            public ManualResetEventSlim ReleaseProvider { get; } = new ManualResetEventSlim(false);
+            public ManualResetEventSlim LatestRenameEntered { get; } = new ManualResetEventSlim(false);
+            public int RenameCount => Volatile.Read(ref _renameCount);
+            public string LatestName { get; private set; }
+
+            public void Rename(string adapterFriendlyName, string newName, Func<bool> shouldContinue)
+            {
+                var invocation = Interlocked.Increment(ref _renameCount);
+                if (invocation == 1)
+                {
+                    FirstRenameEntered.Set();
+                    ReleaseProvider.Wait();
+                    if (!shouldContinue())
+                        throw new OperationCanceledException("The timed-out rename was canceled.");
+                    return;
+                }
+
+                LatestName = newName;
+                shouldContinue();
+                LatestRenameEntered.Set();
+            }
+        }
+
+        private sealed class NonPumpingSynchronizationContext : SynchronizationContext
+        {
+            public override void Post(SendOrPostCallback callback, object state)
+            {
+                // Intentionally do not dispatch posted work. The timeout helper must not post here.
+            }
+        }
+
+        private sealed class QueuedSynchronizeInvoke : ISynchronizeInvoke
+        {
+            private object[] _arguments;
+            private Delegate _callback;
+            private readonly bool _invokeRequired;
+
+            internal QueuedSynchronizeInvoke(bool invokeRequired = true)
+            {
+                _invokeRequired = invokeRequired;
+            }
+
+            public bool InvokeRequired => _invokeRequired;
+            internal int BeginInvokeCount { get; private set; }
+            internal Exception BeginInvokeException { get; set; }
+
+            public IAsyncResult BeginInvoke(Delegate method, object[] args)
+            {
+                if (BeginInvokeException != null)
+                    throw BeginInvokeException;
+
+                BeginInvokeCount++;
+                _callback = method;
+                _arguments = args;
+                return Task.CompletedTask;
+            }
+
+            public object EndInvoke(IAsyncResult result)
+            {
+                return null;
+            }
+
+            public object Invoke(Delegate method, object[] args)
+            {
+                return method.DynamicInvoke(args);
+            }
+
+            public void RunCallback()
+            {
+                var callback = _callback;
+                var arguments = _arguments;
+                _callback = null;
+                _arguments = null;
+
+                if (callback == null)
+                    throw new InvalidOperationException("No UI callback is queued.");
+
+                callback.DynamicInvoke(arguments);
+            }
+        }
+
+        private sealed class ThrowingToStringValue
+        {
+            public override string ToString()
+            {
+                throw new InvalidOperationException("Simulated diagnostic formatting failure.");
+            }
+        }
+
+        private sealed class ChunkedReadStream : Stream
+        {
+            private readonly int _chunkSize;
+            private readonly MemoryStream _stream;
+
+            internal ChunkedReadStream(byte[] contents, int chunkSize)
+            {
+                _stream = new MemoryStream(contents ?? throw new ArgumentNullException(nameof(contents)), false);
+                _chunkSize = chunkSize > 0 ? chunkSize : throw new ArgumentOutOfRangeException(nameof(chunkSize));
+            }
+
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+
+            public override long Position
+            {
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+
+            public override void Flush()
+            {
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                return _stream.Read(buffer, offset, Math.Min(count, _chunkSize));
+            }
+
+            public override long Seek(long offset, SeekOrigin origin)
+            {
+                throw new NotSupportedException();
+            }
+
+            public override void SetLength(long value)
+            {
+                throw new NotSupportedException();
+            }
+
+            public override void Write(byte[] buffer, int offset, int count)
+            {
+                throw new NotSupportedException();
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                    _stream.Dispose();
+                base.Dispose(disposing);
+            }
+        }
+
+        private static string WriteConfig(string contents)
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests");
+            Directory.CreateDirectory(directory);
+
+            var path = Path.Combine(directory, $"{Guid.NewGuid():N}.conf");
+            File.WriteAllText(path, contents);
+            return path;
+        }
+
+        private static WireguardConfigParser.ConfigParser ParseConfig(string path)
+        {
+            WireguardConfigParser.ConfigParser parser = null;
+            using (var file = SecureFileSystem.OpenFileForBoundedRead(path, Profile.MaxProfileSizeBytes))
+                file.UseReadStream(stream => parser = new WireguardConfigParser.ConfigParser(stream));
+            return parser;
+        }
+
+        private static string ValidConfig()
+        {
+            return "[Interface]\n" +
+                   $"PrivateKey = {PrivateKey}\n" +
+                   "Address = 10.0.0.2/32\n" +
+                   "\n" +
+                   "[Peer]\n" +
+                   $"PublicKey = {PublicKey}\n" +
+                   "Endpoint = example.com:51820\n" +
+                   "AllowedIPs = 0.0.0.0/0\n";
+        }
+
+        private static bool TryCreateFileSymbolicLink(string linkPath, string targetPath)
+        {
+            if (CreateSymbolicLink(linkPath, targetPath,
+                    SymbolicLinkFlagFile | SymbolicLinkFlagAllowUnprivilegedCreate))
+                return true;
+
+            return CreateSymbolicLink(linkPath, targetPath, SymbolicLinkFlagFile);
+        }
+
+        private static bool TryCreateProfileReparsePoint(string linkPath, string targetPath, out bool isFileLink)
+        {
+            isFileLink = false;
+
+            if (TryCreateFileSymbolicLink(linkPath, targetPath))
+            {
+                isFileLink = true;
+                return true;
+            }
+
+            var targetDirectory = targetPath + ".junction-target";
+            try
+            {
+                Directory.CreateDirectory(targetDirectory);
+                return TryCreateDirectoryJunction(linkPath, targetDirectory);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryCreateDirectoryJunction(string linkPath, string targetDirectory)
+        {
+            if (linkPath.IndexOf('"') >= 0 || targetDirectory.IndexOf('"') >= 0)
+                return false;
+
+            try
+            {
+                var startInfo = new ProcessStartInfo("cmd.exe",
+                    $"/c mklink /J \"{linkPath}\" \"{targetDirectory}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+
+                using (var process = Process.Start(startInfo))
+                {
+                    if (process == null)
+                        return false;
+
+                    if (!process.WaitForExit(5000))
+                    {
+                        try
+                        {
+                            process.Kill();
+                        }
+                        catch
+                        {
+                            // Best-effort cleanup; the caller will report the unavailable reparse test.
+                        }
+
+                        return false;
+                    }
+
+                    return process.ExitCode == 0 && Directory.Exists(linkPath);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void SkipOrFail(string message)
+        {
+            if (string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(message);
+
+            throw new TestSkippedException(message);
+        }
+
+        private static void TryDeleteFile(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+            catch
+            {
+                // Best-effort cleanup must not hide the original test failure.
+            }
+        }
+
+        private static void TryDeleteDirectory(string path, bool recursive)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                    Directory.Delete(path, recursive);
+            }
+            catch
+            {
+                // Best-effort cleanup must not hide the original test failure.
+            }
+        }
+
+        private static void WithTemporaryConfigFolder(Action action)
+        {
+            var originalConfigsFolder = Global.ConfigsFolder;
+            var originalOverride = Global.AllowUnsecuredConfigFolderOverrideForTests;
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+                Global.ConfigsFolder = directory;
+                Global.AllowUnsecuredConfigFolderOverrideForTests = true;
+                action();
+            }
+            finally
+            {
+                Global.ConfigsFolder = originalConfigsFolder;
+                Global.AllowUnsecuredConfigFolderOverrideForTests = originalOverride;
+
+                try
+                {
+                    if (Directory.Exists(directory))
+                        Directory.Delete(directory, true);
+                }
+                catch
+                {
+                    // Best-effort cleanup must not hide the original test failure.
+                }
+            }
+        }
+
+        private static void WithTemporarySecureMainFolder(Action action)
+        {
+            var originalSecureMainFolder = Global.SecureMainFolder;
+            var directory = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+                Global.SecureMainFolder = directory;
+                action();
+            }
+            finally
+            {
+                Global.SecureMainFolder = originalSecureMainFolder;
+
+                try
+                {
+                    if (Directory.Exists(directory))
+                        Directory.Delete(directory, true);
+                }
+                catch
+                {
+                    // Best-effort cleanup must not hide the original test failure.
+                }
+            }
+        }
+
+        private static void ProcessPickerPreservesExecutableMatchNames()
+        {
+            AssertEqual("chrome.exe", TaskManager.GetProcessMatchName(
+                new ProcessEntry(1, "chrome.exe", @"C:\Program Files\Google\Chrome\chrome.exe", "user")));
+            AssertEqual("wireguard.exe", TaskManager.GetProcessMatchName(
+                new ProcessEntry(2, "wireguard", null, "user")));
+            AssertTrue(TaskManager.GetProcessMatchName(null) == null,
+                "Expected an unavailable process entry not to create an application rule.");
+        }
+
+        private static void ProcessPickerLoadsExecutableIconsAndMainTitleShowsVersion()
+        {
+            string currentProcessPath;
+            using (var currentProcess = Process.GetCurrentProcess())
+                currentProcessPath = currentProcess.MainModule?.FileName;
+
+            AssertTrue(!string.IsNullOrWhiteSpace(currentProcessPath) && File.Exists(currentProcessPath),
+                "Expected the test process executable path to be available.");
+            using (var processIcon = TaskManager.TryExtractProcessIcon(currentProcessPath))
+            {
+                AssertTrue(processIcon != null,
+                    "Expected the process picker to extract the executable's associated icon.");
+            }
+
+            AssertTrue(TaskManager.TryExtractProcessIcon(@"C:\missing\process.exe") == null,
+                "Expected a missing process image to use the fallback icon.");
+            AssertEqual("WireSock UI 0.3.8",
+                FrmMain.BuildWindowTitle("WireSock UI", "0.3.8+build-metadata"));
+            AssertEqual("WireSock UI",
+                FrmMain.BuildWindowTitle("WireSock UI", null));
+        }
+
+        private static void AutoRunValidatesCompleteTaskDefinition()
+        {
+            var executablePath = Assembly.GetExecutingAssembly().Location;
+            string currentUserId;
+            string currentUserName;
+            using (var identity = WindowsIdentity.GetCurrent())
+            {
+                currentUserId = identity.User?.Value ?? throw new InvalidOperationException("Current user SID unavailable.");
+                currentUserName = identity.Name;
+            }
+
+            var otherUserId = new[]
+                {
+                    WellKnownSidType.LocalSystemSid,
+                    WellKnownSidType.LocalServiceSid,
+                    WellKnownSidType.NetworkServiceSid
+                }
+                .Select(type => new SecurityIdentifier(type, null).Value)
+                .First(sid => !FrmSettings.IsSameTaskUser(currentUserId, sid));
+            AssertTrue(FrmSettings.IsSameTaskUser(currentUserName, currentUserId),
+                "Expected account names and SID strings for the same user to compare equal.");
+            AssertFalse(FrmSettings.IsSameTaskUser(currentUserId, otherUserId),
+                "Expected different user SIDs not to compare equal.");
+
+            using (var taskService = new Microsoft.Win32.TaskScheduler.TaskService())
+            using (var definition = taskService.NewTask())
+            {
+                FrmSettings.ConfigureAutoRunTaskDefinition(
+                    definition,
+                    "WireSockUI",
+                    currentUserId,
+                    executablePath);
+                var logonTrigger =
+                    (Microsoft.Win32.TaskScheduler.LogonTrigger)definition.Triggers[0];
+
+                AssertTrue(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected the exact elevated logon task shape to be recognized.");
+                var serializedDefinition = XDocument.Parse(definition.XmlText);
+                AssertEqual("1.3", serializedDefinition.Root?.Attribute("version")?.Value);
+                AssertFalse(
+                    serializedDefinition.Descendants()
+                        .Any(element => element.Name.LocalName == "Volatile"),
+                    "Expected the Windows 7 definition not to emit the Windows 8 Volatile setting.");
+                AssertEqual(
+                    (int)Microsoft.Win32.TaskScheduler.TaskCompatibility.V2_1,
+                    (int)definition.Settings.Compatibility);
+                AssertFalse(FrmSettings.IsAutoRunTaskVolatile(definition.Settings),
+                    "Expected a Windows 7 task definition to be inherently non-volatile.");
+                var serializedPriority = serializedDefinition
+                    .Descendants()
+                    .Single(element => element.Name.LocalName == "Priority");
+                AssertEqual(7, XmlConvert.ToInt32(serializedPriority.Value));
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, false, executablePath),
+                    "Expected a disabled task not to be reported as active autorun.");
+
+                definition.Settings.Priority = ProcessPriorityClass.Normal;
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected a task with a different scheduler priority not to be accepted as canonical.");
+                definition.Settings.Priority = FrmSettings.AutoRunTaskPriorityClass;
+
+                definition.Settings.ExecutionTimeLimit = TimeSpan.FromHours(72);
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected a task with the Task Scheduler 72-hour limit not to be accepted.");
+                definition.Settings.ExecutionTimeLimit = TimeSpan.Zero;
+
+                definition.Settings.DisallowStartIfOnBatteries = true;
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected a task that refuses battery-powered startup not to be accepted as canonical.");
+                definition.Settings.DisallowStartIfOnBatteries = false;
+
+                definition.Settings.RunOnlyIfIdle = true;
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected an idle-gated task not to be reported as canonical autorun.");
+                definition.Settings.RunOnlyIfIdle = false;
+
+                logonTrigger.Delay = TimeSpan.FromDays(30);
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected a delayed logon task not to be reported as canonical autorun.");
+                logonTrigger.Delay = TimeSpan.Zero;
+
+                logonTrigger.EndBoundary = DateTime.UtcNow.AddDays(-1);
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected an expired logon task not to be reported as canonical autorun.");
+                logonTrigger.EndBoundary = DateTime.MaxValue;
+
+                logonTrigger.Repetition.Interval = TimeSpan.FromMinutes(5);
+                logonTrigger.Repetition.Duration = TimeSpan.FromHours(1);
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected a repeating logon trigger not to be reported as canonical autorun.");
+                logonTrigger.Repetition.Duration = TimeSpan.Zero;
+                logonTrigger.Repetition.Interval = TimeSpan.Zero;
+
+                definition.Settings.RestartCount = 3;
+                definition.Settings.RestartInterval = TimeSpan.FromMinutes(1);
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected an automatically restarting task not to be reported as canonical autorun.");
+                definition.Settings.RestartCount = 0;
+                definition.Settings.RestartInterval = TimeSpan.Zero;
+
+                definition.Settings.Volatile = true;
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected a volatile task that disappears at reboot not to be canonical autorun.");
+                definition.Settings.Volatile = false;
+
+                definition.Settings.DisallowStartOnRemoteAppSession = true;
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected a task that skips remote interactive logons not to be canonical autorun.");
+                definition.Settings.DisallowStartOnRemoteAppSession = false;
+
+                logonTrigger.UserId = null;
+                definition.Settings.ExecutionTimeLimit = TimeSpan.FromHours(72);
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected an any-user logon trigger not to be accepted.");
+                AssertTrue(FrmSettings.IsTaskDefinitionReplaceableByExecutable(definition, executablePath),
+                    "Expected an older WireSock UI task to remain replaceable during migration.");
+
+                definition.Principal.UserId =
+                    otherUserId;
+                AssertFalse(FrmSettings.IsTaskDefinitionReplaceableByExecutable(definition, executablePath),
+                    "Expected another user's autorun principal not to be replaceable.");
+
+                definition.Principal.UserId = null;
+                logonTrigger.UserId = otherUserId;
+                AssertFalse(FrmSettings.IsTaskDefinitionReplaceableByExecutable(definition, executablePath),
+                    "Expected another user's logon trigger not to be replaceable.");
+
+                definition.Principal.UserId = otherUserId;
+                logonTrigger.UserId = otherUserId;
+                AssertTrue(FrmSettings.IsTaskScopedToAnotherUser(definition),
+                    "Expected a legacy task consistently scoped to another user to be left available for that user.");
+                logonTrigger.UserId = currentUserId;
+                AssertFalse(FrmSettings.IsTaskScopedToAnotherUser(definition),
+                    "Expected a mixed-user legacy task to remain a conflict instead of being ignored.");
+
+                definition.Principal.UserId = currentUserName;
+                logonTrigger.UserId = currentUserId;
+                definition.Settings.ExecutionTimeLimit = TimeSpan.Zero;
+                AssertTrue(FrmSettings.IsTaskDefinitionReplaceableByExecutable(definition, executablePath),
+                    "Expected a current-user account name and SID trigger to remain replaceable.");
+
+                definition.Actions.Add(new Microsoft.Win32.TaskScheduler.ExecAction("cmd.exe"));
+                AssertFalse(FrmSettings.IsTaskDefinitionOwnedByExecutable(
+                        definition, true, executablePath),
+                    "Expected tasks with additional actions not to be treated as owned.");
+            }
+
+            var canonicalSecurity =
+                new RawSecurityDescriptor(FrmSettings.AutoRunTaskSecurityDescriptorSddl);
+            AssertTrue(FrmSettings.IsAutoRunTaskSecurityCanonical(canonicalSecurity),
+                "Expected the protected SYSTEM/Administrators task DACL to be canonical.");
+            var userWritableSecurity = new RawSecurityDescriptor(
+                FrmSettings.AutoRunTaskSecurityDescriptorSddl +
+                $"(A;;FA;;;{currentUserId})");
+            AssertFalse(FrmSettings.IsAutoRunTaskSecurityCanonical(userWritableSecurity),
+                "Expected a task granting the interactive user direct control not to be canonical.");
+            var systemDeniedSecurity = new RawSecurityDescriptor(
+                "O:BAG:BAD:P(D;;FA;;;SY)(A;;FA;;;SY)(A;;FA;;;BA)");
+            AssertFalse(FrmSettings.IsAutoRunTaskSecurityCanonical(systemDeniedSecurity),
+                "Expected an explicit SYSTEM deny ACE to make the autorun task noncanonical.");
+            var inheritOnlySystemSecurity = new RawSecurityDescriptor(
+                "O:BAG:BAD:P(A;IO;FA;;;SY)(A;;FA;;;BA)");
+            AssertFalse(FrmSettings.IsAutoRunTaskSecurityCanonical(inheritOnlySystemSecurity),
+                "Expected an inherit-only SYSTEM ACE not to satisfy the task DACL.");
+        }
+
+        private static void AutoRunRecognizesHistoricalTaskShape()
+        {
+            string currentUserId;
+            using (var identity = WindowsIdentity.GetCurrent())
+                currentUserId = identity.User?.Value ??
+                                throw new InvalidOperationException("Current user SID unavailable.");
+
+            var otherUserId = new SecurityIdentifier(
+                WellKnownSidType.LocalSystemSid,
+                null).Value;
+            if (FrmSettings.IsSameTaskUser(currentUserId, otherUserId))
+                otherUserId = new SecurityIdentifier(
+                    WellKnownSidType.LocalServiceSid,
+                    null).Value;
+
+            using (var taskService = new Microsoft.Win32.TaskScheduler.TaskService())
+            using (var definition = taskService.NewTask())
+            {
+                definition.RegistrationInfo.Description = "Auto start for WireSockUI";
+                definition.Principal.UserId = currentUserId;
+                definition.Principal.LogonType =
+                    Microsoft.Win32.TaskScheduler.TaskLogonType.InteractiveToken;
+                definition.Principal.RunLevel =
+                    Microsoft.Win32.TaskScheduler.TaskRunLevel.Highest;
+                definition.Triggers.Add(new Microsoft.Win32.TaskScheduler.LogonTrigger
+                {
+                    UserId = currentUserId,
+                    Enabled = true
+                });
+                definition.Actions.Add(new Microsoft.Win32.TaskScheduler.ExecAction(
+                    @"C:\Former WireSock UI\WireSockUI.exe"));
+
+                AssertTrue(
+                    FrmSettings.IsLegacyAutoRunTaskDefinitionMigratable(
+                        definition,
+                        "WireSockUI.exe",
+                        "Auto start for WireSockUI"),
+                    "Expected the exact historical elevated WireSock UI task to remain migratable after its install path changes.");
+                AssertFalse(
+                    FrmSettings.ShouldApplyAutoRunChange(
+                        FrmSettings.AutoRunStatus.LegacyEnabled,
+                        true,
+                        false,
+                        false,
+                        false,
+                        true,
+                        false),
+                    "Expected historical-task migration to remain blocked until the user approves it.");
+                AssertTrue(
+                    FrmSettings.ShouldApplyAutoRunChange(
+                        FrmSettings.AutoRunStatus.LegacyEnabled,
+                        true,
+                        false,
+                        false,
+                        false,
+                        true,
+                        true),
+                    "Expected approval to migrate an enabled historical task to the current protected task.");
+                AssertFalse(
+                    FrmSettings.ShouldOfferLegacyProductTaskMigration(
+                        true,
+                        false,
+                        FrmSettings.AutoRunStatus.Conflict,
+                        false,
+                        false),
+                    "Expected a conflicting autorun status not to offer a migration that cannot run.");
+                AssertFalse(
+                    FrmSettings.ShouldOfferLegacyProductTaskMigration(
+                        true,
+                        false,
+                        FrmSettings.AutoRunStatus.LegacyEnabled,
+                        true,
+                        false),
+                    "Expected legacy-task migration to wait until opaque Startup cleanup is approved.");
+                AssertTrue(
+                    FrmSettings.ShouldOfferLegacyProductTaskMigration(
+                        true,
+                        false,
+                        FrmSettings.AutoRunStatus.LegacyEnabled,
+                        true,
+                        true),
+                    "Expected legacy-task migration to be offered after all mutation prerequisites are approved.");
+                AssertEqual(
+                    (int)AutoRunHelperOperation.Enable,
+                    (int)FrmSettings.GetAutoRunMutationOperation(true, false));
+                AssertEqual(
+                    (int)AutoRunHelperOperation.EnableMigratingLegacyTask,
+                    (int)FrmSettings.GetAutoRunMutationOperation(true, true));
+                AssertEqual(
+                    (int)AutoRunHelperOperation.Disable,
+                    (int)FrmSettings.GetAutoRunMutationOperation(false, false));
+                AssertEqual(
+                    (int)AutoRunHelperOperation.DisableMigratingLegacyTask,
+                    (int)FrmSettings.GetAutoRunMutationOperation(false, true));
+
+                AssertTrue(
+                    FrmSettings.TryResolveMutationOutcome(
+                        AutoRunHelperOperation.EnableMigratingLegacyTask,
+                        FrmSettings.AutoRunStatus.Enabled,
+                        true,
+                        false,
+                        true,
+                        out var partialEnableMigrationSucceeded),
+                    "Expected the canonical current task plus a remaining historical task to be a verifiable partial migration.");
+                AssertFalse(
+                    partialEnableMigrationSucceeded,
+                    "Expected a remaining historical task to prevent successful enable-migration verification.");
+                AssertTrue(
+                    FrmSettings.TryResolveMutationOutcome(
+                        AutoRunHelperOperation.DisableMigratingLegacyTask,
+                        FrmSettings.AutoRunStatus.Disabled,
+                        false,
+                        false,
+                        true,
+                        out var partialDisableMigrationSucceeded),
+                    "Expected disabled autorun plus a remaining historical task to be a verifiable partial migration.");
+                AssertFalse(
+                    partialDisableMigrationSucceeded,
+                    "Expected a remaining historical task to prevent successful disable-migration verification.");
+                AssertTrue(
+                    FrmSettings.TryResolveMutationOutcome(
+                        AutoRunHelperOperation.EnableMigratingLegacyTask,
+                        FrmSettings.AutoRunStatus.Enabled,
+                        true,
+                        false,
+                        false,
+                        out var completedEnableMigrationSucceeded) &&
+                    completedEnableMigrationSucceeded,
+                    "Expected canonical autorun with no historical task to verify completed migration.");
+
+                var action = (Microsoft.Win32.TaskScheduler.ExecAction)definition.Actions[0];
+                action.Path = @"C:\Former WireSock UI\not-wiresock.exe";
+                AssertFalse(
+                    FrmSettings.IsLegacyAutoRunTaskDefinitionMigratable(
+                        definition,
+                        "WireSockUI.exe",
+                        "Auto start for WireSockUI"),
+                    "Expected a different executable name to remain a conflict.");
+                action.Path = @"C:\Former WireSock UI\WireSockUI.exe";
+
+                action.Arguments = "--unexpected";
+                AssertFalse(
+                    FrmSettings.IsLegacyAutoRunTaskDefinitionMigratable(
+                        definition,
+                        "WireSockUI.exe",
+                        "Auto start for WireSockUI"),
+                    "Expected an argument-bearing task not to be migrated.");
+                action.Arguments = null;
+
+                definition.RegistrationInfo.Description = "Another application";
+                AssertFalse(
+                    FrmSettings.IsLegacyAutoRunTaskDefinitionMigratable(
+                        definition,
+                        "WireSockUI.exe",
+                        "Auto start for WireSockUI"),
+                    "Expected a task without the historical product description to remain a conflict.");
+                definition.RegistrationInfo.Description = "Auto start for WireSockUI";
+
+                definition.Principal.UserId = otherUserId;
+                AssertFalse(
+                    FrmSettings.IsLegacyAutoRunTaskDefinitionMigratable(
+                        definition,
+                        "WireSockUI.exe",
+                        "Auto start for WireSockUI"),
+                    "Expected another user's historical task not to be migrated.");
+                definition.Principal.UserId = currentUserId;
+
+                definition.Actions.Add(new Microsoft.Win32.TaskScheduler.ExecAction("cmd.exe"));
+                AssertFalse(
+                    FrmSettings.IsLegacyAutoRunTaskDefinitionMigratable(
+                        definition,
+                        "WireSockUI.exe",
+                        "Auto start for WireSockUI"),
+                    "Expected a task with an additional action to remain a conflict.");
+            }
+        }
+
+        private static void ShellLinkHresultValidationUsesSignedFailureSemantics()
+        {
+            ShellLink.VerifySucceeded(0);
+            ShellLink.VerifySucceeded(1);
+            ShellLink.VerifySucceeded(2);
+            AssertThrows<COMException>(() => ShellLink.VerifySucceeded(0x80004005), "");
+        }
+
+        private static string FindRepositoryFile(params string[] relativePath)
+        {
+            var directory = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            while (directory != null)
+            {
+                var candidate = relativePath.Aggregate(directory.FullName, Path.Combine);
+                if (File.Exists(candidate))
+                    return candidate;
+
+                directory = directory.Parent;
+            }
+
+            throw new FileNotFoundException(
+                $"Could not locate repository file '{Path.Combine(relativePath)}' from the test output directory.");
+        }
+
+        private static void WithTemporaryLegacyMigrationFolders(Action<string, string> action)
+        {
+            var originalSecureMainFolder = Global.SecureMainFolder;
+            var originalConfigsFolder = Global.ConfigsFolder;
+            var originalPendingFolder = Global.PendingLegacyProfilesFolder;
+            var originalLegacyFolder = Global.LegacyConfigsFolder;
+            var originalOverride = Global.AllowUnsecuredConfigFolderOverrideForTests;
+            var originalOwnerWriteFailure = SecureFileSystem.AllowOwnerWriteFailureForTests;
+            var root = Path.Combine(Path.GetTempPath(), "WireSockUI.Tests", Guid.NewGuid().ToString("N"));
+            var secureFolder = Path.Combine(root, "secure");
+            var legacyFolder = Path.Combine(root, "legacy");
+            var pendingFolder = Path.Combine(secureFolder, "PendingLegacyProfiles");
+
+            try
+            {
+                Directory.CreateDirectory(legacyFolder);
+                Global.SecureMainFolder = secureFolder;
+                Global.ConfigsFolder = Path.Combine(secureFolder, "Configs");
+                Global.PendingLegacyProfilesFolder = pendingFolder;
+                Global.LegacyConfigsFolder = legacyFolder;
+                Global.AllowUnsecuredConfigFolderOverrideForTests = false;
+                SecureFileSystem.AllowOwnerWriteFailureForTests = true;
+                Global.EnsureConfigsFolderExists();
+                action(legacyFolder, pendingFolder);
+            }
+            finally
+            {
+                Global.SecureMainFolder = originalSecureMainFolder;
+                Global.ConfigsFolder = originalConfigsFolder;
+                Global.PendingLegacyProfilesFolder = originalPendingFolder;
+                Global.LegacyConfigsFolder = originalLegacyFolder;
+                Global.AllowUnsecuredConfigFolderOverrideForTests = originalOverride;
+                SecureFileSystem.AllowOwnerWriteFailureForTests = originalOwnerWriteFailure;
+
+                TryDeleteDirectory(root, true);
+            }
+        }
+
+        private static byte[] ParseHex(string value)
+        {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            if (value.Length % 2 != 0) throw new FormatException("Hexadecimal input must contain complete bytes.");
+
+            var result = new byte[value.Length / 2];
+            for (var index = 0; index < result.Length; index++)
+                result[index] = Convert.ToByte(value.Substring(index * 2, 2), 16);
+            return result;
+        }
+
+        private static string ToHex(IEnumerable<byte> value)
+        {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            return string.Concat(value.Select(item => item.ToString("x2")));
+        }
+
+        private static void AssertThrows<T>(Action action, string messagePart) where T : Exception
+        {
+            try
+            {
+                action();
+            }
+            catch (T ex)
+            {
+                if (messagePart == null || ex.Message.IndexOf(messagePart, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return;
+
+                throw new Exception($"Expected exception message to contain '{messagePart}', got '{ex.Message}'.");
+            }
+
+            throw new Exception($"Expected {typeof(T).Name}.");
+        }
+
+        private static void AssertEscapedBoundedFormatException(Action action, string escapedText)
+        {
+            try
+            {
+                action();
+            }
+            catch (FormatException ex)
+            {
+                AssertFalse(ex.Message.Contains("\0"),
+                    "Diagnostics must not contain raw NUL characters from untrusted configuration text.");
+                AssertFalse(ex.Message.Contains("\u202E"),
+                    "Diagnostics must not contain raw bidi controls from untrusted configuration text.");
+                AssertTrue(ex.Message.Contains(escapedText),
+                    "Diagnostics should expose escaped control characters for troubleshooting.");
+                AssertTrue(ex.Message.Contains("\u2026"),
+                    "Diagnostics should indicate when untrusted configuration text was truncated.");
+                AssertTrue(ex.Message.Length < 2048,
+                    "Diagnostics should cap untrusted configuration text.");
+                return;
+            }
+
+            throw new Exception("Expected FormatException.");
+        }
+
+        private static void AssertTrue(bool condition, string message)
+        {
+            if (!condition)
+                throw new Exception(message);
+        }
+
+        private static void AssertFalse(bool condition, string message)
+        {
+            if (condition)
+                throw new Exception(message);
+        }
+
+        private static void AssertEqual(string expected, string actual)
+        {
+            if (!string.Equals(expected, actual, StringComparison.Ordinal))
+                throw new Exception($"Expected '{expected}', got '{actual}'.");
+        }
+
+        private static void AssertEqual(int expected, int actual)
+        {
+            if (expected != actual)
+                throw new Exception($"Expected '{expected}', got '{actual}'.");
+        }
+    }
+}

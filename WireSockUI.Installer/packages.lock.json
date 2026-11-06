@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "dependencies": {
+    "native,Version=v0.0": {
+      "WixToolset.UI.wixext": {
+        "type": "Direct",
+        "requested": "[6.0.2, )",
+        "resolved": "6.0.2",
+        "contentHash": "1Hq+Kp4WTb9TLRLRpv/iGod6MnNadz1ZrmY1USS6SL/WVxFuiBvQVGGLXrcdQld9J7oVWCZ8k9eMFtaYJOJ5AQ=="
+      }
+    }
+  }
+}

@@ -1,0 +1,1212 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using WireSockUI.Extensions;
+using WireSockUI.Native;
+using static WireSockUI.Native.WireguardConfigParser;
+
+namespace WireSockUI.Config
+{
+    /// <summary>
+    ///     WireGuard Profile, including WireSock extensions
+    /// </summary>
+    internal class Profile
+    {
+        internal const int MaxProfileNameLength = 250;
+        internal const long MaxProfileSizeBytes = 1024 * 1024;
+        internal const int MaxProfileCatalogEntries = 1024;
+        internal const int MaxAddressListCharacters = 256 * 1024;
+        internal const int MaxAddressListValues = 4096;
+        internal const int MaxAddressValueCharacters = 256;
+        internal const int MaxApplicationListCharacters = 64 * 1024;
+        internal const int MaxApplicationListValues = 1024;
+        internal const int MaxApplicationValueCharacters = 32767;
+        internal const int MaxScriptValueCharacters = 32767;
+        internal const int MaxScalarValueCharacters = 4096;
+        internal const int MaxEndpointValueCharacters = 1024;
+        internal const int MaxKeyValueCharacters = 64;
+        internal const int MaxNumericValueCharacters = 32;
+        internal const int MaxBooleanValueCharacters = 16;
+
+        private static readonly HashSet<string> ReservedDeviceNames = new HashSet<string>(
+            new[]
+            {
+                "CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$",
+                "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+                "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+                "COM\u00B9", "COM\u00B2", "COM\u00B3", "LPT\u00B9", "LPT\u00B2", "LPT\u00B3"
+            },
+            StringComparer.OrdinalIgnoreCase);
+
+        private static readonly string[] SupportedInterfaceKeys =
+        {
+            "PrivateKey", "Address", "DNS", "MTU", "ListenPort", "ScriptExecTimeout", "PreUp",
+            "PostUp", "PreDown", "PostDown", "VirtualAdapterMode", "EnableDefaultGateway",
+            "Jc", "Jmin", "Jmax", "Jd", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "Id", "Ip",
+            "Ib"
+        };
+
+        private static readonly string[] SupportedPeerKeys =
+        {
+            "PublicKey", "PresharedKey", "AllowedIPs", "Endpoint", "PersistentKeepalive", "AllowedApps",
+            "DisallowedApps", "DisallowedIPs", "Socks5Proxy", "Socks5ProxyUsername", "Socks5ProxyPassword",
+            "Socks5ProxyAllTraffic"
+        };
+
+        private static readonly Dictionary<string, string> SupportedInterfaceKeyLookup =
+            BuildKeyLookup(SupportedInterfaceKeys);
+
+        private static readonly Dictionary<string, string> SupportedPeerKeyLookup =
+            BuildKeyLookup(SupportedPeerKeys);
+
+        private string _address;
+        private string _allowedApps;
+        private string _disallowedApps;
+
+        // WireSock Extensions
+        private string _allowedIPs;
+        private string _dns;
+        private string _endpoint;
+        private string _listenport;
+        private string _mtu;
+        private string _persistentKeepAlive;
+        private string _scriptExecTimeout;
+        private string _disallowedIPs;
+        private string _virtualAdapterMode;
+        private string _preUpScript;
+        private string _postUpScript;
+        private string _preDownScript;
+        private string _postDownScript;
+
+        private string _presharedKey;
+
+        // Interface values
+        private string _privateKey;
+
+        // Peer values
+        private string _publicKey;
+        private string _socks5Proxy;
+        private string _socks5ProxyUsername;
+        private string _socks5ProxyPassword;
+        private string _socks5ProxyAllTraffic;
+
+        /// <summary>
+        ///     Create an empty profile from scratch
+        /// </summary>
+        public Profile()
+        {
+        }
+
+        /// <summary>
+        ///     Load a profile from specified filepath
+        /// </summary>
+        /// <param name="profilePath">Full filepath to a profile</param>
+        public Profile(string profilePath)
+        {
+            if (!ProfilePathExists(profilePath))
+                throw new FileNotFoundException($"Profile {GetProfileDisplayName(profilePath)} does not exist.");
+
+            EnsureRegularProfileFile(profilePath);
+
+            ConfigParser parser = null;
+            using (var profileFile = SecureFileSystem.OpenFileForBoundedRead(profilePath, MaxProfileSizeBytes))
+                profileFile.UseReadStream(stream => parser = new ConfigParser(stream));
+            var sections = parser.GetSectionNames();
+
+            var configESections = sections as string[] ?? sections.ToArray();
+            if (!configESections.Contains("Interface", StringComparer.Ordinal))
+                throw new ArgumentException(
+                    $"Profile {GetProfileDisplayName(profilePath)} does not contain an \"Interface\" section.");
+
+            var section = parser.GetSection("Interface");
+            ValidateUnsupportedInterfaceDirectives(section);
+            ValidateAllowedKeys("Interface", section, SupportedInterfaceKeyLookup);
+
+            PrivateKey = GetRequiredValue(profilePath, "Interface", section, "PrivateKey");
+            Address = GetRequiredValue(profilePath, "Interface", section, "Address");
+            Dns = section.Get("DNS");
+            Mtu = section.Get("MTU");
+            ListenPort = section.Get("ListenPort");
+            ScriptExecTimeout = section.Get("ScriptExecTimeout");
+            PreUpScript = section.Get("PreUp");
+            PostUpScript = section.Get("PostUp");
+            PreDownScript = section.Get("PreDown");
+            PostDownScript = section.Get("PostDown");
+            VirtualAdapterMode = section.Get("VirtualAdapterMode");
+            ValidateInterfaceExtensions(section);
+
+            if (!configESections.Contains("Peer", StringComparer.Ordinal))
+                throw new ArgumentException(
+                    $"Profile {GetProfileDisplayName(profilePath)} does not contain a \"Peer\" section.");
+
+            ValidateAllowedSections(configESections);
+            section = parser.GetSection("Peer");
+            ValidateUnsupportedPeerDirectives(section);
+            ValidateAllowedKeys("Peer", section, SupportedPeerKeyLookup);
+
+            PeerKey = GetRequiredValue(profilePath, "Peer", section, "PublicKey");
+            PresharedKey = section.Get("PresharedKey");
+            AllowedIPs = GetRequiredValue(profilePath, "Peer", section, "AllowedIPs");
+            Endpoint = GetRequiredValue(profilePath, "Peer", section, "Endpoint");
+            PersistentKeepAlive = section.Get("PersistentKeepalive");
+
+            AllowedApps = section.Get("AllowedApps");
+            DisallowedApps = section.Get("DisallowedApps");
+            DisallowedIPs = section.Get("DisallowedIPs");
+            Socks5Proxy = section.Get("Socks5Proxy");
+            Socks5ProxyUsername = section.Get("Socks5ProxyUsername");
+            Socks5ProxyPassword = section.Get("Socks5ProxyPassword");
+            Socks5ProxyAllTraffic = section.Get("Socks5ProxyAllTraffic");
+        }
+
+        /// <summary>
+        ///     Local interface private key
+        /// </summary>
+        public string PrivateKey
+        {
+            get => _privateKey;
+            set
+            {
+                ValidateKey("Interface", "PrivateKey", value);
+                _privateKey = value;
+            }
+        }
+
+        /// <summary>
+        ///     Local interface public key, derived from private key
+        /// </summary>
+        public string PublicKey
+        {
+            get
+            {
+                if (!string.IsNullOrEmpty(_privateKey))
+                    // Determine public key from private key data
+                    return
+                        Convert.ToBase64String(
+                            Curve25519.GetPublicKey(
+                                Convert.FromBase64String(PrivateKey)));
+
+                return null;
+            }
+        }
+
+        /// <summary>
+        ///     List of interface IP addresses
+        /// </summary>
+        public string Address
+        {
+            get => _address;
+            set
+            {
+                if (!ValidateAddresses("Interface", "Address", value,
+                        IpHelper.IsValidSubnetOrSingleIpAddress, true))
+                    throw new FormatException(
+                        "\"Address\" in \"Interface\" must contain at least one address.");
+
+                _address = value;
+            }
+        }
+
+        /// <summary>
+        ///     List of interface DNS servers
+        /// </summary>
+        public string Dns
+        {
+            get => _dns;
+            set
+            {
+                ValidateAddresses("Interface", "DNS", value, IpHelper.IsValidIpAddress);
+                _dns = value;
+            }
+        }
+
+        /// <summary>
+        ///     Interface Maximum Transmissible Unit size
+        /// </summary>
+        public string Mtu
+        {
+            get => _mtu;
+            set
+            {
+                ValidateUInt("Interface", "MTU", value, 576, ushort.MaxValue);
+                _mtu = string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+        }
+
+        /// <summary>
+        ///     Interface ListenPort
+        /// </summary>
+        public string ListenPort
+        {
+            get => _listenport;
+            set
+            {
+                ValidateUInt("Interface", "ListenPort", value, 0, ushort.MaxValue);
+                _listenport = string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+        }
+
+        /// <summary>
+        ///     Timeout for Pre/Post up/down scripts.
+        /// </summary>
+        public string ScriptExecTimeout
+        {
+            get => _scriptExecTimeout;
+            set
+            {
+                ValidateUInt("Interface", "ScriptExecTimeout", value, 0, uint.MaxValue);
+                _scriptExecTimeout = string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+        }
+
+        public string PreUpScript
+        {
+            get => _preUpScript;
+            set
+            {
+                ValidateValueLength("Interface", "PreUp", value, MaxScriptValueCharacters);
+                _preUpScript = value;
+            }
+        }
+
+        public string PostUpScript
+        {
+            get => _postUpScript;
+            set
+            {
+                ValidateValueLength("Interface", "PostUp", value, MaxScriptValueCharacters);
+                _postUpScript = value;
+            }
+        }
+
+        public string PreDownScript
+        {
+            get => _preDownScript;
+            set
+            {
+                ValidateValueLength("Interface", "PreDown", value, MaxScriptValueCharacters);
+                _preDownScript = value;
+            }
+        }
+
+        public string PostDownScript
+        {
+            get => _postDownScript;
+            set
+            {
+                ValidateValueLength("Interface", "PostDown", value, MaxScriptValueCharacters);
+                _postDownScript = value;
+            }
+        }
+
+        public IReadOnlyList<KeyValuePair<string, string>> GetConfiguredScriptHooks()
+        {
+            var hooks = new List<KeyValuePair<string, string>>();
+
+            AddScriptHook(hooks, "PreUp", PreUpScript);
+            AddScriptHook(hooks, "PostUp", PostUpScript);
+            AddScriptHook(hooks, "PreDown", PreDownScript);
+            AddScriptHook(hooks, "PostDown", PostDownScript);
+
+            return hooks;
+        }
+
+        /// <summary>
+        ///     Profile-level virtual adapter preference when supported by the SDK.
+        /// </summary>
+        public string VirtualAdapterMode
+        {
+            get => _virtualAdapterMode;
+            set
+            {
+                ValidateBool("Interface", "VirtualAdapterMode", value);
+                _virtualAdapterMode = string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+        }
+
+        /// <summary>
+        ///     Peer public key
+        /// </summary>
+        public string PeerKey
+        {
+            get => _publicKey;
+            set
+            {
+                ValidateKey("Peer", "PublicKey", value);
+                _publicKey = value;
+            }
+        }
+
+        /// <summary>
+        ///     Peer preshared key (optional)
+        /// </summary>
+        public string PresharedKey
+        {
+            get => _presharedKey;
+            set
+            {
+                ValidateKey("Peer", "PresharedKey", value);
+                _presharedKey = value;
+            }
+        }
+
+        /// <summary>
+        ///     Peer allowed IP list
+        /// </summary>
+        public string AllowedIPs
+        {
+            get => _allowedIPs;
+            set
+            {
+                if (!ValidateAddresses("Peer", "AllowedIPs", value,
+                        IpHelper.IsValidSubnetOrSingleIpAddress, true))
+                    throw new FormatException(
+                        "\"AllowedIPs\" in \"Peer\" must contain at least one address.");
+
+                _allowedIPs = value;
+            }
+        }
+
+        /// <summary>
+        ///     Peer endpoint address (DNS or IP)
+        /// </summary>
+        public string Endpoint
+        {
+            get => _endpoint;
+            set
+            {
+                ValidateValueLength("Peer", "Endpoint", value, MaxEndpointValueCharacters);
+                if (!IpHelper.IsValidAddress(value))
+                    throw new FormatException("\"Endpoint\" in \"Peer\", is not a valid IPv4, IPv6 or domain address.");
+
+                _endpoint = value;
+            }
+        }
+
+
+        /// <summary>
+        ///     Persistent keep alive interval
+        /// </summary>
+        public string PersistentKeepAlive
+        {
+            get => _persistentKeepAlive;
+            set
+            {
+                ValidateUInt("Peer", "PersistentKeepalive", value, 0, uint.MaxValue);
+                _persistentKeepAlive = string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+        }
+
+        /// <summary>
+        ///     Peer allowed applications list
+        /// </summary>
+        /// <remarks>WireSock specific extension</remarks>
+        public string AllowedApps
+        {
+            get => _allowedApps;
+            set
+            {
+                ValidateListBounds(
+                    "Peer",
+                    "AllowedApps",
+                    value,
+                    MaxApplicationListCharacters,
+                    MaxApplicationListValues,
+                    MaxApplicationValueCharacters);
+                _allowedApps = value;
+            }
+        }
+
+        /// <summary>
+        ///     Peer disallowed applications list
+        /// </summary>
+        /// <remarks>WireSock specific extension</remarks>
+        public string DisallowedApps
+        {
+            get => _disallowedApps;
+            set
+            {
+                ValidateListBounds(
+                    "Peer",
+                    "DisallowedApps",
+                    value,
+                    MaxApplicationListCharacters,
+                    MaxApplicationListValues,
+                    MaxApplicationValueCharacters);
+                _disallowedApps = value;
+            }
+        }
+
+        /// <summary>
+        ///     Peer disallowed IP addresses
+        /// </summary>
+        /// <remarks>WireSock specific extension</remarks>
+        public string DisallowedIPs
+        {
+            get => _disallowedIPs;
+            set
+            {
+                _disallowedIPs = ValidateAddresses("Peer", "DisallowedIPs", value,
+                    IpHelper.IsValidSubnetOrSingleIpAddress, true)
+                    ? value
+                    : null;
+            }
+        }
+
+        /// <summary>
+        ///     Peer SOCKS5 proxy
+        /// </summary>
+        /// <remarks>WireSock specific extension</remarks>
+        public string Socks5Proxy
+        {
+            get => _socks5Proxy;
+            set
+            {
+                ValidateValueLength("Peer", "Socks5Proxy", value, MaxEndpointValueCharacters);
+                if (!string.IsNullOrEmpty(value))
+                {
+                    if (!IpHelper.IsValidAddress(value))
+                        throw new FormatException(
+                            "\"Socks5Proxy\" in \"Peer\", is not a valid IPv4, IPv6 or domain address.");
+
+                    _socks5Proxy = value;
+                }
+                else
+                {
+                    _socks5Proxy = null;
+                }
+            }
+        }
+
+        /// <summary>
+        ///     Peer SOCKS5 proxy username
+        /// </summary>
+        /// <remarks>WireSock specific extension</remarks>
+        public string Socks5ProxyUsername
+        {
+            get => _socks5ProxyUsername;
+            set
+            {
+                ValidateValueLength(
+                    "Peer",
+                    "Socks5ProxyUsername",
+                    value,
+                    MaxScalarValueCharacters);
+                _socks5ProxyUsername = value;
+            }
+        }
+
+        /// <summary>
+        ///     Peer SOCKS5 proxy password
+        /// </summary>
+        /// <remarks>WireSock specific extension</remarks>
+        public string Socks5ProxyPassword
+        {
+            get => _socks5ProxyPassword;
+            set
+            {
+                ValidateValueLength(
+                    "Peer",
+                    "Socks5ProxyPassword",
+                    value,
+                    MaxScalarValueCharacters);
+                _socks5ProxyPassword = value;
+            }
+        }
+
+        /// <summary>
+        ///     Route all WireGuard traffic through the configured SOCKS5 proxy.
+        /// </summary>
+        /// <remarks>WireSock specific extension</remarks>
+        public string Socks5ProxyAllTraffic
+        {
+            get => _socks5ProxyAllTraffic;
+            set
+            {
+                ValidateBool("Peer", "Socks5ProxyAllTraffic", value);
+                _socks5ProxyAllTraffic = string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+        }
+
+        internal static void ValidateKey(string section, string key, string keyValue)
+        {
+            byte[] keyBinary;
+
+            ValidateValueLength(section, key, keyValue, MaxKeyValueCharacters);
+            if (string.IsNullOrWhiteSpace(keyValue)) return;
+
+            try
+            {
+                keyBinary = Convert.FromBase64String(keyValue);
+            }
+            catch (FormatException)
+            {
+                throw new FormatException($"\"{key}\" in \"{section}\", invalid base64 encoded value.");
+            }
+
+            // 256-bit keys only
+            if (keyBinary.Length != 32)
+                throw new FormatException(
+                    $"\"{key}\" in \"{section}\", invalid key length, only 256-bit keys are supported.");
+        }
+
+        internal static bool ValidateAddresses(string section, string key, string keyValue,
+            Func<string, bool> validator, bool ignoreBlankItems = false)
+        {
+            if (validator == null) throw new ArgumentNullException(nameof(validator));
+
+            ValidateListBounds(
+                section,
+                key,
+                keyValue,
+                MaxAddressListCharacters,
+                MaxAddressListValues,
+                MaxAddressValueCharacters);
+            if (string.IsNullOrWhiteSpace(keyValue)) return false;
+
+            var hasAddress = false;
+            var itemStart = 0;
+            while (itemStart <= keyValue.Length)
+            {
+                var commaIndex = keyValue.IndexOf(',', itemStart);
+                var itemEnd = commaIndex < 0 ? keyValue.Length : commaIndex;
+                var value = keyValue.Substring(itemStart, itemEnd - itemStart);
+                var trimmedValue = value.Trim();
+                if (string.IsNullOrWhiteSpace(trimmedValue))
+                {
+                    if (ignoreBlankItems)
+                    {
+                        if (commaIndex < 0)
+                            break;
+                        itemStart = commaIndex + 1;
+                        continue;
+                    }
+
+                    throw new FormatException(
+                        $"\"{key}\" in \"{section}\", invalid address \"{EscapeDiagnosticToken(value)}\".");
+                }
+
+                if (!validator(trimmedValue))
+                    throw new FormatException(
+                        $"\"{key}\" in \"{section}\", invalid address \"{EscapeDiagnosticToken(value)}\".");
+
+                hasAddress = true;
+                if (commaIndex < 0)
+                    break;
+                itemStart = commaIndex + 1;
+            }
+
+            return hasAddress;
+        }
+
+        internal static void ValidateBool(string section, string key, string keyValue)
+        {
+            ValidateValueLength(section, key, keyValue, MaxBooleanValueCharacters);
+            if (string.IsNullOrWhiteSpace(keyValue)) return;
+
+            var trimmedValue = keyValue.Trim();
+            if (!string.Equals(trimmedValue, "true", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(trimmedValue, "false", StringComparison.OrdinalIgnoreCase))
+                throw new FormatException($"\"{key}\" in \"{section}\", must be true or false.");
+        }
+
+        private static void ValidateInterfaceExtensions(Dictionary<string, string> section)
+        {
+            foreach (var rule in ConfigValueValidator.InterfaceExtensionRules)
+            {
+                var value = section.Get(rule.Key);
+                if (section.ContainsKey(rule.Key) && string.IsNullOrWhiteSpace(value) &&
+                    !IsBlankAmneziaHeaderAllowed(rule.Key))
+                    throw new FormatException($"\"{rule.Key}\" in \"Interface\" cannot be empty.");
+
+                if (!rule.IsValid(value))
+                    throw new FormatException(
+                        $"\"{rule.Key}\" in \"Interface\", invalid value. Expected {rule.ExpectedValueDescription}.");
+            }
+
+            ValidateRequiredPair(section, "Jmin", "Jmax");
+            ValidateUIntOrdering(section, "Jmin", "Jmax");
+            ValidatePreHandshakeActivation(section);
+            ValidateAmneziaGroup(section);
+            ValidateAmneziaHeaderRanges(section);
+            ValidateProtocolImitation(section);
+
+            if (section.ContainsKey("EnableDefaultGateway") &&
+                !string.Equals(section.Get("EnableDefaultGateway"), "true", StringComparison.Ordinal) &&
+                !string.Equals(section.Get("EnableDefaultGateway"), "false", StringComparison.Ordinal))
+                throw new FormatException(
+                    "\"EnableDefaultGateway\" in \"Interface\" must be exactly \"true\" or \"false\".");
+        }
+
+        private static bool IsBlankAmneziaHeaderAllowed(string key)
+        {
+            return string.Equals(key, "H1", StringComparison.Ordinal) ||
+                   string.Equals(key, "H2", StringComparison.Ordinal) ||
+                   string.Equals(key, "H3", StringComparison.Ordinal) ||
+                   string.Equals(key, "H4", StringComparison.Ordinal);
+        }
+
+        internal static void ValidateUInt(string section, string key, string keyValue, uint minValue, uint maxValue)
+        {
+            ValidateValueLength(section, key, keyValue, MaxNumericValueCharacters);
+            if (string.IsNullOrWhiteSpace(keyValue)) return;
+
+            if (!ConfigValueValidator.IsUIntDecimalInRange(keyValue, minValue, maxValue))
+                throw new FormatException(
+                    $"\"{key}\" in \"{section}\", invalid value. Expected {minValue}...{maxValue}.");
+        }
+
+        private static void ValidateAllowedSections(IEnumerable<string> sectionNames)
+        {
+            foreach (var sectionName in sectionNames)
+            {
+                if (string.Equals(sectionName, "Interface", StringComparison.Ordinal) ||
+                    string.Equals(sectionName, "Peer", StringComparison.Ordinal))
+                    continue;
+
+                throw new FormatException(
+                    $"Configuration section \"{EscapeDiagnosticToken(sectionName)}\" is not supported and will not be passed to the elevated WireSock engine. " +
+                    "Remove it or upgrade WireSock UI and the WireSock SDK together if the section is required.");
+            }
+        }
+
+        private static void ValidateAllowedKeys(
+            string sectionName,
+            Dictionary<string, string> section,
+            Dictionary<string, string> canonicalKeys)
+        {
+            foreach (var pair in section)
+            {
+                var key = pair.Key;
+                if (!canonicalKeys.TryGetValue(key, out var canonicalKey))
+                    throw new FormatException(
+                        $"Configuration key \"{EscapeDiagnosticToken(key)}\" in \"{EscapeDiagnosticToken(sectionName)}\" is not supported and will not be passed to the elevated WireSock engine. " +
+                        "Remove it or upgrade WireSock UI and the WireSock SDK together if the directive is required.");
+
+                if (!string.Equals(key, canonicalKey, StringComparison.Ordinal))
+                    throw new FormatException(
+                        $"Configuration key \"{EscapeDiagnosticToken(key)}\" has invalid casing. The current SDK expects \"{EscapeDiagnosticToken(canonicalKey)}\".");
+
+                ValidateValueLength(
+                    sectionName,
+                    canonicalKey,
+                    pair.Value,
+                    GetMaximumValueLength(canonicalKey));
+            }
+        }
+
+        internal static bool IsCanonicalSectionName(string sectionName)
+        {
+            return string.Equals(sectionName, "Interface", StringComparison.Ordinal) ||
+                   string.Equals(sectionName, "Peer", StringComparison.Ordinal);
+        }
+
+        internal static bool TryGetCanonicalKey(
+            string sectionName,
+            string key,
+            out string canonicalKey)
+        {
+            canonicalKey = null;
+            if (key == null)
+                return false;
+
+            if (string.Equals(sectionName, "Interface", StringComparison.Ordinal))
+                return SupportedInterfaceKeyLookup.TryGetValue(key, out canonicalKey);
+            if (string.Equals(sectionName, "Peer", StringComparison.Ordinal))
+                return SupportedPeerKeyLookup.TryGetValue(key, out canonicalKey);
+            return false;
+        }
+
+        private static Dictionary<string, string> BuildKeyLookup(IEnumerable<string> keys)
+        {
+            return keys.ToDictionary(key => key, key => key, StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static int GetMaximumValueLength(string canonicalKey)
+        {
+            switch (canonicalKey)
+            {
+                case "PrivateKey":
+                case "PublicKey":
+                case "PresharedKey":
+                    return MaxKeyValueCharacters;
+                case "Address":
+                case "DNS":
+                case "AllowedIPs":
+                case "DisallowedIPs":
+                    return MaxAddressListCharacters;
+                case "AllowedApps":
+                case "DisallowedApps":
+                    return MaxApplicationListCharacters;
+                case "PreUp":
+                case "PostUp":
+                case "PreDown":
+                case "PostDown":
+                    return MaxScriptValueCharacters;
+                case "Endpoint":
+                case "Socks5Proxy":
+                    return MaxEndpointValueCharacters;
+                case "MTU":
+                case "ListenPort":
+                case "ScriptExecTimeout":
+                case "PersistentKeepalive":
+                    return MaxNumericValueCharacters;
+                case "VirtualAdapterMode":
+                case "EnableDefaultGateway":
+                case "Socks5ProxyAllTraffic":
+                    return MaxBooleanValueCharacters;
+                default:
+                    return MaxScalarValueCharacters;
+            }
+        }
+
+        private static void ValidateValueLength(
+            string section,
+            string key,
+            string value,
+            int maximumCharacters)
+        {
+            if (value == null || value.Length <= maximumCharacters)
+                return;
+
+            throw new FormatException(
+                $"\"{key}\" in \"{section}\" exceeds the supported limit of {maximumCharacters} characters.");
+        }
+
+        private static void ValidateListBounds(
+            string section,
+            string key,
+            string value,
+            int maximumCharacters,
+            int maximumValues,
+            int maximumValueCharacters)
+        {
+            if (value == null)
+                return;
+
+            ValidateValueLength(section, key, value, maximumCharacters);
+
+            var valueCount = 1;
+            var itemStart = 0;
+            for (var index = 0; index <= value.Length; index++)
+            {
+                if (index < value.Length && value[index] != ',')
+                    continue;
+
+                if (index - itemStart > maximumValueCharacters)
+                {
+                    var diagnosticLength = Math.Min(index - itemStart, 161);
+                    var diagnosticValue = value.Substring(itemStart, diagnosticLength);
+                    throw new FormatException(
+                        $"\"{key}\" in \"{section}\" contains a value \"{EscapeDiagnosticToken(diagnosticValue)}\" longer than the supported limit of {maximumValueCharacters} characters.");
+                }
+
+                if (index == value.Length)
+                    break;
+
+                valueCount++;
+                if (valueCount > maximumValues)
+                    throw new FormatException(
+                        $"\"{key}\" in \"{section}\" contains more than the supported limit of {maximumValues} values.");
+                itemStart = index + 1;
+            }
+        }
+
+        private static void ValidateUnsupportedInterfaceDirectives(Dictionary<string, string> section)
+        {
+            if (ContainsKeyIgnoringCase(section, "BypassLanTraffic"))
+                throw new FormatException(
+                    "\"BypassLanTraffic\" is not supported by direct wgbooster.dll integration. Specify LAN prefixes with \"DisallowedIPs\" in \"Peer\".");
+
+            if (ContainsKeyIgnoringCase(section, "Table"))
+                throw new FormatException(
+                    "\"Table\" is not supported by the current wgbooster.dll configuration parser.");
+
+            for (var index = 1; index <= 5; index++)
+            {
+                var key = $"I{index}";
+                if (ContainsKeyIgnoringCase(section, key))
+                    throw new FormatException(
+                        $"\"{key}\" is not supported by the current wgbooster.dll configuration parser.");
+            }
+        }
+
+        private static void ValidateUnsupportedPeerDirectives(Dictionary<string, string> section)
+        {
+            if (ContainsKeyIgnoringCase(section, "Socks5Username"))
+                throw new FormatException(
+                    "\"Socks5Username\" in \"Peer\" is not supported by the current SDK. Use \"Socks5ProxyUsername\".");
+        }
+
+        private static bool ContainsKeyIgnoringCase(Dictionary<string, string> section, string key)
+        {
+            return section.Keys.Any(existingKey =>
+                string.Equals(existingKey, key, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static void ValidateRequiredPair(Dictionary<string, string> section, string firstKey, string secondKey)
+        {
+            if (section.ContainsKey(firstKey) == section.ContainsKey(secondKey))
+                return;
+
+            throw new FormatException(
+                $"\"{firstKey}\" and \"{secondKey}\" in \"Interface\" must be specified together.");
+        }
+
+        private static void ValidateAmneziaGroup(Dictionary<string, string> section)
+        {
+            var allKeys = new[] { "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4" };
+            if (!allKeys.Any(section.ContainsKey))
+                return;
+
+            var requiredKeys = new[] { "S1", "S2", "H1", "H2", "H3", "H4" };
+            var missingKeys = requiredKeys.Where(key => !section.ContainsKey(key)).ToArray();
+            if (missingKeys.Length > 0)
+                throw new FormatException(
+                    $"Amnezia configuration in \"Interface\" is incomplete. Missing: {string.Join(", ", missingKeys)}.");
+        }
+
+        private static void ValidatePreHandshakeActivation(Dictionary<string, string> section)
+        {
+            if (!(section.ContainsKey("Jmin") || section.ContainsKey("Jmax") || section.ContainsKey("Jd")))
+                return;
+
+            if (!section.ContainsKey("Jc") && !section.ContainsKey("Id"))
+                throw new FormatException(
+                    "\"Jmin\", \"Jmax\", and \"Jd\" in \"Interface\" require \"Jc\" or \"Id\" to enable pre-handshake configuration.");
+        }
+
+        private static void ValidateProtocolImitation(Dictionary<string, string> section)
+        {
+            if ((section.ContainsKey("Ip") || section.ContainsKey("Ib")) && !section.ContainsKey("Id"))
+                throw new FormatException("\"Ip\" and \"Ib\" in \"Interface\" require \"Id\".");
+
+            var protocol = section.Get("Ip")?.Trim();
+            if ((string.Equals(protocol, "sip", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(protocol, "sip_request", StringComparison.OrdinalIgnoreCase)) &&
+                !ConfigValueValidator.IsSipImitationHost(section.Get("Id")))
+                throw new FormatException(
+                    "\"Id\" in \"Interface\" is not a valid SIP imitation host. Use ASCII labels of at most 63 characters.");
+        }
+
+        private static void ValidateAmneziaHeaderRanges(Dictionary<string, string> section)
+        {
+            var keys = new[] { "H1", "H2", "H3", "H4" };
+            if (!keys.All(section.ContainsKey))
+                return;
+
+            var ranges = keys.Select((key, index) => ParseResolvedHeaderRange(section.Get(key), (uint)index + 1))
+                .ToArray();
+            for (var first = 0; first < ranges.Length; first++)
+            {
+                for (var second = first + 1; second < ranges.Length; second++)
+                {
+                    if (ranges[first].Start <= ranges[second].End && ranges[second].Start <= ranges[first].End)
+                        throw new FormatException(
+                            $"\"{keys[first]}\" and \"{keys[second]}\" in \"Interface\" resolve to overlapping header ranges.");
+                }
+            }
+        }
+
+        private static HeaderRange ParseResolvedHeaderRange(string value, uint defaultValue)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return new HeaderRange(defaultValue, defaultValue);
+
+            var parts = value.Split('-');
+            ConfigValueValidator.TryParseUIntDecimal(parts[0], out var start);
+            var end = start;
+            if (parts.Length == 2)
+                ConfigValueValidator.TryParseUIntDecimal(parts[1], out end);
+
+            return start == 0 && end == 0
+                ? new HeaderRange(defaultValue, defaultValue)
+                : new HeaderRange(start, end);
+        }
+
+        private struct HeaderRange
+        {
+            public HeaderRange(uint start, uint end)
+            {
+                Start = start;
+                End = end;
+            }
+
+            public uint Start { get; }
+            public uint End { get; }
+        }
+
+        private static void ValidateUIntOrdering(Dictionary<string, string> section, string minKey, string maxKey)
+        {
+            var minValue = section.Get(minKey);
+            var maxValue = section.Get(maxKey);
+            if (string.IsNullOrWhiteSpace(minValue) || string.IsNullOrWhiteSpace(maxValue))
+                return;
+
+            if (!ConfigValueValidator.TryParseUIntDecimal(minValue, out var min) ||
+                !ConfigValueValidator.TryParseUIntDecimal(maxValue, out var max))
+                return;
+
+            if (min >= max)
+                throw new FormatException(
+                    $"\"{minKey}\" in \"Interface\" must be less than \"{maxKey}\".");
+        }
+
+        public static IReadOnlyList<string> GetProfiles()
+        {
+            Global.EnsureConfigsFolderExists();
+            var profiles = new List<string>();
+            var catalogEntries = 0;
+
+            foreach (var file in Directory.EnumerateFileSystemEntries(
+                         Global.ConfigsFolder, "*", SearchOption.TopDirectoryOnly))
+            {
+                catalogEntries++;
+                if (catalogEntries > MaxProfileCatalogEntries)
+                    throw new InvalidDataException(
+                        $"The profile folder contains more than {MaxProfileCatalogEntries} entries. Remove unused files or directories before continuing.");
+
+                if (!file.EndsWith(".conf", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!IsLoadableProfileFile(file, out var diagnostic))
+                {
+                    Trace.TraceWarning(diagnostic);
+                    continue;
+                }
+
+                var profileName = Path.GetFileNameWithoutExtension(file);
+                if (!IsValidProfileName(profileName))
+                {
+                    Trace.TraceWarning($"Skipping invalid WireSock UI profile file name '{Path.GetFileName(file)}'.");
+                    continue;
+                }
+
+                profiles.Add(profileName);
+            }
+
+            return profiles;
+        }
+
+        /// <summary>
+        ///     Retrieve the full path to a given <paramref name="profileName" />
+        /// </summary>
+        /// <param name="profileName">Profile name</param>
+        /// <returns>Full path to the profile</returns>
+        /// <remarks>The profile might not exist, this merely returns the path it should be at.</remarks>
+        public static string GetProfilePath(string profileName)
+        {
+            if (!IsValidProfileName(profileName))
+                throw new ArgumentException("Profile name is empty or contains characters that are not valid in a Windows file name.",
+                    nameof(profileName));
+
+            var configRoot = Path.GetFullPath(Global.ConfigsFolder)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var profilePath = Path.GetFullPath(Path.Combine(configRoot, profileName + ".conf"));
+
+            if (!profilePath.StartsWith(configRoot, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Profile path must stay inside the WireSock UI configuration folder.",
+                    nameof(profileName));
+
+            return profilePath;
+        }
+
+        public static bool IsValidProfileName(string profileName)
+        {
+            if (string.IsNullOrWhiteSpace(profileName))
+                return false;
+
+            var trimmedName = profileName.Trim();
+            if (!string.Equals(profileName, trimmedName, StringComparison.Ordinal) ||
+                trimmedName.Length > MaxProfileNameLength ||
+                trimmedName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                return false;
+
+            var reservedName = trimmedName.TrimEnd(' ', '.');
+            if (reservedName.Length == 0 || !string.Equals(reservedName, trimmedName, StringComparison.Ordinal))
+                return false;
+
+            var baseName = reservedName.Split('.')[0];
+
+            return !ReservedDeviceNames.Contains(baseName);
+        }
+
+        /// <summary>
+        ///     Load an existing named profile
+        /// </summary>
+        /// <param name="profileName">Profile name (i.e. filename without extension)</param>
+        public static Profile LoadProfile(string profileName)
+        {
+            var filename = GetProfilePath(profileName);
+            return new Profile(filename);
+        }
+
+        internal static void EnsureRegularProfileFile(string profilePath)
+        {
+            if (!IsRegularProfileFile(profilePath, out var diagnostic))
+                throw new IOException(diagnostic);
+        }
+
+        internal static bool IsLoadableProfileFile(string profilePath, out string diagnostic)
+        {
+            if (!IsRegularProfileFile(profilePath, out diagnostic))
+                return false;
+
+            try
+            {
+                using (SecureFileSystem.OpenFileForBoundedRead(profilePath, MaxProfileSizeBytes))
+                {
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                diagnostic =
+                    $"Profile file '{GetProfileDisplayName(profilePath)}' cannot be loaded: {ex.Message}";
+                return false;
+            }
+        }
+
+        internal static bool ProfilePathExists(string profilePath)
+        {
+            if (string.IsNullOrWhiteSpace(profilePath))
+                return false;
+
+            try
+            {
+                File.GetAttributes(profilePath);
+                return true;
+            }
+            catch (FileNotFoundException)
+            {
+                return false;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning(
+                    $"Unable to inspect profile path '{GetProfileDisplayName(profilePath)}': {ex.Message}");
+                return true;
+            }
+        }
+
+        internal static bool IsRegularProfileFile(string profilePath, out string diagnostic)
+        {
+            diagnostic = null;
+
+            try
+            {
+                if (string.IsNullOrWhiteSpace(profilePath))
+                {
+                    diagnostic = "Profile path is empty.";
+                    return false;
+                }
+
+                var attributes = File.GetAttributes(profilePath);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    diagnostic =
+                        $"Profile file '{GetProfileDisplayName(profilePath)}' is a reparse point and will not be loaded by elevated WireSock UI.";
+                    return false;
+                }
+
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    diagnostic =
+                        $"Profile path '{GetProfileDisplayName(profilePath)}' is a directory and will not be loaded by elevated WireSock UI.";
+                    return false;
+                }
+
+                if (!Global.AllowUnsecuredConfigFolderOverrideForTests && IsPathInConfigFolder(profilePath) &&
+                    !Program.TryValidateTrustedFilePath(profilePath, "Profile file", out diagnostic))
+                    return false;
+
+                return true;
+            }
+            catch (FileNotFoundException)
+            {
+                diagnostic = $"Profile file '{GetProfileDisplayName(profilePath)}' does not exist.";
+                return false;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                diagnostic = $"Profile directory for '{GetProfileDisplayName(profilePath)}' does not exist.";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                diagnostic =
+                    $"Unable to inspect profile file '{GetProfileDisplayName(profilePath)}': {ex.Message}";
+                return false;
+            }
+        }
+
+        private static bool IsPathInConfigFolder(string profilePath)
+        {
+            var configRoot = Path.GetFullPath(Global.ConfigsFolder)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var fullProfilePath = Path.GetFullPath(profilePath);
+            return fullProfilePath.StartsWith(configRoot, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string GetRequiredValue(string profilePath, string sectionName, Dictionary<string, string> section,
+            string key)
+        {
+            if (!section.ContainsKey(key))
+                throw new ArgumentException(
+                    $"Profile {GetProfileDisplayName(profilePath)}, section \"{sectionName}\" does not have a \"{key}\" defined.");
+
+            var value = section.Get(key);
+            if (string.IsNullOrWhiteSpace(value))
+                throw new ArgumentException(
+                    $"Profile {GetProfileDisplayName(profilePath)}, section \"{sectionName}\" has an empty \"{key}\" value.");
+
+            return value;
+        }
+
+        private static string GetProfileDisplayName(string profilePath)
+        {
+            if (string.IsNullOrWhiteSpace(profilePath))
+                return string.Empty;
+
+            var trimmedPath = profilePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            try
+            {
+                var fileName = Path.GetFileName(trimmedPath);
+                if (!string.IsNullOrWhiteSpace(fileName))
+                    return EscapeProfileDisplayName(fileName);
+            }
+            catch (ArgumentException)
+            {
+            }
+            catch (NotSupportedException)
+            {
+            }
+            catch (PathTooLongException)
+            {
+            }
+            catch (System.Security.SecurityException)
+            {
+            }
+
+            return EscapeProfileDisplayName(string.IsNullOrWhiteSpace(trimmedPath) ? profilePath : trimmedPath);
+        }
+
+        private static string EscapeProfileDisplayName(string value)
+        {
+            return (value ?? string.Empty).Replace("\0", "\\0");
+        }
+
+        private static void AddScriptHook(List<KeyValuePair<string, string>> hooks, string name, string value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                hooks.Add(new KeyValuePair<string, string>(name, value));
+        }
+    }
+}

@@ -1,0 +1,667 @@
+name: 'Build and publish release'
+
+permissions:
+  contents: read
+
+on:
+  push:
+    tags:
+      - 'release-v*.*.*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  authorize-release:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      trusted_sha: ${{ steps.authorize.outputs.trusted_sha }}
+      trusted_tag_oid: ${{ steps.authorize.outputs.trusted_tag_oid }}
+      version: ${{ steps.authorize.outputs.version }}
+    steps:
+      - name: Checkout candidate release revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify workflow dependency and credential policy
+        shell: pwsh
+        run: ./scripts/Test-WorkflowSecurity.ps1
+
+      - name: Verify signed release tag and protected-branch ancestry
+        id: authorize
+        shell: pwsh
+        env:
+          CI_WORKFLOW: ci.yml
+          DEFAULT_BRANCH: main
+          GH_TOKEN: ${{ github.token }}
+          HOSTED_SDK_WORKFLOW: hosted-sdk-experiment.yml
+          RELEASE_API_URL: ${{ github.api_url }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne 'wiresock/WireSockUI') {
+            throw "Release publication may run only for wiresock/WireSockUI, not '$env:GITHUB_REPOSITORY'."
+          }
+          if ($env:RELEASE_REF -notmatch '\Arefs/tags/release-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z') {
+            throw "Release ref '$env:RELEASE_REF' must be a release-vMAJOR.MINOR.PATCH tag."
+          }
+          $version = $env:RELEASE_TAG.Substring('release-v'.Length)
+
+          $headers = @{
+            Accept = 'application/vnd.github+json'
+            Authorization = "Bearer $env:GH_TOKEN"
+            'X-GitHub-Api-Version' = '2026-03-10'
+          }
+          $tagRef = Invoke-RestMethod `
+            -Method Get `
+            -Headers $headers `
+            -TimeoutSec 30 `
+            -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG"
+          if ($tagRef.object.type -ne 'tag') {
+            throw "Release tag '$env:RELEASE_TAG' must be an annotated, cryptographically signed tag."
+          }
+          $trustedTagOid = [string]$tagRef.object.sha
+          if ($trustedTagOid -notmatch '\A[0-9a-f]{40}\z') {
+            throw "Release tag '$env:RELEASE_TAG' resolved to an invalid annotated-tag object ID."
+          }
+
+          $tagObject = Invoke-RestMethod `
+            -Method Get `
+            -Headers $headers `
+            -TimeoutSec 30 `
+            -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/git/tags/$trustedTagOid"
+          if ([string]$tagObject.sha -cne $trustedTagOid -or
+              [string]$tagObject.tag -cne $env:RELEASE_TAG -or
+              -not $tagObject.verification.verified) {
+            throw "Release tag '$env:RELEASE_TAG' does not have a GitHub-verified cryptographic signature."
+          }
+          if ($tagObject.object.type -ne 'commit') {
+            throw "Release tag '$env:RELEASE_TAG' must point directly to a commit."
+          }
+
+          $trustedSha = [string]$tagObject.object.sha
+          if ($trustedSha -notmatch '\A[0-9a-f]{40}\z') {
+            throw "Release tag '$env:RELEASE_TAG' resolved to an invalid commit ID."
+          }
+
+          $checkedOutSha = (git rev-parse 'HEAD^{commit}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $checkedOutSha -ne $trustedSha) {
+            throw "Checked-out revision '$checkedOutSha' does not match signed tag target '$trustedSha'."
+          }
+
+          git fetch --no-tags origin "+refs/heads/${env:DEFAULT_BRANCH}:refs/remotes/origin/$env:DEFAULT_BRANCH"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch the protected branch '$env:DEFAULT_BRANCH'."
+          }
+
+          $defaultBranchSha = (
+            git rev-parse "refs/remotes/origin/$env:DEFAULT_BRANCH"
+          ).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $defaultBranchSha -cne $trustedSha) {
+            throw "Release commit $trustedSha must be the current protected '$env:DEFAULT_BRANCH' tip, not $defaultBranchSha."
+          }
+
+          $resolvedVersion = ./scripts/Resolve-BuildVersion.ps1
+          if ($version -cne $resolvedVersion) {
+            throw "Release tag version '$version' does not match protected-tip build version '$resolvedVersion'."
+          }
+
+          foreach ($workflow in @($env:CI_WORKFLOW, $env:HOSTED_SDK_WORKFLOW)) {
+            $runsUri = "$env:RELEASE_API_URL/repos/$env:RELEASE_REPOSITORY/actions/workflows/$workflow/runs" +
+              "?branch=$env:DEFAULT_BRANCH&event=push&status=success&head_sha=$trustedSha&per_page=1"
+            $runs = Invoke-RestMethod `
+              -Method Get `
+              -Headers $headers `
+              -TimeoutSec 30 `
+              -Uri $runsUri
+            if ([int]$runs.total_count -lt 1 -or
+                @($runs.workflow_runs).Count -ne 1 -or
+                [string]$runs.workflow_runs[0].head_sha -cne $trustedSha -or
+                [string]$runs.workflow_runs[0].conclusion -cne 'success') {
+              throw "Release commit $trustedSha has no successful $workflow push run."
+            }
+          }
+
+          "trusted_sha=$trustedSha" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "trusted_tag_oid=$trustedTagOid" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Report authorized release prerequisites
+        shell: pwsh
+        env:
+          TRUSTED_SHA: ${{ steps.authorize.outputs.trusted_sha }}
+        run: Write-Host "Authorized signed release for protected commit '$env:TRUSTED_SHA' after successful CI and hosted SDK validation."
+
+  test:
+    needs: authorize-release
+    runs-on: ${{ matrix.platform == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ['x86', 'x64', 'ARM64']
+        configuration: ['Release', 'Release UWP']
+    steps:
+      - name: Checkout from GitHub
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.authorize-release.outputs.trusted_sha }}
+          persist-credentials: false
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        shell: pwsh
+        env:
+          TEST_PLATFORM: ${{ matrix.platform }}
+        run: >
+          dotnet restore WireSockUI.sln
+          -p:Platform=$env:TEST_PLATFORM
+          --locked-mode
+          -p:NuGetAudit=true
+          -p:NuGetAuditMode=all
+          '-warnaserror:NU1901;NU1902;NU1903;NU1904'
+          -m:1
+
+      - name: Verify formatting
+        run: dotnet format WireSockUI.sln whitespace --verify-no-changes --no-restore
+
+      - name: Test
+        env:
+          TEST_CONFIGURATION: ${{ matrix.configuration }}
+          TEST_PLATFORM: ${{ matrix.platform }}
+        run: dotnet run --project WireSockUI.Tests/WireSockUI.Tests.csproj --configuration "$env:TEST_CONFIGURATION" --framework net472-windows -p:Platform=$env:TEST_PLATFORM -p:UseSharedCompilation=false --no-restore
+
+  sdk-integration:
+    needs: authorize-release
+    # Retain optional protected self-hosted validation when those runner pools
+    # are available. The release authorization above always fails closed unless
+    # current-tip CI and the hosted x64/ARM64 SDK experiment both succeeded.
+    uses: wiresock/WireSockUI/.github/workflows/sdk-integration.yml@0440f3d3a42216a23ce455686ce983b88af62a3e
+    with:
+      require_sdk_validation: false
+      sdk_workflow_sha: 0440f3d3a42216a23ce455686ce983b88af62a3e
+
+  build:
+    needs:
+      - authorize-release
+      - test
+      - sdk-integration
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ['x86', 'x64', 'ARM64']
+        framework: ['net472-windows']
+        build_configuration: ['Release', 'Release UWP']
+        include:
+          - build_configuration: 'Release'
+            installer_flavor: 'no-uwp'
+          - build_configuration: 'Release UWP'
+            installer_flavor: 'uwp'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # Keep artifact/package identities independent of the protected release-tag
+      # namespace so validators and public asset names remain stable.
+      ARTIFACT_NAME: 'WireSockUI-v${{ needs.authorize-release.outputs.version }}-${{ matrix.platform }}-${{ matrix.installer_flavor }}'
+      ARTIFACT_SRC_PATH: 'bin/${{ matrix.platform }}/${{ matrix.build_configuration }}/${{ matrix.framework }}/publish/'
+      BUILD_CONFIGURATION: ${{ matrix.build_configuration }}
+      BUILD_FRAMEWORK: ${{ matrix.framework }}
+      BUILD_PLATFORM: ${{ matrix.platform }}
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      WIRESOCKUI_VERSION: ${{ needs.authorize-release.outputs.version }}
+    steps:
+      - name: Checkout from GitHub
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.authorize-release.outputs.trusted_sha }}
+          persist-credentials: false
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet publish WireSockUI/WireSockUI.csproj --configuration "$env:BUILD_CONFIGURATION" --framework "$env:BUILD_FRAMEWORK" --no-self-contained /p:Platform="$env:BUILD_PLATFORM" /p:UseSharedCompilation=false /p:Version="$env:WIRESOCKUI_VERSION" /p:Repository="$env:SOURCE_REPOSITORY" /p:RestoreLockedMode=true -m:1
+
+      - name: Validate unsigned release payload
+        shell: pwsh
+        run: |
+          $payload = Resolve-Path $env:ARTIFACT_SRC_PATH
+          $bootstrap = Join-Path $payload 'WireSockUI.exe'
+          if (-not (Test-Path -LiteralPath $bootstrap -PathType Leaf)) {
+            throw "Native bootstrap '$bootstrap' is missing from the release payload."
+          }
+          $managedAssembly = Join-Path $payload 'WireSockUI.Managed.dll'
+          if (-not (Test-Path -LiteralPath $managedAssembly -PathType Leaf)) {
+            throw "Managed payload '$managedAssembly' is missing from the release payload."
+          }
+          ./scripts/Test-UnsignedArtifacts.ps1 -Path $payload
+          ./scripts/Test-NativeBootstrap.ps1 `
+            -LauncherPath $bootstrap `
+            -ExpectedPlatform $env:BUILD_PLATFORM `
+            -ExpectedVersion $env:WIRESOCKUI_VERSION
+          Import-Module ./scripts/NativeBootstrap.Validation.psm1 -Force
+          Assert-ManagedAssemblyPlatform `
+            -Path $managedAssembly `
+            -ExpectedPlatform $env:BUILD_PLATFORM |
+            Out-Null
+          if (Test-Path -LiteralPath (Join-Path $payload 'WireSockUI.Managed.exe')) {
+            throw 'The directly executable legacy managed payload must not be published.'
+          }
+
+          $bootstrapCopies = @(Get-ChildItem -LiteralPath $payload -Recurse -File -Filter WireSockUI.exe)
+          if ($bootstrapCopies.Count -ne 1 -or $bootstrapCopies[0].FullName -ne (Resolve-Path $bootstrap).Path) {
+            throw 'The payload must contain exactly one root-level WireSockUI.exe bootstrap.'
+          }
+
+      - name: Upload unsigned payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: 'unsigned-${{ env.ARTIFACT_NAME }}'
+          path: ${{ env.ARTIFACT_SRC_PATH }}
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    needs:
+      - authorize-release
+      - build
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      WIRESOCKUI_VERSION: ${{ needs.authorize-release.outputs.version }}
+    steps:
+      - name: Checkout authorized release tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.authorize-release.outputs.trusted_sha }}
+          persist-credentials: false
+
+      - name: Setup pinned dotnet SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          global-json-file: global.json
+
+      - name: Restore locked application and installer validation toolchains
+        shell: pwsh
+        run: |
+          dotnet restore WireSockUI/WireSockUI.csproj `
+            /p:Platform=x64 `
+            --locked-mode `
+            /p:NuGetAudit=true `
+            /p:NuGetAuditMode=all `
+            '/warnaserror:NU1901;NU1902;NU1903;NU1904'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Locked application restore and dependency audit failed.'
+          }
+          dotnet restore WireSockUI.Installer/WireSockUI.Installer.wixproj `
+            --locked-mode `
+            /p:NuGetAudit=true `
+            /p:NuGetAuditMode=all `
+            '/warnaserror:NU1901;NU1902;NU1903;NU1904'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Locked installer restore and dependency audit failed.'
+          }
+
+      - name: Download exact unsigned payload set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: 'unsigned-WireSockUI-v${{ needs.authorize-release.outputs.version }}-*'
+          path: unsigned
+          merge-multiple: false
+
+      - name: Validate unsigned payloads and build unsigned MSI packages
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $payloads = @(Get-ChildItem -LiteralPath unsigned -Directory | Sort-Object Name)
+          if ($payloads.Count -ne 6) {
+            throw "Expected six unsigned payloads, found $($payloads.Count)."
+          }
+
+          $output = New-Item -ItemType Directory -Path packages
+          foreach ($payload in $payloads) {
+            if ($payload.Name -notmatch '\Aunsigned-WireSockUI-v(?<version>[0-9]+\.[0-9]+\.[0-9]+)-(?<architecture>x86|x64|ARM64)-(?<flavor>no-uwp|uwp)\z' -or
+                $Matches.version -cne $env:WIRESOCKUI_VERSION) {
+              throw "Unexpected unsigned payload name '$($payload.Name)'."
+            }
+            $architecture = $Matches.architecture
+            $flavor = $Matches.flavor
+            $bootstrap = Join-Path $payload.FullName 'WireSockUI.exe'
+            $bootstrapCopies = @(Get-ChildItem -LiteralPath $payload.FullName -Recurse -File -Filter WireSockUI.exe)
+            if ($bootstrapCopies.Count -ne 1 -or
+                $bootstrapCopies[0].FullName -ne (Resolve-Path -LiteralPath $bootstrap).Path) {
+              throw "Artifact '$($payload.Name)' must contain exactly one root-level WireSockUI.exe bootstrap."
+            }
+
+            ./scripts/Test-UnsignedArtifacts.ps1 -Path $payload.FullName
+            ./scripts/Test-NativeBootstrap.ps1 `
+              -LauncherPath $bootstrap `
+              -ExpectedPlatform $architecture `
+              -ExpectedVersion $env:WIRESOCKUI_VERSION
+            ./scripts/Build-Msi.ps1 `
+              -Platform $architecture `
+              -Version $env:WIRESOCKUI_VERSION `
+              -Flavor $flavor `
+              -PayloadDirectory $payload.FullName `
+              -OutputDirectory $output.FullName `
+              -NoRestore
+          }
+
+          $msis = @(Get-ChildItem -LiteralPath packages -File -Filter '*.msi')
+          if ($msis.Count -ne 6) {
+            throw "Expected six validated unsigned MSI packages, found $($msis.Count)."
+          }
+          ./scripts/Test-MsiArchitectureIsolation.ps1 -MsiPath $msis.FullName
+
+      - name: Install pinned SBOM tool
+        shell: pwsh
+        run: |
+          $toolPath = Join-Path $env:RUNNER_TEMP 'sbom-tool'
+          dotnet tool install Microsoft.Sbom.DotNetTool --tool-path $toolPath --version 4.1.5
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to install the pinned Microsoft SBOM tool.' }
+
+      - name: Generate external SBOMs and assemble release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tool = Join-Path $env:RUNNER_TEMP 'sbom-tool\sbom-tool.exe'
+          $output = New-Item -ItemType Directory -Path release-assets -Force
+          $componentRoot = (Resolve-Path -LiteralPath WireSockUI).Path
+          $sbomWorkRoot = Join-Path $env:RUNNER_TEMP 'WireSockUI-Sbom'
+          if (Test-Path -LiteralPath $sbomWorkRoot) {
+            throw "Unexpected pre-existing SBOM work directory '$sbomWorkRoot'."
+          }
+          [void](New-Item -ItemType Directory -Path $sbomWorkRoot)
+          $payloads = @(Get-ChildItem -LiteralPath unsigned -Directory | Sort-Object Name)
+          $seenSbomNamespaces =
+            [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+
+          $msis = @(Get-ChildItem -LiteralPath packages -File -Filter '*.msi' | Sort-Object Name)
+          if ($msis.Count -ne 6) {
+            throw "Expected six unsigned MSI packages, found $($msis.Count)."
+          }
+          foreach ($msi in $msis) {
+            if ($msi.Name -notmatch '\AWireSockUI-(?<version>[0-9]+\.[0-9]+\.[0-9]+)-win-(?<architecture>x86|x64|arm64)-(?<flavor>no-uwp|uwp)\.msi\z' -or
+                $Matches.version -cne $env:WIRESOCKUI_VERSION) {
+              throw "Unexpected MSI name '$($msi.Name)'."
+            }
+            $architecture = $Matches.architecture
+            $flavor = $Matches.flavor
+            $metadata = "$($msi.FullName).validation.json"
+            ./scripts/Test-MsiPackage.ps1 `
+              -MsiPath $msi.FullName `
+              -ExpectedArchitecture $architecture `
+              -ExpectedVersion $env:WIRESOCKUI_VERSION `
+              -ExpectedFlavor $flavor `
+              -ValidationMetadataPath $metadata
+            Copy-Item -LiteralPath $msi.FullName -Destination $output.FullName
+            Copy-Item -LiteralPath $metadata -Destination $output.FullName
+          }
+
+          foreach ($payload in $payloads) {
+            if ($payload.Name -notmatch '\Aunsigned-WireSockUI-v(?<version>[0-9]+\.[0-9]+\.[0-9]+)-(?<architecture>x86|x64|ARM64)-(?<flavor>no-uwp|uwp)\z' -or
+                $Matches.version -cne $env:WIRESOCKUI_VERSION) {
+              throw "Unexpected unsigned payload name '$($payload.Name)'."
+            }
+            $architecture = $Matches.architecture.ToLowerInvariant()
+            $flavor = $Matches.flavor
+            $assetName = $payload.Name.Substring('unsigned-'.Length)
+            $msiName = "WireSockUI-$env:WIRESOCKUI_VERSION-win-$architecture-$flavor.msi"
+            $metadataPath = Join-Path $output.FullName "$msiName.validation.json"
+            if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+              throw "Validated MSI metadata '$metadataPath' is missing."
+            }
+            $metadata = Get-Content -LiteralPath $metadataPath -Raw -Encoding UTF8 |
+              ConvertFrom-Json
+
+            # Generate the SBOM from exactly the files embedded in the MSI, not
+            # from compiler/debug metadata that may coexist in the publish drop.
+            $workPayload = Join-Path $sbomWorkRoot $payload.Name
+            [void](New-Item -ItemType Directory -Path $workPayload)
+            $normalizedSourceRoot = $payload.FullName.TrimEnd('\') + '\'
+            $normalizedWorkRoot = $workPayload.TrimEnd('\') + '\'
+            foreach ($fileEntry in @($metadata.Files)) {
+              $relativePath = [string]$fileEntry.Path
+              if ([string]::IsNullOrWhiteSpace($relativePath) -or
+                  $relativePath.StartsWith('/') -or
+                  $relativePath.StartsWith('\') -or
+                  $relativePath.Contains(':') -or
+                  $relativePath -match '(^|/)\.\.?(/|$)') {
+                throw "MSI metadata contains unsafe path '$relativePath'."
+              }
+              $nativeRelativePath = $relativePath.Replace('/', '\')
+              $sourcePath = [IO.Path]::GetFullPath((Join-Path $payload.FullName $nativeRelativePath))
+              $destinationPath = [IO.Path]::GetFullPath((Join-Path $workPayload $nativeRelativePath))
+              if (-not $sourcePath.StartsWith($normalizedSourceRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                  -not $destinationPath.StartsWith($normalizedWorkRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                  -not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                throw "MSI payload path '$relativePath' is missing or escapes its staging root."
+              }
+              $sourceFile = Get-Item -LiteralPath $sourcePath
+              $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourcePath).Hash.ToLowerInvariant()
+              if ([Int64]$sourceFile.Length -ne [Int64]$fileEntry.Size -or
+                  $actualHash -cne [string]$fileEntry.Sha256) {
+                throw "Unsigned payload '$relativePath' no longer matches validated MSI metadata."
+              }
+              [void](New-Item -ItemType Directory -Path (Split-Path -Parent $destinationPath) -Force)
+              Copy-Item -LiteralPath $sourcePath -Destination $destinationPath
+            }
+
+            $stagedFiles = @(Get-ChildItem -LiteralPath $workPayload -Recurse -File)
+            if ($stagedFiles.Count -ne @($metadata.Files).Count) {
+              throw "SBOM staging for '$assetName' did not reproduce the exact MSI file set."
+            }
+            & $tool generate `
+              -b $workPayload `
+              -bc $componentRoot `
+              -pn $assetName `
+              -pv $env:WIRESOCKUI_VERSION `
+              -ps Wiresock-Foundation `
+              -nsb "https://github.com/$env:GITHUB_REPOSITORY/releases/tag/release-v$env:WIRESOCKUI_VERSION" `
+              -V Information
+            if ($LASTEXITCODE -ne 0) {
+              throw "SBOM generation failed for '$assetName'."
+            }
+
+            $manifests = @(
+              Get-ChildItem -LiteralPath $workPayload -Recurse -File -Filter 'manifest.spdx.json'
+            )
+            if ($manifests.Count -ne 1) {
+              throw "Expected exactly one generated SPDX manifest for '$assetName', found $($manifests.Count)."
+            }
+            ./scripts/Test-ReleaseSbom.ps1 `
+              -SbomPath $manifests[0].FullName `
+              -ValidationMetadataPath $metadataPath `
+              -ExpectedPackageName $assetName `
+              -ExpectedVersion $env:WIRESOCKUI_VERSION `
+              -NuGetLockFilePath WireSockUI/packages.lock.json `
+              -NuGetTargetFramework '.NETFramework,Version=v4.7.2'
+            $sbomDocument = Get-Content -LiteralPath $manifests[0].FullName -Raw -Encoding UTF8 |
+              ConvertFrom-Json
+            if (-not $seenSbomNamespaces.Add([string]$sbomDocument.documentNamespace)) {
+              throw "SPDX document namespace '$($sbomDocument.documentNamespace)' was reused."
+            }
+            Copy-Item `
+              -LiteralPath $manifests[0].FullName `
+              -Destination (Join-Path $output.FullName "$assetName.spdx.json")
+          }
+
+          $releaseFiles = @(
+            Get-ChildItem -LiteralPath $output.FullName -File |
+              Where-Object { $_.Extension -ne '.sha256' }
+          )
+          if ($releaseFiles.Count -ne 18) {
+            throw "Expected six MSIs, six validation documents, and six SBOMs; found $($releaseFiles.Count) assets."
+          }
+          foreach ($releaseFile in $releaseFiles) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseFile.FullName).Hash.ToLowerInvariant()
+            "$hash  $($releaseFile.Name)" |
+              Set-Content -LiteralPath "$($releaseFile.FullName).sha256" -Encoding ascii
+          }
+
+      - name: Upload unsigned release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: unsigned-release-assets
+          path: release-assets
+          if-no-files-found: error
+          retention-days: 14
+
+  attest:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download unsigned release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: unsigned-release-assets
+          path: release-assets
+
+      - name: Attest unsigned release assets
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-path: |
+            release-assets/*.msi
+            release-assets/*.msi.validation.json
+            release-assets/*.spdx.json
+
+  upload-release:
+    if: ${{ success() }}
+    needs:
+      - authorize-release
+      - attest
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: release-publish
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout authorized release tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.authorize-release.outputs.trusted_sha }}
+          persist-credentials: false
+
+      - name: Create short-lived release-policy read token
+        id: release-policy-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_POLICY_READER_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_POLICY_READER_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          permission-actions: read
+
+      - name: Reverify protected release repository policy
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.release-policy-token.outputs.token }}
+          RELEASE_API_URL: ${{ github.api_url }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >
+          ./scripts/Test-ReleaseRepositoryPolicy.ps1
+          -Repository $env:RELEASE_REPOSITORY
+          -GitHubApiUrl $env:RELEASE_API_URL
+          -ReleaseTag $env:RELEASE_TAG
+          -RequiredEnvironment release-publish
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: unsigned-release-assets
+          path: 'artifacts'
+
+      - name: Publish or safely resume immutable release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_API_URL: ${{ github.api_url }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.authorize-release.outputs.version }}
+          TRUSTED_SHA: ${{ needs.authorize-release.outputs.trusted_sha }}
+          TRUSTED_TAG_OID: ${{ needs.authorize-release.outputs.trusted_tag_oid }}
+        run: >
+          ./scripts/Invoke-ReleasePublication.ps1
+          -Mode Publish
+          -Repository $env:RELEASE_REPOSITORY
+          -GitHubApiUrl $env:RELEASE_API_URL
+          -ReleaseTag $env:RELEASE_TAG
+          -Version $env:RELEASE_VERSION
+          -TrustedSha $env:TRUSTED_SHA
+          -TrustedTagOid $env:TRUSTED_TAG_OID
+          -AssetDirectory ./artifacts
+
+  verify-release:
+    if: ${{ success() }}
+    needs:
+      - authorize-release
+      - upload-release
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      artifact-metadata: read
+      attestations: read
+      contents: read
+    steps:
+      - name: Checkout authorized verification tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.authorize-release.outputs.trusted_sha }}
+          persist-credentials: false
+
+      - name: Download exact published asset source
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: unsigned-release-assets
+          path: artifacts
+
+      - name: Independently verify immutable release and provenance
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_API_URL: ${{ github.api_url }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.authorize-release.outputs.version }}
+          TRUSTED_SHA: ${{ needs.authorize-release.outputs.trusted_sha }}
+          TRUSTED_TAG_OID: ${{ needs.authorize-release.outputs.trusted_tag_oid }}
+        run: >
+          ./scripts/Invoke-ReleasePublication.ps1
+          -Mode Verify
+          -Repository $env:RELEASE_REPOSITORY
+          -GitHubApiUrl $env:RELEASE_API_URL
+          -ReleaseTag $env:RELEASE_TAG
+          -Version $env:RELEASE_VERSION
+          -TrustedSha $env:TRUSTED_SHA
+          -TrustedTagOid $env:TRUSTED_TAG_OID
+          -AssetDirectory ./artifacts

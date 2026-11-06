@@ -1,0 +1,3651 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using WireSockUI.Config;
+using WireSockUI.Extensions;
+using WireSockUI.Native;
+using WireSockUI.Properties;
+using static WireSockUI.Native.WireguardBoosterExports;
+
+namespace WireSockUI.Forms
+{
+    /**
+     * @brief The main form of the application.
+     */
+    public partial class FrmMain : Form
+    {
+        public enum ConnectionState
+        {
+            Connecting,
+            Connected,
+            Disconnected,
+            Indeterminate
+        }
+
+        private const int TunnelConnectionTimeoutMilliseconds = 30000;
+        private const int TunnelDisconnectTimeoutMilliseconds = 10000;
+        private const int NativeQueryTimeoutMilliseconds = 5000;
+        private const int MaxVisibleLogMessages = 2000;
+        private const int MaxTrayProfileItems = 50;
+        private const int MaxLegacyProfilesReviewedPerLaunch = 20;
+        private const int LogUiBatchSize = 256;
+        private const int ShutdownDisconnectTimeoutMilliseconds = 5000;
+        private const int ShutdownSettingsTimeoutMilliseconds = 5000;
+        private const int UiDispatchStartTimeoutMilliseconds = 5000;
+
+        /**
+         * @brief The manager that handles the Wireguard connections.
+         */
+        private readonly TunnelLifecycleController _tunnelLifecycle;
+        private readonly TunnelMonitor _tunnelMonitor;
+        private readonly TunnelSessionCoordinator _tunnelSession = new TunnelSessionCoordinator();
+        private readonly SettingsUpdateCoordinator _settingsUpdateCoordinator;
+        private readonly ProfileCatalog _profileCatalog = new ProfileCatalog();
+        private readonly UiLogMessageBuffer _uiLogBuffer;
+        private readonly BoundedRingBuffer<WireSockManager.LogMessage> _visibleLogMessages =
+            new BoundedRingBuffer<WireSockManager.LogMessage>(MaxVisibleLogMessages);
+        private readonly List<Image> _ownedMenuImages = new List<Image>();
+        private readonly object _uiDispatchSyncRoot = new object();
+        private readonly int _uiThreadId = Thread.CurrentThread.ManagedThreadId;
+
+        private int _configuredLogLevel;
+        private ConnectionState _currentState = ConnectionState.Disconnected;
+        private Task _activeSettingsOperation = Task.CompletedTask;
+        private FrmSettings _activeSettingsForm;
+        private bool _exitRequested;
+        private bool _finalCloseAuthorized;
+        private bool _restartMonitorAfterHandleRecreation;
+        private volatile bool _shutdownComplete;
+        private Task _shutdownTask;
+        private CancellationTokenSource _uiDispatchCancellation = new CancellationTokenSource();
+        private Icon _ownedTrayIcon;
+        private Image _inactiveStatusImage;
+        private Image _connectedStatusImage;
+        private Label _profileSelectionPrompt;
+        private string _activeTunnelAddresses;
+
+        /**
+         * @brief Initializes a new instance of the Main class.
+         */
+        public FrmMain()
+        {
+            InitializeComponent();
+            Text = BuildWindowTitle(
+                Resources.FormMain,
+                typeof(FrmMain).Assembly
+                    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                    ?.InformationalVersion);
+            ConfigureMainWindowLayout();
+
+            lstLog.RetrieveVirtualItem += OnRetrieveVirtualLogItem;
+            lstLog.VirtualMode = true;
+            _uiLogBuffer = new UiLogMessageBuffer(
+                MaxVisibleLogMessages,
+                LogUiBatchSize,
+                TryScheduleLogDrain,
+                AppendWireSockLogMessages);
+            _tunnelLifecycle = new TunnelLifecycleController(OnWireSockLogMessage);
+            Volatile.Write(ref _configuredLogLevel, (int)_tunnelLifecycle.ConfiguredLogLevel);
+            _settingsUpdateCoordinator = new SettingsUpdateCoordinator(
+                ApplyLogLevelSettingAsync,
+                ApplyKillSwitchSettingAsync);
+            _tunnelMonitor = new TunnelMonitor(
+                _tunnelLifecycle.GetConnectedAsync,
+                _tunnelLifecycle.GetStateAsync,
+                CurrentTunnelGeneration,
+                HandleTunnelMonitorUpdateAsync,
+                NativeQueryTimeoutMilliseconds,
+                TunnelConnectionTimeoutMilliseconds);
+
+            // Configure icons
+            Icon = Resources.ico;
+            _inactiveStatusImage = BitmapExtensions.DrawCircle(16, 15, Brushes.DarkGray);
+            _connectedStatusImage = GetWindowsIconBitmap(WindowsIcons.Icons.Activated, 16);
+            SetTrayIcon(Resources.ico, false);
+            SetStatusImage(null, _inactiveStatusImage);
+
+            // Populate menu items with Windows supplied icons
+            SetOwnedMenuImage(ddmAddTunnel, WindowsIcons.Icons.Addtunnel);
+            SetOwnedMenuImage(mniImportTunnel, WindowsIcons.Icons.OpenTunnel);
+            SetOwnedMenuImage(mniNewTunnel, WindowsIcons.Icons.NewTunnel);
+            SetOwnedMenuImage(mniDeleteTunnel, WindowsIcons.Icons.DeleteTunnel);
+            SetOwnedMenuImage(mniSettings, WindowsIcons.Icons.Settings);
+
+            // Populate profile image list with Windows supplied icons
+            imlProfiles.Images.Clear();
+            AddProfileIcon(ConnectionState.Disconnected.ToString(), WindowsIcons.Icons.DisconnectedTunnel, 24);
+            AddProfileIcon(ConnectionState.Connected.ToString(), WindowsIcons.Icons.ConnectedTunnel, 24);
+            AddProfileIcon(ConnectionState.Connecting.ToString(), WindowsIcons.Icons.ConnectingTunnel, 24);
+            AddProfileIcon(ConnectionState.Indeterminate.ToString(), WindowsIcons.Icons.ConnectingTunnel, 24);
+
+            // Ensure the profile list rows fill the entire width, but no scrollbar appears
+            lstProfiles.Columns[0].Width = lstProfiles.Size.Width - 4;
+
+            OnLogWindowResize(lstLog, EventArgs.Empty);
+
+            // Update the list of available configurations.
+            LoadProfiles();
+            trayIcon.Visible = true;
+        }
+
+        internal static string BuildWindowTitle(string productName, string informationalVersion)
+        {
+            var title = string.IsNullOrWhiteSpace(productName) ? "WireSock UI" : productName.Trim();
+            if (string.IsNullOrWhiteSpace(informationalVersion))
+                return title;
+
+            var metadataSeparator = informationalVersion.IndexOf('+');
+            var displayVersion = (metadataSeparator >= 0
+                    ? informationalVersion.Substring(0, metadataSeparator)
+                    : informationalVersion)
+                .Trim();
+            return string.IsNullOrWhiteSpace(displayVersion)
+                ? title
+                : $"{title} {displayVersion}";
+        }
+
+        private void ConfigureMainWindowLayout()
+        {
+            UiFonts.TryApplyMessageBoxFont(messageBoxFont =>
+            {
+                Font = messageBoxFont;
+                lstProfiles.Font = messageBoxFont;
+                lstLog.Font = messageBoxFont;
+            });
+            lstProfiles.SizeChanged += OnProfileListResize;
+
+            ConfigureDetailsGroup(gbxInterface, layoutInterface, 110F);
+            ConfigureDetailsGroup(gbxPeer, layoutPeer, 120F);
+            ConfigureDetailsGroup(gbxState, layoutState, 120F);
+            layoutState.SizeChanged += OnLayoutPanelResize;
+            ConfigureBottomActionRow(layoutDetails, pnlProfileActions);
+            ConfigureBottomActionRow(layoutLog, pnlLogActions);
+
+            _profileSelectionPrompt = new Label
+            {
+                BackColor = SystemColors.Window,
+                Dock = DockStyle.Fill,
+                ForeColor = SystemColors.GrayText,
+                Padding = new Padding(24),
+                Text = Resources.ProfileSelectionPrompt,
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            pnlRight.Controls.Add(_profileSelectionPrompt);
+            _profileSelectionPrompt.BringToFront();
+            ArrangeProfileDetails(pnlRight, gbxState, gbxInterface, gbxPeer);
+            SetProfileDetailsAvailable(false);
+
+            lstLog.BorderStyle = BorderStyle.FixedSingle;
+        }
+
+        internal static void ConfigureBottomActionRow(
+            TableLayoutPanel layout,
+            FlowLayoutPanel actions)
+        {
+            if (layout == null)
+                throw new ArgumentNullException(nameof(layout));
+            if (actions == null)
+                throw new ArgumentNullException(nameof(actions));
+            if (layout.RowStyles.Count < 2)
+                throw new ArgumentException("The action layout must contain a second row.", nameof(layout));
+
+            // Let the scaled button and padding determine the row height. A
+            // fixed absolute row can become shorter than its children after
+            // WinForms applies font or per-monitor DPI scaling.
+            layout.RowStyles[1].SizeType = SizeType.AutoSize;
+            actions.AutoSize = true;
+            actions.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            actions.Dock = DockStyle.Fill;
+            actions.FlowDirection = FlowDirection.RightToLeft;
+            actions.Margin = Padding.Empty;
+            actions.Padding = new Padding(0, 8, 8, 10);
+            actions.WrapContents = false;
+        }
+
+        internal static void ConcealFromTaskbar(Form form)
+        {
+            if (form == null)
+                throw new ArgumentNullException(nameof(form));
+
+            // ShowInTaskbar recreates an existing WinForms top-level handle.
+            // Hide first so the replacement handle can never be painted as an
+            // empty frame while the window is being minimized or closed.
+            form.Hide();
+            form.ShowInTaskbar = false;
+        }
+
+        internal static bool TryShowMainWindow(
+            Form form,
+            bool exitRequested,
+            bool shutdownComplete)
+        {
+            if (form == null)
+                throw new ArgumentNullException(nameof(form));
+            if (exitRequested || shutdownComplete || form.IsDisposed || form.Disposing)
+                return false;
+
+            form.TopMost = true;
+            form.ShowInTaskbar = true;
+            form.Show();
+            form.WindowState = FormWindowState.Normal;
+            form.BringToFront();
+            form.Activate();
+            form.TopMost = false;
+            return true;
+        }
+
+        internal bool TryShowMainWindow()
+        {
+            return TryShowMainWindow(this, _exitRequested, _shutdownComplete);
+        }
+
+        internal static void ArrangeProfileDetails(
+            Panel host,
+            Control state,
+            Control interfaceGroup,
+            Control peer)
+        {
+            if (host == null)
+                throw new ArgumentNullException(nameof(host));
+            if (state == null)
+                throw new ArgumentNullException(nameof(state));
+            if (interfaceGroup == null)
+                throw new ArgumentNullException(nameof(interfaceGroup));
+            if (peer == null)
+                throw new ArgumentNullException(nameof(peer));
+            if (state.Parent != host || interfaceGroup.Parent != host || peer.Parent != host)
+                throw new ArgumentException("All profile detail groups must belong to the supplied host.");
+
+            host.SuspendLayout();
+            try
+            {
+                // Top-docked controls are laid out from the back of the z-order.
+                // Send the groups back from visual bottom to visual top so their
+                // order remains stable when the State group is hidden or shown.
+                peer.SendToBack();
+                interfaceGroup.SendToBack();
+                state.SendToBack();
+            }
+            finally
+            {
+                host.ResumeLayout(true);
+            }
+        }
+
+        private static void ConfigureDetailsGroup(GroupBox groupBox, TableLayoutPanel layout, float labelWidth)
+        {
+            groupBox.BackColor = SystemColors.Window;
+            groupBox.Padding = new Padding(10, 6, 10, 8);
+
+            layout.BackColor = SystemColors.Window;
+            layout.ColumnStyles.Clear();
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, labelWidth));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            layout.Padding = new Padding(0, 4, 0, 2);
+        }
+
+        private void OnProfileListResize(object sender, EventArgs e)
+        {
+            if (lstProfiles.Columns.Count > 0)
+                lstProfiles.Columns[0].Width = Math.Max(0, lstProfiles.ClientSize.Width - 8);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+
+            var dispatchSyncRoot = _uiDispatchSyncRoot;
+            if (!_shutdownComplete && dispatchSyncRoot != null)
+            {
+                lock (dispatchSyncRoot)
+                {
+                    if (_uiDispatchCancellation == null || _uiDispatchCancellation.IsCancellationRequested)
+                    {
+                        _uiDispatchCancellation?.Dispose();
+                        _uiDispatchCancellation = new CancellationTokenSource();
+                    }
+                }
+            }
+
+            _uiLogBuffer?.RetryPendingDispatch();
+            if (_tunnelSession != null && IsNativeRecoveryRequired() && !_shutdownComplete)
+            {
+                _restartMonitorAfterHandleRecreation = false;
+                SetNativeRecoveryUi(_tunnelLifecycle?.ProfileName);
+            }
+            else if (_restartMonitorAfterHandleRecreation && !_shutdownComplete)
+            {
+                _restartMonitorAfterHandleRecreation = false;
+                ResumeTunnelMonitoring();
+            }
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            _uiLogBuffer?.NotifyDispatcherReset();
+            if (!_shutdownComplete &&
+                (_currentState == ConnectionState.Connected || _currentState == ConnectionState.Connecting))
+            {
+                _restartMonitorAfterHandleRecreation = true;
+                _tunnelMonitor?.Cancel();
+            }
+
+            CancelUiDispatches();
+            base.OnHandleDestroyed(e);
+        }
+
+        private static Bitmap GetWindowsIconBitmap(WindowsIcons.Icons icon, int size)
+        {
+            return WindowsIcons.GetWindowsIconBitmap(icon, size);
+        }
+
+        private void SetOwnedMenuImage(ToolStripItem item, WindowsIcons.Icons icon)
+        {
+            var image = GetWindowsIconBitmap(icon, 16);
+            item.Image = image;
+            if (image != null)
+                _ownedMenuImages.Add(image);
+        }
+
+        private void AddProfileIcon(string key, WindowsIcons.Icons icon, int size)
+        {
+            try
+            {
+                using (var windowsIcon = WindowsIcons.GetWindowsIcon(icon, size))
+                {
+                    if (windowsIcon != null)
+                        imlProfiles.Images.AddClonedIcon(key, windowsIcon);
+                }
+            }
+            catch (Exception ex) when (WindowsIcons.IsRecoverableIconException(ex))
+            {
+                Trace.TraceWarning(
+                    $"Unable to load decorative Windows icon {icon} for this Windows release: {ex.Message}");
+            }
+        }
+
+        private void SetTrayIcon(Icon icon, bool ownsIcon)
+        {
+            var previousOwnedIcon = _ownedTrayIcon;
+            _ownedTrayIcon = ownsIcon ? icon : null;
+            trayIcon.Icon = icon;
+
+            if (previousOwnedIcon != null && !ReferenceEquals(previousOwnedIcon, icon))
+                previousOwnedIcon.Dispose();
+        }
+
+        private void SetActivateButtonEnabled(bool enabled)
+        {
+            if (layoutInterface.Controls["btnActivate"] is Button btnActivate)
+                btnActivate.Enabled = enabled &&
+                                      !IsNativeCleanupInProgress() &&
+                                      !IsNativeRecoveryRequired();
+        }
+
+        private void SetStatusImage(PictureBox imgStatus, Image image)
+        {
+            if (imgStatus != null)
+                imgStatus.Image = image;
+
+            cmiStatus.Image = image;
+        }
+
+        private void DisposeStatusImages()
+        {
+            foreach (var control in layoutInterface.Controls.Find("imgStatus", true))
+                if (control is PictureBox pictureBox)
+                    pictureBox.Image = null;
+
+            cmiStatus.Image = null;
+            _inactiveStatusImage?.Dispose();
+            _inactiveStatusImage = null;
+            _connectedStatusImage?.Dispose();
+            _connectedStatusImage = null;
+        }
+
+        private void ClearDynamicLayout(TableLayoutPanel panel)
+        {
+            while (panel.Controls.Count > 0)
+            {
+                var control = panel.Controls[0];
+                DetachSharedStatusImages(control);
+                panel.Controls.RemoveAt(0);
+                control.Dispose();
+            }
+        }
+
+        private void DetachSharedStatusImages(Control control)
+        {
+            if (control is PictureBox pictureBox &&
+                (ReferenceEquals(pictureBox.Image, _inactiveStatusImage) ||
+                 ReferenceEquals(pictureBox.Image, _connectedStatusImage)))
+                pictureBox.Image = null;
+
+            foreach (Control child in control.Controls)
+                DetachSharedStatusImages(child);
+        }
+
+        private bool TryGetProfileItem(string profileName, out ListViewItem profileItem)
+        {
+            profileItem = null;
+
+            if (string.IsNullOrWhiteSpace(profileName) || !lstProfiles.Items.ContainsKey(profileName))
+                return false;
+
+            profileItem = lstProfiles.Items[profileName];
+            return profileItem != null;
+        }
+
+        private bool IsCurrentTunnelProfile(string profileName)
+        {
+            return (_currentState == ConnectionState.Connected ||
+                    _currentState == ConnectionState.Connecting) &&
+                   string.Equals(_tunnelLifecycle.ProfileName, profileName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private int CurrentTunnelGeneration()
+        {
+            return _tunnelSession.CurrentGeneration;
+        }
+
+        private void AdvanceTunnelGeneration()
+        {
+            _tunnelSession.AdvanceGeneration();
+        }
+
+        private bool IsNativeCleanupInProgress()
+        {
+            return _tunnelSession.CleanupPending;
+        }
+
+        private bool IsNativeRecoveryRequired()
+        {
+            return _tunnelSession.RecoveryRequired;
+        }
+
+        private void BeginNativeCleanup()
+        {
+            _tunnelSession.BeginCleanup();
+            TryRunOnUiThread(() =>
+            {
+                SetActivateButtonEnabled(false);
+                cmiResetKillSwitch.Enabled = false;
+            });
+        }
+
+        private async Task EndNativeCleanupAsync(string profile)
+        {
+            if (_shutdownComplete || IsDisposed || Disposing)
+            {
+                _tunnelSession.EndCleanup();
+                return;
+            }
+
+            try
+            {
+                await InvokeOnUiThreadAsync(() =>
+                {
+                    if (!_tunnelSession.EndCleanup())
+                        return Task.CompletedTask;
+
+                    RefreshControlsAfterNativeCleanup(profile);
+                    return Task.CompletedTask;
+                }, GetUiDispatchToken(), UiDispatchStartTimeoutMilliseconds).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // If the form's dispatcher disappeared before reconciliation, fail closed. Releasing
+                // the cleanup count is safe only after the recovery gate has been latched.
+                _tunnelSession.RequireRecovery();
+                _tunnelSession.EndCleanup();
+                Global.NativeRecoveryMarkers.Write("native cleanup UI reconciliation failure", ex.Message);
+                Trace.TraceWarning($"Unable to reconcile native cleanup with the UI: {ex.Message}");
+            }
+        }
+
+        private void RefreshControlsAfterNativeCleanup(string profile)
+        {
+            if (_currentState == ConnectionState.Disconnected)
+            {
+                SetActivateButtonEnabled(true);
+                cmiResetKillSwitch.Enabled = true;
+                if (TryGetProfileItem(profile, out var profileItem))
+                    profileItem.ImageKey = ConnectionState.Disconnected.ToString();
+            }
+            else if (_currentState == ConnectionState.Indeterminate)
+            {
+                SetActivateButtonEnabled(false);
+                cmiResetKillSwitch.Enabled = true;
+            }
+        }
+
+        private void MarkNativeRecoveryRequired(string profile, string context,
+            NativeRecoveryMarkerLease markerLease = null)
+        {
+            var firstTransition = RecordNativeRecoveryRequired(context, markerLease);
+            TryRunOnUiThread(() => RenderNativeRecoveryRequired(profile, firstTransition));
+        }
+
+        private async Task MarkNativeRecoveryRequiredAsync(string profile, string context,
+            NativeRecoveryMarkerLease markerLease = null)
+        {
+            var firstTransition = RecordNativeRecoveryRequired(context, markerLease);
+            try
+            {
+                await InvokeOnUiThreadAsync(() =>
+                {
+                    RenderNativeRecoveryRequired(profile, firstTransition);
+                    return Task.CompletedTask;
+                }, GetUiDispatchToken(), UiDispatchStartTimeoutMilliseconds).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning($"Unable to display native recovery state: {ex.Message}");
+            }
+        }
+
+        private bool RecordNativeRecoveryRequired(string context, NativeRecoveryMarkerLease markerLease)
+        {
+            const string diagnostic =
+                "Native WireSock cleanup did not finish safely. New tunnel operations are disabled until recovery succeeds or WireSock UI is restarted.";
+            WriteOrUpdateNativeRecoveryMarker(markerLease, context, diagnostic);
+
+            var firstTransition = _tunnelSession.RequireRecovery();
+            Trace.TraceWarning(
+                $"Native WireSock cleanup did not finish safely after {context}. New tunnel operations are disabled until recovery succeeds or WireSock UI is restarted.");
+            return firstTransition;
+        }
+
+        private void RenderNativeRecoveryRequired(string profile, bool firstTransition)
+        {
+            if (_shutdownComplete || IsDisposed || Disposing || !IsNativeRecoveryRequired())
+                return;
+
+            SetNativeRecoveryUi(profile);
+
+            if (firstTransition)
+                MessageBox.Show(Resources.TunnelNativeRecoveryRequired, Resources.TunnelErrorTitle,
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        private static NativeRecoveryMarkerLease WriteOrUpdateNativeRecoveryMarker(
+            NativeRecoveryMarkerLease markerLease,
+            string context,
+            string diagnostic)
+        {
+            if (markerLease == null)
+                return Global.NativeRecoveryMarkers.Write(context, diagnostic);
+
+            Global.NativeRecoveryMarkers.TryUpdate(markerLease, context, diagnostic);
+            return markerLease;
+        }
+
+        private async Task<bool> HandleNativeCleanupFailureAsync(string profile, string context,
+            string diagnostic = null,
+            NativeRecoveryMarkerLease markerLease = null)
+        {
+            if (!string.IsNullOrWhiteSpace(diagnostic))
+                Trace.TraceWarning($"Native cleanup failure after {context}: {diagnostic}");
+
+            if (_tunnelLifecycle.HasTunnelHandle)
+            {
+                await MarkNativeRecoveryRequiredAsync(profile, string.IsNullOrWhiteSpace(diagnostic)
+                        ? context
+                        : $"{context}: {diagnostic}",
+                    markerLease).ConfigureAwait(false);
+                return false;
+            }
+
+            var networkLockRecovered = await TryResetNetworkLockAfterNativeCleanupFailureAsync(context)
+                .ConfigureAwait(false);
+            if (!_tunnelLifecycle.HasTunnelHandle && networkLockRecovered)
+            {
+                Global.NativeRecoveryMarkers.TryDelete(markerLease);
+                await InvokeOnUiThreadAsync(() =>
+                {
+                    UpdateState(ConnectionState.Disconnected, false, profile);
+                    return Task.CompletedTask;
+                }, GetUiDispatchToken(), UiDispatchStartTimeoutMilliseconds).ConfigureAwait(false);
+                return true;
+            }
+
+            await MarkNativeRecoveryRequiredAsync(profile, string.IsNullOrWhiteSpace(diagnostic)
+                    ? context
+                    : $"{context}: {diagnostic}",
+                markerLease).ConfigureAwait(false);
+            return false;
+        }
+
+        private void SetNativeRecoveryUi(string profile)
+        {
+            if (_shutdownComplete || IsDisposed || Disposing)
+                return;
+
+            UpdateState(ConnectionState.Indeterminate, false, profile);
+        }
+
+        private void ShowTunnelOperationBlockedMessage(string message)
+        {
+            if (_shutdownComplete || IsDisposed || Disposing)
+                return;
+
+            MessageBox.Show(message, Resources.TunnelErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        private void CancelTunnelMonitoring()
+        {
+            AdvanceTunnelGeneration();
+            _tunnelMonitor.Cancel();
+        }
+
+        private void ResumeTunnelMonitoring()
+        {
+            if (_shutdownComplete || IsDisposed || Disposing ||
+                IsNativeCleanupInProgress() || IsNativeRecoveryRequired())
+                return;
+
+            if (_currentState == ConnectionState.Connected)
+                StartTunnelStateMonitor();
+            else if (_currentState == ConnectionState.Connecting)
+                StartTunnelConnectionMonitor(Task.CompletedTask);
+        }
+
+        private bool TryBeginTunnelOperation(bool showBlockedMessage = true)
+        {
+            if (_exitRequested || _shutdownComplete)
+                return false;
+
+            if (_tunnelSession.TryBeginOperation(out var blockReason))
+                return true;
+
+            if (showBlockedMessage)
+            {
+                var message = blockReason == TunnelOperationBlockReason.CleanupPending
+                    ? Resources.TunnelConnectCleanupPending
+                    : blockReason == TunnelOperationBlockReason.RecoveryRequired
+                        ? Resources.TunnelNativeRecoveryRequired
+                        : Resources.TunnelOperationPending;
+                ShowTunnelOperationBlockedMessage(message);
+            }
+
+            return false;
+        }
+
+        private void EndTunnelOperation()
+        {
+            _tunnelSession.EndOperation();
+        }
+
+        private void StartTunnelConnectionMonitor(Task nativeConnectCompletion)
+        {
+            _tunnelMonitor.StartConnecting(CurrentTunnelGeneration(), nativeConnectCompletion);
+        }
+
+        private void StartTunnelStateMonitor()
+        {
+            _tunnelMonitor.StartConnected(CurrentTunnelGeneration());
+        }
+
+        private async Task<bool> DisconnectCurrentTunnelAsync(bool notify = true, bool preserveNetworkLock = false)
+        {
+            var profileName = _tunnelLifecycle.ProfileName;
+
+            CancelTunnelMonitoring();
+
+            if (await DisconnectNativeTunnelAsync(preserveNetworkLock: preserveNetworkLock))
+            {
+                UpdateState(ConnectionState.Disconnected, notify, profileName);
+                return true;
+            }
+
+            if (IsNativeCleanupInProgress())
+                return false;
+
+            if (_tunnelLifecycle.HasTunnelHandle)
+                await HandleNativeCleanupFailureAsync(profileName, "tunnel disconnect cleanup",
+                    _tunnelLifecycle.LastError);
+            else
+                UpdateState(ConnectionState.Disconnected, notify, profileName);
+
+            return false;
+        }
+
+        private async Task<bool> DisconnectNativeTunnelAsync(long? connectionSequence = null, bool showWarning = true,
+            bool preserveNetworkLock = false)
+        {
+            var profile = _tunnelLifecycle.ProfileName;
+            var result = await _tunnelLifecycle.DisconnectAsync(connectionSequence, preserveNetworkLock,
+                TunnelDisconnectTimeoutMilliseconds);
+            if (result.TimedOut)
+            {
+                BeginNativeCleanup();
+                var markerLease = Global.NativeRecoveryMarkers.Write("tunnel disconnect timeout",
+                    $"The native disconnect call for profile '{profile}' did not return within {TunnelDisconnectTimeoutMilliseconds} ms.");
+                SetNativeRecoveryUi(profile);
+                ScheduleTimedOutDisconnectCleanup(result.PendingCompletion, profile, preserveNetworkLock, markerLease);
+
+                if (showWarning)
+                    MessageBox.Show(Resources.TunnelDisconnectTimeout, Resources.TunnelErrorTitle,
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            if (!result.Succeeded && showWarning)
+                MessageBox.Show(result.Diagnostic ?? Resources.TunnelHandleReleaseWarning, Resources.TunnelErrorTitle,
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+            return result.Succeeded;
+        }
+
+        private void ScheduleTimedOutDisconnectCleanup(Task<NativeOperationResult<bool>> pendingCompletion,
+            string profile, bool preservedNetworkLock, NativeRecoveryMarkerLease markerLease)
+        {
+            var cleanupTask = CompleteTimedOutDisconnectCleanupAsync(pendingCompletion, profile,
+                preservedNetworkLock, markerLease);
+            cleanupTask.ContinueWith(task =>
+                    Trace.TraceWarning(
+                        $"Unhandled timed-out disconnect cleanup error: {task.Exception?.GetBaseException().Message}"),
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted,
+                TaskScheduler.Default);
+        }
+
+        private async Task CompleteTimedOutDisconnectCleanupAsync(
+            Task<NativeOperationResult<bool>> pendingCompletion, string profile, bool preservedNetworkLock,
+            NativeRecoveryMarkerLease markerLease)
+        {
+            var cleanupFailed = false;
+            string diagnostic = null;
+
+            try
+            {
+                try
+                {
+                    var result = NativeOperationRecoveryPolicy.NormalizeCompletion(
+                        await pendingCompletion.ConfigureAwait(false), "native disconnect cleanup");
+                    cleanupFailed = !result.Succeeded || _tunnelLifecycle.HasTunnelHandle;
+                    diagnostic = result.Diagnostic;
+
+                    if (!cleanupFailed && preservedNetworkLock)
+                    {
+                        var resetResult = await _tunnelLifecycle.ResetNetworkLockAsync(NativeQueryTimeoutMilliseconds)
+                            .ConfigureAwait(false);
+                        resetResult = await NativeOperationRecoveryPolicy.AwaitTimedOutCompletionAsync(
+                                resetResult, "native network-lock reset")
+                            .ConfigureAwait(false);
+                        cleanupFailed = !resetResult.Succeeded;
+                        diagnostic = resetResult.Diagnostic;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    cleanupFailed = true;
+                    diagnostic = ex.Message;
+                }
+
+                if (cleanupFailed)
+                {
+                    cleanupFailed = !await HandleNativeCleanupFailureAsync(
+                            profile, "timed-out disconnect cleanup", diagnostic, markerLease)
+                        .ConfigureAwait(false);
+                }
+
+                if (!cleanupFailed)
+                {
+                    Global.NativeRecoveryMarkers.TryDelete(markerLease);
+                    await InvokeOnUiThreadAsync(() =>
+                    {
+                        UpdateState(ConnectionState.Disconnected, false, profile);
+                        return Task.CompletedTask;
+                    }, GetUiDispatchToken(), UiDispatchStartTimeoutMilliseconds).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                await EndNativeCleanupAsync(profile).ConfigureAwait(false);
+            }
+        }
+
+        private async Task ShutdownAsync()
+        {
+            if (_shutdownComplete)
+                return;
+
+            _shutdownComplete = true;
+            _uiLogBuffer.Dispose();
+            _tunnelMonitor.Dispose();
+            _activeSettingsForm?.CancelPendingOperations();
+
+            try
+            {
+                var activeSettingsOperation = _activeSettingsOperation ?? Task.CompletedTask;
+                if (!await BoundedTaskWaiter.WaitAsync(
+                        activeSettingsOperation,
+                        ShutdownSettingsTimeoutMilliseconds))
+                {
+                    const string diagnostic =
+                        "A settings operation was still pending when application shutdown continued.";
+                    Trace.TraceWarning(diagnostic);
+                    Global.NativeRecoveryMarkers.Write("settings shutdown timeout", diagnostic);
+                    _tunnelSession.RequireRecovery();
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning($"Settings operation failed while application shutdown was pending: {ex.Message}");
+            }
+
+            CancelUiDispatches();
+            await ShutdownTunnelLifecycleAsync();
+            _currentState = ConnectionState.Disconnected;
+            trayIcon.Visible = false;
+            SetTrayIcon(null, false);
+            DisposeStatusImages();
+            DisposeMenuImages();
+
+            // Keep the global ownership event alive until process termination. This prevents another
+            // direct SDK client from starting while a timed-out native cleanup may still be unwinding.
+        }
+
+        private void DisposeMenuImages()
+        {
+            ddmAddTunnel.Image = null;
+            mniImportTunnel.Image = null;
+            mniNewTunnel.Image = null;
+            mniDeleteTunnel.Image = null;
+            mniSettings.Image = null;
+
+            foreach (var image in _ownedMenuImages)
+                image.Dispose();
+            _ownedMenuImages.Clear();
+        }
+
+        private async Task ShutdownTunnelLifecycleAsync()
+        {
+            if (_tunnelLifecycle == null)
+                return;
+
+            try
+            {
+                var cleanupResult = await _tunnelLifecycle.ShutdownAsync(ShutdownDisconnectTimeoutMilliseconds);
+                if (cleanupResult.TimedOut)
+                {
+                    Trace.TraceWarning(
+                        $"WireSock manager shutdown exceeded {ShutdownDisconnectTimeoutMilliseconds} ms; continuing application exit.");
+                    var markerLease = Global.NativeRecoveryMarkers.Write("shutdown timeout",
+                        "The native cleanup call was still running when WireSock UI exited. No concurrent global reset was attempted.");
+
+                    _ = cleanupResult.PendingCompletion.ContinueWith(task =>
+                        {
+                            if (task.IsFaulted)
+                            {
+                                Trace.TraceWarning(
+                                    $"WireSock manager shutdown completed with an error after exit continued: {task.Exception?.GetBaseException().Message}");
+                                WriteOrUpdateNativeRecoveryMarker(markerLease, "shutdown cleanup failure",
+                                    task.Exception?.GetBaseException().Message);
+                                return;
+                            }
+
+                            if (task.IsCanceled)
+                            {
+                                WriteOrUpdateNativeRecoveryMarker(markerLease, "shutdown cleanup failure",
+                                    "The native shutdown cleanup was canceled.");
+                                return;
+                            }
+
+                            var completedResult = NativeOperationRecoveryPolicy.NormalizeCompletion(
+                                task.Result, "native shutdown cleanup");
+                            if (!completedResult.Succeeded)
+                            {
+                                WriteOrUpdateNativeRecoveryMarker(markerLease, "shutdown cleanup failure",
+                                    completedResult.Diagnostic);
+                                return;
+                            }
+
+                            Global.NativeRecoveryMarkers.TryDelete(markerLease);
+                        },
+                        CancellationToken.None,
+                        TaskContinuationOptions.None,
+                        TaskScheduler.Default);
+                }
+                else if (!cleanupResult.Succeeded)
+                {
+                    Global.NativeRecoveryMarkers.Write("shutdown cleanup failure",
+                        cleanupResult.Diagnostic);
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning($"Failed to cleanly shut down WireSock manager: {ex.Message}");
+                Global.NativeRecoveryMarkers.Write("shutdown cleanup failure", ex.Message);
+            }
+        }
+
+        private async Task<bool> TryResetNetworkLockAfterNativeCleanupFailureAsync(string context,
+            NativeRecoveryMarkerSnapshot markerToClear = null, bool recordRecoveryMarkerOnFailure = false)
+        {
+            try
+            {
+                if (_tunnelLifecycle.HasTunnelHandle)
+                {
+                    const string diagnostic =
+                        "WireSock UI refused to reset the global network lock while a tunnel handle remains allocated.";
+                    Trace.TraceWarning($"{diagnostic} Recovery context: {context}.");
+                    if (recordRecoveryMarkerOnFailure)
+                        Global.NativeRecoveryMarkers.Write(context, diagnostic);
+                    return false;
+                }
+
+                var queryResult = await _tunnelLifecycle.QueryNetworkLockAsync(NativeQueryTimeoutMilliseconds);
+                if (!queryResult.Succeeded)
+                {
+                    TrackTimedOutNativeOperation(queryResult, context);
+                    var diagnostic = queryResult.Diagnostic ?? "Unable to query WireSock network lock state.";
+                    Trace.TraceWarning(
+                        $"Unable to query WireSock network lock after {context}: {diagnostic}");
+                    if (recordRecoveryMarkerOnFailure)
+                        Global.NativeRecoveryMarkers.Write(context, diagnostic);
+                    return false;
+                }
+
+                if (!queryResult.Value)
+                {
+                    if (recordRecoveryMarkerOnFailure)
+                        Global.NativeRecoveryMarkers.TryDelete(markerToClear);
+                    return true;
+                }
+
+                var resetResult = await _tunnelLifecycle.ResetNetworkLockAsync(NativeQueryTimeoutMilliseconds);
+                if (!resetResult.Succeeded)
+                {
+                    TrackTimedOutNativeOperation(resetResult, context);
+                    var diagnostic = resetResult.Diagnostic ?? "Unable to reset WireSock network lock.";
+                    Trace.TraceWarning(
+                        $"Unable to reset WireSock network lock after {context}: {diagnostic}");
+                    if (recordRecoveryMarkerOnFailure)
+                        Global.NativeRecoveryMarkers.Write(context, diagnostic);
+                    return false;
+                }
+
+                if (recordRecoveryMarkerOnFailure)
+                    Global.NativeRecoveryMarkers.TryDelete(markerToClear);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning($"Failed to reset WireSock network lock after {context}: {ex.Message}");
+                if (recordRecoveryMarkerOnFailure)
+                    Global.NativeRecoveryMarkers.Write(context, ex.Message);
+                return false;
+            }
+        }
+
+        private void TrackTimedOutNativeOperation<T>(NativeOperationResult<T> result, string context)
+        {
+            if (!result.TimedOut || result.PendingCompletion == null)
+                return;
+
+            var profile = _tunnelLifecycle.ProfileName;
+            BeginNativeCleanup();
+            CompleteTrackedNativeOperationAsync(result.PendingCompletion, profile, context).ContinueWith(task =>
+                    Trace.TraceWarning(
+                        $"Unable to finish tracking the timed-out native operation after {context}: {task.Exception?.GetBaseException().Message}"),
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted,
+                TaskScheduler.Default);
+        }
+
+        private async Task CompleteTrackedNativeOperationAsync<T>(
+            Task<NativeOperationResult<T>> pendingCompletion,
+            string profile,
+            string context)
+        {
+            try
+            {
+                try
+                {
+                    var completedResult = NativeOperationRecoveryPolicy.NormalizeCompletion(
+                        await pendingCompletion.ConfigureAwait(false), context);
+                    if (!completedResult.Succeeded)
+                        Trace.TraceWarning(
+                            $"Timed-out native operation after {context} failed: {completedResult.Diagnostic}");
+                }
+                catch (OperationCanceledException)
+                {
+                    Trace.TraceWarning($"Timed-out native operation after {context} was canceled.");
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceWarning($"Timed-out native operation after {context} faulted: {ex.Message}");
+                }
+            }
+            finally
+            {
+                await EndNativeCleanupAsync(profile).ConfigureAwait(false);
+            }
+        }
+
+        private async Task ShowPendingNativeRecoveryWarningAsync()
+        {
+            var markerSnapshot = Global.NativeRecoveryMarkers.Capture();
+            var marker = markerSnapshot?.Contents;
+
+            var queryResult = await _tunnelLifecycle.QueryNetworkLockAsync(NativeQueryTimeoutMilliseconds);
+            if (!queryResult.Succeeded)
+            {
+                TrackTimedOutNativeOperation(queryResult, "startup network-lock query");
+                var diagnostic = queryResult.Diagnostic ?? "Unable to query WireSock network lock state.";
+                Global.NativeRecoveryMarkers.Write("startup network-lock query", diagnostic);
+                _tunnelSession.RequireRecovery();
+                SetNativeRecoveryUi(null);
+                MessageBox.Show(
+                    $"WireSock UI could not verify the driver network-lock state.{Environment.NewLine}{Environment.NewLine}{diagnostic}",
+                    Resources.TunnelErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!queryResult.Value)
+            {
+                Global.NativeRecoveryMarkers.TryDelete(markerSnapshot);
+                return;
+            }
+
+            var recovered = await TryResetNetworkLockAfterNativeCleanupFailureAsync(
+                "startup recovery", markerSnapshot, true);
+            if (!recovered)
+            {
+                _tunnelSession.RequireRecovery();
+                SetNativeRecoveryUi(null);
+            }
+
+            var recoveryStatus = recovered
+                ? "Startup recovery completed successfully. WireSock UI will continue normally."
+                : "Startup recovery could not verify or reset the WireSock Kill Switch. Tunnel operations are disabled until WireSock UI is restarted after network access is restored.";
+
+            var recoveryContext = string.IsNullOrWhiteSpace(marker)
+                ? "The WireSock driver reported an orphaned network lock."
+                : marker;
+            var recoveryMessage =
+                $"{Resources.TunnelNativeRecoveryRequired}{Environment.NewLine}{Environment.NewLine}{recoveryStatus}{Environment.NewLine}{Environment.NewLine}{recoveryContext}";
+
+            TryRunOnUiThread(() => MessageBox.Show(
+                recoveryMessage,
+                Resources.TunnelErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning));
+        }
+
+        private void TryRunOnUiThread(Action action)
+        {
+            if (_shutdownComplete || IsDisposed || Disposing)
+                return;
+
+            TryDispatchOnUiThread(
+                this,
+                action,
+                _uiThreadId,
+                IsHandleCreated,
+                GetUiDispatchToken());
+        }
+
+        internal static bool TryDispatchOnUiThread(
+            ISynchronizeInvoke synchronizer,
+            Action action,
+            int uiThreadId,
+            bool isHandleCreated,
+            CancellationToken cancellationToken)
+        {
+            if (synchronizer == null)
+                throw new ArgumentNullException(nameof(synchronizer));
+            if (action == null)
+                throw new ArgumentNullException(nameof(action));
+            if (uiThreadId <= 0)
+                throw new ArgumentOutOfRangeException(nameof(uiThreadId));
+            if (cancellationToken.IsCancellationRequested)
+                return false;
+
+            if (Thread.CurrentThread.ManagedThreadId == uiThreadId)
+            {
+                RunUiActionSafely(action);
+                return true;
+            }
+
+            // Control.InvokeRequired can return false on a worker when no control in
+            // the parent chain currently owns a handle. Never use it to authorize
+            // inline execution: a stale handle snapshot may only be used to attempt
+            // marshaling, which fails safely if destruction wins the race.
+            if (!isHandleCreated)
+                return false;
+
+            try
+            {
+                synchronizer.BeginInvoke(new Action(() =>
+                {
+                    if (!cancellationToken.IsCancellationRequested)
+                    {
+                        RunUiActionSafely(action);
+                    }
+                }), Array.Empty<object>());
+                return true;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        private static void RunUiActionSafely(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning($"Failed to run WireSock UI callback: {ex.Message}");
+            }
+        }
+
+#if WIRESOCKUI_ENABLE_UWP
+        private void ScheduleVersionCheck()
+        {
+            Task.Run(() =>
+                {
+                    return Program.TryGetAvailableUpdate(out var releasesUrl)
+                        ? releasesUrl
+                        : null;
+                })
+                .ContinueWith(task =>
+                    {
+                        if (task.IsFaulted)
+                        {
+                            Trace.TraceWarning(
+                                $"Unable to check for WireSock UI updates: {task.Exception?.GetBaseException().Message}");
+                            return;
+                        }
+
+                        if (string.IsNullOrWhiteSpace(task.Result))
+                            return;
+
+                        TryRunOnUiThread(() =>
+                        {
+                            if (MessageBox.Show(this, Resources.AppUpdateMessage, Resources.AppUpdateTitle,
+                                    MessageBoxButtons.OKCancel, MessageBoxIcon.Information) == DialogResult.OK)
+                                Program.OpenBrowser(task.Result);
+                        });
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    TaskScheduler.Default);
+        }
+
+        private void TryShowNotification(string title, string body)
+        {
+            try
+            {
+                Notifications.Notifications.Notify(title, body, this);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning($"Unable to show WireSock UI notification: {ex.Message}");
+            }
+        }
+#endif
+
+        /// <summary>
+        ///     Determines if another instance of the current application is already running.
+        /// </summary>
+        /// <returns>
+        ///     A boolean value that is true if another instance of the application is already running,
+        ///     and false if the current instance is the only one running.
+        /// </returns>
+        /// <remarks>
+        ///     This function uses the same named event as the direct WireSock C++ CLI/service so only one
+        ///     direct SDK tunnel owner is active at a time.
+        /// </remarks>
+        internal static bool IsApplicationAlreadyRunning()
+        {
+            const string eventName = "Global\\WiresockClientService";
+
+            try
+            {
+                Global.AlreadyRunning =
+                    new EventWaitHandle(
+                        false,
+                        EventResetMode.AutoReset,
+                        eventName,
+                        out var createdNew,
+                        CreateSingleInstanceEventSecurity());
+
+                if (!TryValidateSingleInstanceEventSecurity(Global.AlreadyRunning, out var diagnostic))
+                {
+                    Global.AlreadyRunning.Dispose();
+                    Global.AlreadyRunning = null;
+                    throw new InvalidOperationException(diagnostic);
+                }
+
+                if (createdNew) return false;
+
+                Global.AlreadyRunning.Dispose();
+                Global.AlreadyRunning = null;
+                return true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new InvalidOperationException(
+                    "The global WireSock ownership event exists but its security descriptor denies elevated access. Close the process that pre-created it and retry.");
+            }
+            catch (IOException)
+            {
+                throw new InvalidOperationException(
+                    "The global WireSock ownership event could not be opened safely. Close other WireSock clients and retry.");
+            }
+        }
+
+        private static EventWaitHandleSecurity CreateSingleInstanceEventSecurity()
+        {
+            var security = new EventWaitHandleSecurity();
+            security.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
+            security.SetAccessRuleProtection(true, false);
+            security.AddAccessRule(new EventWaitHandleAccessRule(
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                EventWaitHandleRights.FullControl,
+                AccessControlType.Allow));
+            security.AddAccessRule(new EventWaitHandleAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                EventWaitHandleRights.FullControl,
+                AccessControlType.Allow));
+            return security;
+        }
+
+        private static bool TryValidateSingleInstanceEventSecurity(EventWaitHandle waitHandle,
+            out string diagnostic)
+        {
+            diagnostic = null;
+            try
+            {
+                return IsSingleInstanceEventSecurityTrusted(
+                    waitHandle.GetAccessControl(),
+                    out diagnostic);
+            }
+            catch (Exception ex)
+            {
+                diagnostic = $"Unable to validate the global WireSock ownership event: {ex.Message}";
+                return false;
+            }
+        }
+
+        internal static bool IsSingleInstanceEventSecurityTrusted(
+            EventWaitHandleSecurity security,
+            out string diagnostic)
+        {
+            diagnostic = null;
+            if (security == null)
+            {
+                diagnostic = "The global WireSock ownership event has no verifiable security descriptor.";
+                return false;
+            }
+
+            if (!(security.GetOwner(typeof(SecurityIdentifier)) is SecurityIdentifier owner) ||
+                !Program.IsTrustedAdministrativeSid(owner))
+            {
+                diagnostic = "The global WireSock ownership event is not owned by the Administrators group, " +
+                             "LocalSystem, or TrustedInstaller.";
+                return false;
+            }
+
+            var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier));
+            foreach (EventWaitHandleAccessRule rule in rules)
+            {
+                if (rule.AccessControlType != AccessControlType.Allow ||
+                    !(rule.IdentityReference is SecurityIdentifier sid))
+                    continue;
+
+                if (Program.IsTrustedAdministrativeSid(sid))
+                    continue;
+
+                diagnostic =
+                    $"The global WireSock ownership event grants access to an untrusted identity ({sid.Value}).";
+                return false;
+            }
+
+            return true;
+        }
+
+        private async Task HandleTunnelMonitorUpdateAsync(TunnelMonitorUpdate update)
+        {
+            if (_shutdownComplete || IsDisposed || Disposing || !IsHandleCreated)
+                return;
+
+            var dispatchToken = GetUiDispatchToken();
+            try
+            {
+                await InvokeOnUiThreadAsync(
+                    () => HandleTunnelMonitorUpdateOnUiThreadAsync(update),
+                    dispatchToken,
+                    UiDispatchStartTimeoutMilliseconds).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (
+                dispatchToken.IsCancellationRequested ||
+                _shutdownComplete ||
+                IsDisposed ||
+                Disposing ||
+                !IsHandleCreated)
+            {
+            }
+            catch (TimeoutException ex)
+            {
+                MarkNativeRecoveryRequired(
+                    _tunnelLifecycle.ProfileName,
+                    $"tunnel monitor UI dispatch timeout: {ex.Message}");
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (InvalidOperationException) when (!IsHandleCreated)
+            {
+            }
+        }
+
+        private Task InvokeOnUiThreadAsync(
+            Func<Task> action,
+            CancellationToken cancellationToken,
+            int dispatchStartTimeoutMilliseconds)
+        {
+            return InvokeOnUiThreadAsync(
+                this,
+                action,
+                _uiThreadId,
+                () => IsHandleCreated,
+                cancellationToken,
+                dispatchStartTimeoutMilliseconds);
+        }
+
+        internal static async Task InvokeOnUiThreadAsync(
+            ISynchronizeInvoke synchronizer,
+            Func<Task> action,
+            int uiThreadId,
+            Func<bool> isHandleCreated,
+            CancellationToken cancellationToken,
+            int dispatchStartTimeoutMilliseconds)
+        {
+            if (synchronizer == null)
+                throw new ArgumentNullException(nameof(synchronizer));
+            if (action == null)
+                throw new ArgumentNullException(nameof(action));
+            if (uiThreadId <= 0)
+                throw new ArgumentOutOfRangeException(nameof(uiThreadId));
+            if (isHandleCreated == null)
+                throw new ArgumentNullException(nameof(isHandleCreated));
+            if (dispatchStartTimeoutMilliseconds != Timeout.Infinite &&
+                dispatchStartTimeoutMilliseconds <= 0)
+                throw new ArgumentOutOfRangeException(nameof(dispatchStartTimeoutMilliseconds));
+
+            if (Thread.CurrentThread.ManagedThreadId == uiThreadId)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await action();
+                return;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!isHandleCreated())
+                throw new InvalidOperationException(
+                    "The UI dispatcher does not currently have a live window handle.");
+
+            var callbackState = 0;
+            var dispatchStarted = new TaskCompletionSource<object>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var completion = new TaskCompletionSource<object>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            try
+            {
+                synchronizer.BeginInvoke(new Action(async () =>
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        if (Interlocked.CompareExchange(ref callbackState, 2, 0) == 0)
+                        {
+                            dispatchStarted.TrySetCanceled();
+                            completion.TrySetCanceled();
+                        }
+
+                        return;
+                    }
+
+                    if (Interlocked.CompareExchange(ref callbackState, 1, 0) != 0)
+                        return;
+
+                    dispatchStarted.TrySetResult(null);
+                    try
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        await action();
+                        completion.TrySetResult(null);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        completion.TrySetCanceled();
+                    }
+                    catch (Exception ex)
+                    {
+                        completion.TrySetException(ex);
+                    }
+                }), Array.Empty<object>());
+            }
+            catch (ObjectDisposedException)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw;
+            }
+            catch (InvalidOperationException)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw;
+            }
+
+            using (var startWaitCancellation =
+                   CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                var startTimeout = Task.Delay(dispatchStartTimeoutMilliseconds, startWaitCancellation.Token);
+                var completed = await Task.WhenAny(dispatchStarted.Task, startTimeout).ConfigureAwait(false);
+                if (completed != dispatchStarted.Task)
+                {
+                    if (Interlocked.CompareExchange(ref callbackState, 2, 0) == 0)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        throw new TimeoutException(
+                            $"The UI dispatcher did not start the callback within {dispatchStartTimeoutMilliseconds} ms.");
+                    }
+
+                    // The callback claimed execution concurrently with timeout or cancellation.
+                    await dispatchStarted.Task.ConfigureAwait(false);
+                }
+
+                startWaitCancellation.Cancel();
+            }
+
+            await completion.Task.ConfigureAwait(false);
+        }
+
+        private async Task HandleTunnelMonitorUpdateOnUiThreadAsync(TunnelMonitorUpdate update)
+        {
+            try
+            {
+                if (update == null || _shutdownComplete || IsDisposed || Disposing ||
+                    update.Generation != CurrentTunnelGeneration())
+                    return;
+
+                switch (update.Kind)
+                {
+                    case TunnelMonitorUpdateKind.Connected:
+                        if (_currentState == ConnectionState.Connecting)
+                            UpdateState(ConnectionState.Connected);
+                        return;
+                    case TunnelMonitorUpdateKind.ConnectionTimedOut:
+                        if (_currentState == ConnectionState.Connecting)
+                            await HandleTunnelConnectionTimeoutAsync(update.Generation);
+                        return;
+                    case TunnelMonitorUpdateKind.TunnelInactive:
+                        if (_currentState == ConnectionState.Connected)
+                            await HandleTunnelInactiveAsync(update.Generation);
+                        return;
+                    case TunnelMonitorUpdateKind.Statistics:
+                        if (_currentState == ConnectionState.Connected)
+                            ApplyTunnelStatistics(update.Statistics);
+                        return;
+                    case TunnelMonitorUpdateKind.QueryFailed:
+                        if (update.ConnectionQuery != null)
+                        {
+                            await HandleTunnelMonitorQueryFailureAsync(
+                                update.Generation,
+                                update.ConnectionQuery,
+                                "tunnel active-state monitor");
+                        }
+                        else if (update.StatisticsQuery != null)
+                        {
+                            await HandleTunnelMonitorQueryFailureAsync(
+                                update.Generation,
+                                update.StatisticsQuery,
+                                "tunnel statistics monitor");
+                        }
+
+                        return;
+                    default:
+                        throw new ArgumentOutOfRangeException();
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceError($"Tunnel monitor update handling failed unexpectedly: {ex.Message}");
+                TryRequireTunnelMonitorRecovery(
+                    ex,
+                    "tunnel monitor update handling failure",
+                    () => !_shutdownComplete && !IsDisposed && !Disposing &&
+                          update != null &&
+                          update.Generation == CurrentTunnelGeneration(),
+                    recoveryDiagnostic => MarkNativeRecoveryRequired(
+                        _tunnelLifecycle.ProfileName,
+                        recoveryDiagnostic));
+            }
+        }
+
+        private async Task HandleTunnelMonitorQueryFailureAsync<T>(int generation,
+            NativeOperationResult<T> result, string context)
+        {
+            var diagnostic = result.Diagnostic ?? $"The native {context} query failed.";
+            if (result.TimedOut)
+            {
+                TrackTimedOutNativeOperation(result, context);
+                MarkNativeRecoveryRequired(_tunnelLifecycle.ProfileName, $"{context}: {diagnostic}");
+                return;
+            }
+
+            await HandleTunnelMonitorFailureAsync(generation, diagnostic);
+        }
+
+        private void ApplyTunnelStatistics(WgbStats stats)
+        {
+            if (layoutState.Controls["txtHandshake"] is TextBox txtHandshake)
+                txtHandshake.Text = stats.time_since_last_handshake.AsHandshakeAge();
+
+            if (layoutState.Controls["txtTransfer"] is TextBox txtTransfer)
+                txtTransfer.Text = string.Format(Resources.StateTransferValue,
+                    stats.rx_bytes.AsHumanReadable(),
+                    stats.tx_bytes.AsHumanReadable());
+
+            if (layoutState.Controls["txtRTT"] is TextBox txtRtt)
+                txtRtt.Text = string.Format(Resources.StateRTTValue, stats.estimated_rtt);
+
+            if (layoutState.Controls["txtLoss"] is TextBox txtLoss)
+                txtLoss.Text = string.Format(Resources.StateLossValue, stats.estimated_loss * 100);
+        }
+
+        private async Task HandleTunnelMonitorFailureAsync(int generation, string diagnostic)
+        {
+            try
+            {
+                Trace.TraceWarning(diagnostic);
+                if (_shutdownComplete || IsDisposed || Disposing)
+                    return;
+
+                await HandleTunnelQueryFailureAsync(generation, diagnostic);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceError($"Unable to recover from a tunnel monitor failure: {ex.Message}");
+                TryRequireTunnelMonitorRecovery(
+                    ex,
+                    "tunnel monitor recovery failure",
+                    () => !_shutdownComplete && !IsDisposed && !Disposing &&
+                          generation == CurrentTunnelGeneration(),
+                    recoveryDiagnostic => MarkNativeRecoveryRequired(
+                        _tunnelLifecycle.ProfileName,
+                        recoveryDiagnostic));
+            }
+        }
+
+        internal static bool TryRequireTunnelMonitorRecovery(
+            Exception exception,
+            string context,
+            Func<bool> shouldRequireRecovery,
+            Action<string> requireRecovery)
+        {
+            if (exception == null)
+                throw new ArgumentNullException(nameof(exception));
+            if (string.IsNullOrWhiteSpace(context))
+                throw new ArgumentException("A recovery context is required.", nameof(context));
+            if (shouldRequireRecovery == null)
+                throw new ArgumentNullException(nameof(shouldRequireRecovery));
+            if (requireRecovery == null)
+                throw new ArgumentNullException(nameof(requireRecovery));
+            if (!shouldRequireRecovery())
+                return false;
+
+            requireRecovery($"{context}: {exception.Message}");
+            return true;
+        }
+
+        private async Task HandleTunnelQueryFailureAsync(int generation, string diagnostic)
+        {
+            if (!await _tunnelSession.WaitToBeginOperationAsync(
+                    () => ShouldStopTunnelFailureHandling(generation)))
+                return;
+
+            try
+            {
+                if (ShouldStopTunnelFailureHandling(generation))
+                    return;
+
+                Trace.TraceWarning($"Native tunnel state query failed: {diagnostic}");
+                if (!await DisconnectCurrentTunnelAsync(false))
+                    return;
+
+                if (!_shutdownComplete)
+                    MessageBox.Show(
+                        $"WireSock UI could not query the native tunnel state.{Environment.NewLine}{Environment.NewLine}{diagnostic}",
+                        Resources.TunnelErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally
+            {
+                EndTunnelOperation();
+            }
+        }
+
+        private bool ShouldStopTunnelFailureHandling(int generation)
+        {
+            return _shutdownComplete || IsDisposed || Disposing || IsNativeRecoveryRequired() ||
+                   generation != CurrentTunnelGeneration() ||
+                   _currentState == ConnectionState.Disconnected ||
+                   _currentState == ConnectionState.Indeterminate;
+        }
+
+        private async Task HandleTunnelConnectionTimeoutAsync(int generation)
+        {
+            if (!RequestTunnelConnectionTimeout(generation))
+                return;
+
+            if (!await _tunnelSession.WaitToBeginOperationAsync(
+                    () => ShouldStopTunnelFailureHandling(generation)))
+                return;
+
+            try
+            {
+                try
+                {
+                    await DisconnectTimedOutTunnelAsync(generation);
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceWarning($"Failed to handle tunnel connection timeout: {ex.Message}");
+                }
+            }
+            finally
+            {
+                EndTunnelOperation();
+            }
+        }
+
+        private bool RequestTunnelConnectionTimeout(int generation)
+        {
+            if (_shutdownComplete || generation != CurrentTunnelGeneration() ||
+                _currentState != ConnectionState.Connecting ||
+                IsTunnelConnectionTimedOut(generation))
+                return false;
+
+            return _tunnelSession.TryMarkConnectionTimedOut(generation);
+        }
+
+        private bool IsTunnelConnectionTimedOut(int generation)
+        {
+            return _tunnelSession.IsConnectionTimedOut(generation);
+        }
+
+        private async Task DisconnectTimedOutTunnelAsync(int generation)
+        {
+            if (_shutdownComplete || generation != CurrentTunnelGeneration() ||
+                _currentState != ConnectionState.Connecting || !IsTunnelConnectionTimedOut(generation))
+                return;
+
+            if (!await DisconnectCurrentTunnelAsync(false))
+                return;
+
+            if (!_shutdownComplete)
+                MessageBox.Show(Resources.TunnelConnectTimeout, Resources.TunnelErrorTitle, MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+        }
+
+        private async Task<TunnelConnectionResult> ConnectWithTimeoutAsync(string profile, int generation,
+            bool preservedNetworkLock)
+        {
+            var connectResult = await _tunnelLifecycle.ConnectAsync(profile, preservedNetworkLock,
+                TunnelConnectionTimeoutMilliseconds);
+            if (!connectResult.TimedOut)
+            {
+                return connectResult.Value ?? new TunnelConnectionResult
+                {
+                    Diagnostic = connectResult.Diagnostic
+                };
+            }
+
+            BeginNativeCleanup();
+            var markerLease = Global.NativeRecoveryMarkers.Write("tunnel connect timeout",
+                $"The native connect call for profile '{profile}' did not return within {TunnelConnectionTimeoutMilliseconds} ms.");
+            var cleanupUiGeneration = generation;
+
+            if (!_shutdownComplete && generation == CurrentTunnelGeneration() &&
+                _currentState == ConnectionState.Connecting)
+            {
+                _tunnelSession.TryMarkConnectionTimedOut(generation);
+                UpdateState(ConnectionState.Indeterminate, false, profile);
+                cleanupUiGeneration = CurrentTunnelGeneration();
+                SetActivateButtonEnabled(false);
+                MessageBox.Show(Resources.TunnelConnectTimeout, Resources.TunnelErrorTitle, MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+
+            ScheduleTimedOutConnectCleanup(connectResult.PendingCompletion, cleanupUiGeneration, profile,
+                markerLease);
+
+            return null;
+        }
+
+        private void ScheduleTimedOutConnectCleanup(
+            Task<NativeOperationResult<TunnelConnectionResult>> pendingCompletion, int generation, string profile,
+            NativeRecoveryMarkerLease markerLease)
+        {
+            var cleanupTask = CompleteTimedOutConnectCleanupAsync(pendingCompletion, generation, profile, markerLease);
+            cleanupTask.ContinueWith(faultedTask =>
+                    Trace.TraceWarning(
+                        $"Unhandled timed-out tunnel cleanup error: {faultedTask.Exception?.GetBaseException().Message}"),
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted,
+                TaskScheduler.Default);
+        }
+
+        private async Task CompleteTimedOutConnectCleanupAsync(
+            Task<NativeOperationResult<TunnelConnectionResult>> pendingCompletion, int generation, string profile,
+            NativeRecoveryMarkerLease markerLease)
+        {
+            var cleanupFailed = false;
+            var cleanupDelegated = false;
+            string diagnostic = null;
+
+            try
+            {
+                var connectResult = NativeOperationRecoveryPolicy.NormalizeCompletion(
+                    await pendingCompletion.ConfigureAwait(false), "native tunnel connect");
+                var result = connectResult.Value;
+                diagnostic = connectResult.Diagnostic ?? result?.Diagnostic;
+
+                if (connectResult.Succeeded && result?.Connected == true)
+                {
+                    var disconnectResult = await _tunnelLifecycle.DisconnectAsync(result.ConnectionSequence, false,
+                        TunnelDisconnectTimeoutMilliseconds).ConfigureAwait(false);
+                    if (disconnectResult.TimedOut)
+                    {
+                        markerLease = WriteOrUpdateNativeRecoveryMarker(markerLease, "tunnel disconnect timeout",
+                            $"The native disconnect cleanup for profile '{profile}' did not return within {TunnelDisconnectTimeoutMilliseconds} ms.");
+                        ScheduleTimedOutDisconnectCleanup(disconnectResult.PendingCompletion, profile, false,
+                            markerLease);
+                        cleanupDelegated = true;
+                        return;
+                    }
+
+                    cleanupFailed = !disconnectResult.Succeeded;
+                    diagnostic = disconnectResult.Diagnostic;
+                }
+                else if (_tunnelLifecycle.HasTunnelHandle)
+                {
+                    var disconnectResult = await _tunnelLifecycle.DisconnectAsync(null, false,
+                        TunnelDisconnectTimeoutMilliseconds).ConfigureAwait(false);
+                    if (disconnectResult.TimedOut)
+                    {
+                        markerLease = WriteOrUpdateNativeRecoveryMarker(markerLease, "tunnel disconnect timeout",
+                            $"The native disconnect cleanup for profile '{profile}' did not return within {TunnelDisconnectTimeoutMilliseconds} ms.");
+                        ScheduleTimedOutDisconnectCleanup(disconnectResult.PendingCompletion, profile, false,
+                            markerLease);
+                        cleanupDelegated = true;
+                        return;
+                    }
+
+                    cleanupFailed = !disconnectResult.Succeeded || _tunnelLifecycle.HasTunnelHandle;
+                    diagnostic = disconnectResult.Diagnostic;
+                }
+                else if (result?.RecoveryRequired == true)
+                {
+                    cleanupFailed = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning($"Failed to clean up timed-out tunnel connect: {ex.Message}");
+                diagnostic = NativeOperationRecoveryPolicy.AppendDiagnostic(diagnostic, ex.Message);
+                cleanupFailed = true;
+            }
+            finally
+            {
+                if (!cleanupDelegated)
+                {
+                    try
+                    {
+                        if (cleanupFailed)
+                        {
+                            await HandleNativeCleanupFailureAsync(profile, "timed-out connect cleanup", diagnostic,
+                                    markerLease)
+                                .ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            Global.NativeRecoveryMarkers.TryDelete(markerLease);
+                        }
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            if (!cleanupFailed && !IsNativeRecoveryRequired())
+                            {
+                                await InvokeOnUiThreadAsync(() =>
+                                {
+                                    if (!_shutdownComplete &&
+                                        generation == CurrentTunnelGeneration() &&
+                                        (_currentState == ConnectionState.Connecting ||
+                                         _currentState == ConnectionState.Indeterminate))
+                                        UpdateState(ConnectionState.Disconnected, false, profile);
+
+                                    return Task.CompletedTask;
+                                }, GetUiDispatchToken(), UiDispatchStartTimeoutMilliseconds).ConfigureAwait(false);
+                            }
+                        }
+                        finally
+                        {
+                            await EndNativeCleanupAsync(profile).ConfigureAwait(false);
+                        }
+                    }
+                }
+            }
+        }
+
+        private CancellationToken GetUiDispatchToken()
+        {
+            var dispatchSyncRoot = _uiDispatchSyncRoot;
+            if (dispatchSyncRoot == null)
+                return new CancellationToken(true);
+
+            lock (dispatchSyncRoot)
+                return _uiDispatchCancellation?.Token ?? new CancellationToken(true);
+        }
+
+        private void CancelUiDispatches()
+        {
+            var dispatchSyncRoot = _uiDispatchSyncRoot;
+            if (dispatchSyncRoot == null)
+                return;
+
+            CancellationTokenSource cancellation;
+            lock (dispatchSyncRoot)
+                cancellation = _uiDispatchCancellation;
+
+            try
+            {
+                cancellation?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+
+        private async Task HandleTunnelInactiveAsync(int generation)
+        {
+            if (!await _tunnelSession.WaitToBeginOperationAsync(
+                    () => ShouldStopTunnelFailureHandling(generation)))
+                return;
+
+            try
+            {
+                if (ShouldStopTunnelFailureHandling(generation))
+                    return;
+
+                Trace.TraceWarning("The native tunnel became inactive unexpectedly; releasing its SDK handle.");
+                if (!await DisconnectCurrentTunnelAsync())
+                    return;
+
+                if (!_shutdownComplete)
+                    MessageBox.Show(
+                        Resources.ResourceManager.GetString("TunnelStoppedUnexpectedly") ??
+                        "The tunnel stopped unexpectedly. WireSock UI released its native resources.",
+                        Resources.TunnelErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally
+            {
+                EndTunnelOperation();
+            }
+        }
+
+        /// <summary>
+        ///     Reload profile list and optionally pre-select a profile
+        /// </summary>
+        /// <param name="selectedProfile">Optional profile to automatically select</param>
+        private void LoadProfiles(string selectedProfile = "")
+        {
+            ClearLoadedProfiles();
+            var catalogResult = _profileCatalog.Load();
+            if (!catalogResult.Succeeded)
+            {
+                SetActivateButtonEnabled(false);
+                MessageBox.Show(string.Format(Resources.ProfileEnumerationError, catalogResult.Exception.Message),
+                    Resources.ProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            var profiles = catalogResult.Profiles;
+
+            lstProfiles.Items.AddRange(profiles
+                .Select(p => new ListViewItem(p, ConnectionState.Disconnected.ToString()) { Name = p }).ToArray());
+
+            if (profiles.Any())
+            {
+                var insertIndex = mnuContext.Items.IndexOf(cmiSepTunnels);
+
+                mnuContext.Items.Insert(insertIndex + 1, new ToolStripSeparator { Tag = "tunnel" });
+                var visibleProfiles = profiles.Take(MaxTrayProfileItems).ToArray();
+                var hiddenProfileCount = profiles.Count - visibleProfiles.Length;
+                if (hiddenProfileCount > 0)
+                {
+                    mnuContext.Items.Insert(insertIndex + 1, new ToolStripMenuItem
+                    {
+                        Tag = "tunnel",
+                        Text = $"... {hiddenProfileCount} more profiles (open WireSock UI)",
+                        Enabled = false
+                    });
+                }
+
+                foreach (var profile in visibleProfiles.Reverse())
+                {
+                    var item = new ToolStripMenuItem(profile) { Tag = "tunnel", Text = profile };
+                    item.Click += (s, e) =>
+                    {
+                        if (!TryGetProfileItem(profile, out var profileItem))
+                            return;
+
+                        profileItem.Selected = true;
+                        OnProfileClick(lstProfiles, EventArgs.Empty);
+                    };
+
+                    mnuContext.Items.Insert(insertIndex + 1, item);
+                }
+            }
+
+            if (lstProfiles.Items.Count > 0)
+            {
+                ListViewItem profileToSelect = null;
+                if (!string.IsNullOrWhiteSpace(selectedProfile))
+                    profileToSelect = lstProfiles.Items[selectedProfile];
+
+                (profileToSelect ?? lstProfiles.Items[0]).Selected = true;
+            }
+
+            if (_currentState != ConnectionState.Disconnected)
+                RestoreLoadedProfileTunnelState();
+        }
+
+        private void ClearLoadedProfiles()
+        {
+            lstProfiles.Items.Clear();
+            ClearProfileDetails();
+            mniDeleteTunnel.Enabled = false;
+            btnEdit.Enabled = false;
+
+            for (var i = mnuContext.Items.Count - 1; i >= 0; i--)
+            {
+                var item = mnuContext.Items[i];
+                if (!Equals(item.Tag, "tunnel"))
+                    continue;
+
+                mnuContext.Items.RemoveAt(i);
+                item.Dispose();
+            }
+        }
+
+        private void RestoreLoadedProfileTunnelState()
+        {
+            var activeProfileName = _tunnelLifecycle?.ProfileName;
+            if (TryGetProfileItem(activeProfileName, out var activeProfile))
+                activeProfile.ImageKey = _currentState.ToString();
+
+            foreach (ToolStripItem item in mnuContext.Items)
+                if (item is ToolStripMenuItem menuItem && Equals(menuItem.Tag, "tunnel"))
+                    menuItem.Checked = _currentState == ConnectionState.Connected &&
+                                       IsTunnelProfileSelected(menuItem.Text, activeProfileName);
+
+            UpdateSelectedProfileState(_currentState, activeProfileName);
+        }
+
+        /// <summary>
+        ///     Update the connection state of the WireSock tunnel
+        /// </summary>
+        /// <param name="state">
+        ///     <see cref="T:ConnectionState" />
+        /// </param>
+        /// <param name="notify">
+        ///     <c>true</c> if a toast notification should be triggered, otherwise <c>false</c>
+        /// </param>
+        /// <remarks>This updates both the actual tunnel state and all related UI elements.</remarks>
+        private void UpdateState(ConnectionState state, bool notify = true, string profileName = null)
+        {
+            _currentState = state;
+            var activeProfileName = profileName ?? _tunnelLifecycle?.ProfileName;
+            var presentation = MainWindowStatePresentation.Create(
+                state, IsNativeCleanupInProgress(), IsNativeRecoveryRequired());
+
+            switch (state)
+            {
+                case ConnectionState.Connecting:
+                    cmiDeactivateTunnel.Enabled = presentation.CanDeactivate;
+
+                    if (TryGetProfileItem(activeProfileName, out var connectingProfile))
+                        connectingProfile.ImageKey = ConnectionState.Connecting.ToString();
+
+                    SetTrayIcon(Resources.ico, false);
+                    trayIcon.Text = Resources.TrayActivating;
+                    cmiStatus.Image = _inactiveStatusImage;
+                    cmiStatus.Text = Resources.TrayActivating;
+
+                    cmiResetKillSwitch.Enabled = presentation.CanResetNetworkLock;
+
+                    break;
+                case ConnectionState.Connected:
+                    cmiStatus.Image = _connectedStatusImage;
+                    SetTrayIcon(Resources.ico.SuperImpose(64, WindowsIcons.Icons.Activated, 48, 24), true);
+                    trayIcon.Text = Resources.TrayActive;
+
+                    cmiStatus.Text = Resources.ContextMenuActive;
+
+                    cmiAddresses.Text = _activeTunnelAddresses ?? string.Empty;
+                    cmiAddresses.Visible = true;
+
+                    cmiDeactivateTunnel.Enabled = presentation.CanDeactivate;
+                    cmiResetKillSwitch.Enabled = presentation.CanResetNetworkLock;
+
+                    if (TryGetProfileItem(activeProfileName, out var connectedProfile))
+                        connectedProfile.ImageKey = ConnectionState.Connected.ToString();
+
+                    if (!string.IsNullOrWhiteSpace(activeProfileName))
+                    {
+                        try
+                        {
+                            PersistLastActiveProfile(activeProfileName);
+                        }
+                        catch (Exception ex)
+                        {
+                            Trace.TraceWarning($"Failed to save last active profile setting: {ex.Message}");
+                        }
+                    }
+
+                    StartTunnelStateMonitor();
+
+#if WIRESOCKUI_ENABLE_UWP
+                    if (notify && Settings.Default.EnableNotifications)
+                        TryShowNotification(Resources.ToastActiveTitle,
+                            string.Format(Resources.ToastActiveMessage, activeProfileName));
+#endif
+                    break;
+                case ConnectionState.Disconnected:
+                    CancelTunnelMonitoring();
+
+                    cmiStatus.Image = _inactiveStatusImage;
+                    SetTrayIcon(Resources.ico, false);
+                    trayIcon.Text = Resources.TrayInactive;
+
+                    cmiStatus.Text = Resources.ContextMenuInactive;
+
+                    cmiAddresses.Text = string.Empty;
+                    cmiAddresses.Visible = false;
+                    _activeTunnelAddresses = null;
+
+                    cmiDeactivateTunnel.Enabled = presentation.CanDeactivate;
+                    cmiResetKillSwitch.Enabled = presentation.CanResetNetworkLock;
+
+                    if (TryGetProfileItem(activeProfileName, out var disconnectedProfile))
+                        disconnectedProfile.ImageKey = ConnectionState.Disconnected.ToString();
+
+#if WIRESOCKUI_ENABLE_UWP
+                    if (notify && Settings.Default.EnableNotifications)
+                        TryShowNotification(Resources.ToastInactiveTitle,
+                            string.Format(Resources.ToastInactiveMessage, activeProfileName));
+#endif
+                    break;
+                case ConnectionState.Indeterminate:
+                    CancelTunnelMonitoring();
+
+                    cmiStatus.Image = _inactiveStatusImage;
+                    SetTrayIcon(Resources.ico, false);
+                    trayIcon.Text = Resources.InterfaceStatusRecoveryRequired;
+                    cmiStatus.Text = Resources.InterfaceStatusRecoveryRequired;
+                    cmiAddresses.Text = string.Empty;
+                    cmiAddresses.Visible = false;
+                    cmiDeactivateTunnel.Enabled = presentation.CanDeactivate;
+                    cmiResetKillSwitch.Enabled = presentation.CanResetNetworkLock;
+
+                    if (TryGetProfileItem(activeProfileName, out var indeterminateProfile))
+                        indeterminateProfile.ImageKey = ConnectionState.Indeterminate.ToString();
+
+                    break;
+            }
+
+            foreach (ToolStripItem item in mnuContext.Items)
+                if (item is ToolStripMenuItem menuItem && Equals(menuItem.Tag, "tunnel"))
+                    menuItem.Checked = presentation.IsTunnelMenuChecked(
+                        IsTunnelProfileSelected(menuItem.Text, activeProfileName));
+
+            UpdateSelectedProfileState(state, activeProfileName);
+        }
+
+        private void UpdateSelectedProfileState(ConnectionState state, string activeProfileName)
+        {
+            var selectedProfileName = lstProfiles.SelectedItems.Count == 0
+                ? null
+                : lstProfiles.SelectedItems[0].Text;
+            var selectedProfileIsTunnelProfile = IsTunnelProfileSelected(
+                selectedProfileName, activeProfileName);
+            var presentation = MainWindowStatePresentation.Create(
+                state, IsNativeCleanupInProgress(), IsNativeRecoveryRequired());
+            var selectedPresentation = presentation.ForSelectedProfile(selectedProfileIsTunnelProfile);
+            var btnActivate = layoutInterface.Controls["btnActivate"] as Button;
+            var imgStatus = layoutInterface.Controls.Find("imgStatus", true).FirstOrDefault() as PictureBox;
+            var txtStatus = layoutInterface.Controls.Find("txtStatus", true).FirstOrDefault() as TextBox;
+
+            if (btnActivate != null)
+            {
+                switch (selectedPresentation.Status)
+                {
+                    case MainWindowStatusKind.Activating:
+                        btnActivate.Text = Resources.ButtonActivating;
+                        break;
+                    case MainWindowStatusKind.Active:
+                        btnActivate.Text = Resources.ButtonActive;
+                        break;
+                    default:
+                        btnActivate.Text = Resources.ButtonInactive;
+                        break;
+                }
+
+                SetActivateButtonEnabled(selectedPresentation.CanActivate);
+            }
+
+            if (imgStatus != null)
+            {
+                imgStatus.Image = selectedPresentation.Status == MainWindowStatusKind.Active
+                    ? _connectedStatusImage
+                    : _inactiveStatusImage;
+
+                if (txtStatus != null)
+                    switch (selectedPresentation.Status)
+                    {
+                        case MainWindowStatusKind.Active:
+                            txtStatus.Text = Resources.InterfaceStatusActive;
+                            break;
+                        case MainWindowStatusKind.RecoveryRequired:
+                            txtStatus.Text = Resources.InterfaceStatusRecoveryRequired;
+                            break;
+                        default:
+                            txtStatus.Text = Resources.InterfaceStatusInactive;
+                            break;
+                    }
+            }
+
+            if (selectedPresentation.Status == MainWindowStatusKind.Activating)
+                imgStatus?.Focus();
+
+            gbxState.Visible = selectedPresentation.ShowStatistics;
+        }
+
+        internal static bool IsTunnelProfileSelected(string selectedProfileName, string tunnelProfileName)
+        {
+            return !string.IsNullOrWhiteSpace(selectedProfileName) &&
+                   !string.IsNullOrWhiteSpace(tunnelProfileName) &&
+                   string.Equals(selectedProfileName, tunnelProfileName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void PersistLastActiveProfile(string profileName)
+        {
+            var previousSettings = PrivilegedSettingsStore.Capture();
+            if (string.Equals(previousSettings.LastProfile, profileName, StringComparison.Ordinal))
+                return;
+
+            PrivilegedSettingsStore.Apply(new PrivilegedSettingsSnapshot(
+                previousSettings.AutoConnect,
+                profileName,
+                previousSettings.UseAdapter,
+                previousSettings.EnableKillSwitch));
+            try
+            {
+                PrivilegedSettingsStore.Save();
+            }
+            catch
+            {
+                PrivilegedSettingsStore.Apply(previousSettings);
+                throw;
+            }
+        }
+
+        protected override async void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+
+#if WIRESOCKUI_ENABLE_UWP
+            ScheduleVersionCheck();
+#endif
+
+            BeginNativeCleanup();
+            try
+            {
+                await ShowPendingNativeRecoveryWarningAsync();
+            }
+            finally
+            {
+                await EndNativeCleanupAsync(null);
+            }
+
+            if (_shutdownComplete || IsDisposed || Disposing)
+                return;
+            var recoveryBlocksTunnelOperations = IsNativeRecoveryRequired();
+            var approvedLegacyProfileThisLaunch = ReviewPendingLegacyProfiles();
+
+            if (Settings.Default.AutoMinimize)
+            {
+                WindowState = FormWindowState.Minimized;
+                ConcealFromTaskbar(this);
+            }
+
+            if (lstProfiles.Items.ContainsKey(PrivilegedSettingsStore.LastProfile))
+                lstProfiles.Items[PrivilegedSettingsStore.LastProfile].Selected = true;
+
+            // Connect to the last used configuration, if required.
+            if (!PrivilegedSettingsStore.AutoConnect || recoveryBlocksTunnelOperations || approvedLegacyProfileThisLaunch)
+                return;
+
+            if (lstProfiles.Items.ContainsKey(PrivilegedSettingsStore.LastProfile))
+                await ExecuteSelectedProfileCommandAsync(TunnelCommand.ActivateSelectedProfile, false);
+            else
+                MessageBox.Show(Resources.LastProfileNotFound, Resources.DialogAutoConnect, MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+        }
+
+        private bool ReviewPendingLegacyProfiles()
+        {
+            var approvedAny = false;
+            IReadOnlyList<string> pendingProfiles;
+            try
+            {
+                pendingProfiles = LegacyProfileMigrationService.GetPendingProfileNames();
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning($"Unable to enumerate staged legacy profiles: {ex.Message}");
+                MessageBox.Show(
+                    $"WireSock UI could not inspect staged legacy profiles.{Environment.NewLine}{Environment.NewLine}{ex.Message}",
+                    Resources.ProfileError, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            if (pendingProfiles.Count == 0)
+                return false;
+
+            var reviewCount = Math.Min(pendingProfiles.Count, MaxLegacyProfilesReviewedPerLaunch);
+            var remainingCount = pendingProfiles.Count - reviewCount;
+            var reviewMessage =
+                $"WireSock UI found {pendingProfiles.Count} quarantined legacy profile{(pendingProfiles.Count == 1 ? string.Empty : "s")}. " +
+                $"Reviewing a profile lets you verify its endpoint, DNS, routes, application filters, and scripts before approving it.{Environment.NewLine}{Environment.NewLine}" +
+                $"Review {(reviewCount == pendingProfiles.Count ? "them" : $"the first {reviewCount}")} now?";
+            if (remainingCount > 0)
+                reviewMessage +=
+                    $"{Environment.NewLine}{Environment.NewLine}{remainingCount} additional profile{(remainingCount == 1 ? string.Empty : "s")} will remain quarantined for a later review.";
+
+            if (MessageBox.Show(
+                    reviewMessage,
+                    Resources.EditProfileTitle,
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning) != DialogResult.Yes)
+                return false;
+
+            foreach (var profileName in pendingProfiles.Take(reviewCount))
+            {
+                var profileSaved = false;
+
+                try
+                {
+                    using (var form = new FrmEdit(
+                               profileName,
+                               LegacyProfileMigrationService.GetPendingProfilePath(profileName)))
+                    {
+                        form.Owner = this;
+                        if (form.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(form.ReturnValue))
+                            continue;
+                    }
+
+                    approvedAny = true;
+                    profileSaved = true;
+                    LegacyProfileMigrationService.CompleteApprovedMigration(profileName);
+                }
+                catch (Exception ex)
+                {
+                    var action = profileSaved
+                        ? "remove the reviewed legacy source files after saving"
+                        : "approve";
+                    Trace.TraceWarning($"Unable to {action} legacy profile '{profileName}': {ex.Message}");
+                    MessageBox.Show(
+                        profileSaved
+                            ? $"The profile was saved, but WireSock UI could not remove its quarantined legacy files.{Environment.NewLine}{Environment.NewLine}{ex.Message}"
+                            : ex.Message,
+                        Resources.ProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+
+            if (approvedAny)
+                LoadProfiles();
+
+            return approvedAny;
+        }
+
+        private async void OnDisconnectClick(object sender, EventArgs e)
+        {
+            if (!TryBeginTunnelOperation())
+                return;
+
+            try
+            {
+                if (!await DisconnectCurrentTunnelAsync())
+                    return;
+            }
+            finally
+            {
+                EndTunnelOperation();
+            }
+        }
+
+        private void OnExitClick(object sender, EventArgs e)
+        {
+            _exitRequested = true;
+            Close();
+        }
+
+        private void OnFormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (e.CloseReason == CloseReason.UserClosing && !_exitRequested)
+            {
+                e.Cancel = true;
+                ConcealFromTaskbar(this);
+                return;
+            }
+
+            if (_finalCloseAuthorized)
+                return;
+
+            e.Cancel = true;
+            _exitRequested = true;
+            trayIcon.Visible = false;
+            Enabled = false;
+            // The form is about to be disposed, so hiding it is sufficient to
+            // remove its taskbar button. Avoid changing ShowInTaskbar here: it
+            // would recreate the handle and briefly restart handle-bound work.
+            Hide();
+            CloseOwnedFormsForShutdown();
+            BeginShutdownAndClose();
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            base.OnFormClosed(e);
+        }
+
+        private void BeginShutdownAndClose()
+        {
+            if (_shutdownTask != null)
+                return;
+
+            _shutdownTask = ShutdownAsync();
+            CompleteShutdownAndCloseAsync();
+        }
+
+        private void CloseOwnedFormsForShutdown()
+        {
+            foreach (var ownedForm in OwnedForms)
+            {
+                try
+                {
+                    ownedForm.Close();
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceWarning($"Unable to close an owned window during shutdown: {ex.Message}");
+                }
+            }
+        }
+
+        private async void CompleteShutdownAndCloseAsync()
+        {
+            try
+            {
+                await _shutdownTask;
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning($"Unexpected application shutdown failure: {ex.Message}");
+                Global.NativeRecoveryMarkers.Write("application shutdown failure", ex.Message);
+            }
+
+            if (IsDisposed || Disposing)
+                return;
+
+            _finalCloseAuthorized = true;
+            Close();
+        }
+
+        /// <summary>
+        ///     Handles the form show event.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">An EventArgs that contains the event data.</param>
+        private void OnFormShow(object sender, EventArgs e)
+        {
+            TryShowMainWindow();
+        }
+
+        private void OnFormMinimize(object sender, EventArgs e)
+        {
+            if (WindowState == FormWindowState.Minimized)
+            {
+                ConcealFromTaskbar(this);
+            }
+        }
+
+        private void OnNewProfileClick(object sender, EventArgs e)
+        {
+            if (!TryBeginTunnelOperation())
+                return;
+
+            try
+            {
+                using (Form form = new FrmEdit())
+                {
+                    if (form.ShowDialog() == DialogResult.OK)
+                        LoadProfiles();
+                }
+            }
+            finally
+            {
+                EndTunnelOperation();
+            }
+        }
+
+        private void OnAddProfileClick(object sender, EventArgs e)
+        {
+            if (!TryBeginTunnelOperation())
+                return;
+
+            try
+            {
+                using (var openFileDialog = new OpenFileDialog())
+                {
+                    openFileDialog.Title = Resources.DialogOpenFileTitle;
+                    openFileDialog.InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Recent);
+                    openFileDialog.Filter = Resources.DialogOpenFileFilter;
+                    openFileDialog.RestoreDirectory = true;
+
+                    if (openFileDialog.ShowDialog() != DialogResult.OK)
+                        return;
+
+                    var filePath = openFileDialog.FileName;
+
+                    var profileName = Path.GetFileNameWithoutExtension(filePath);
+
+                    if (!Profile.IsValidProfileName(profileName))
+                    {
+                        MessageBox.Show(Resources.EditProfileNameError, Resources.ProfileError, MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    var destinationPath = Profile.GetProfilePath(profileName);
+                    if (Profile.ProfilePathExists(destinationPath))
+                    {
+                        var message = Profile.IsRegularProfileFile(destinationPath, out var diagnostic)
+                            ? string.Format(Resources.AddProfileExistsMsg, profileName)
+                            : diagnostic;
+
+                        MessageBox.Show(message,
+                            Resources.AddProfileExistsTitle,
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    try
+                    {
+                        if (ImportProfileFromFile(filePath, destinationPath))
+                            LoadProfiles(profileName);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(ex.Message, Resources.ProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+            finally
+            {
+                EndTunnelOperation();
+            }
+        }
+
+        private bool ImportProfileFromFile(string filePath, string destinationPath)
+        {
+            var tmpProfile = ProfileImportService.CopyToTemporaryProfileFile(filePath);
+
+            try
+            {
+                var profile = new Profile(tmpProfile);
+                if (!ProfileScriptWarning.ConfirmIfProfileHasScriptHooks(this, profile))
+                    return false;
+
+                ProfileFileTransaction.Commit(tmpProfile, destinationPath);
+                tmpProfile = null;
+                return true;
+            }
+            finally
+            {
+                if (tmpProfile != null)
+                    ProfileImportService.TryDeleteTemporaryProfile(tmpProfile);
+            }
+        }
+
+        private async void OnEditProfileClick(object sender, EventArgs e)
+        {
+            if (!TryBeginTunnelOperation())
+                return;
+
+            var reconnect = false;
+
+            try
+            {
+                if (lstProfiles.SelectedItems.Count == 0)
+                    return;
+
+                var profile = lstProfiles.SelectedItems[0].Text;
+
+                using (var form = new FrmEdit(profile))
+                {
+                    if (form.ShowDialog() != DialogResult.OK) return;
+
+                    LoadProfiles(form.ReturnValue);
+
+                    reconnect = IsCurrentTunnelProfile(profile);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, Resources.ProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                EndTunnelOperation();
+            }
+
+            if (reconnect)
+                await ExecuteSelectedProfileCommandAsync(TunnelCommand.ActivateSelectedProfile, false);
+        }
+
+        private async void OnDeleteProfileClick(object sender, EventArgs e)
+        {
+            if (!TryBeginTunnelOperation())
+                return;
+
+            try
+            {
+                if (lstProfiles.SelectedItems.Count == 0)
+                    return;
+
+                var selectedConf = lstProfiles.SelectedItems[0].Text;
+
+                if (MessageBox.Show(string.Format(Resources.DeleteProfileConfirmMsg, selectedConf),
+                        Resources.DeleteProfileConfirmTitle,
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Exclamation) != DialogResult.Yes)
+                    return;
+
+                if (IsCurrentTunnelProfile(selectedConf))
+                {
+                    if (!await DisconnectCurrentTunnelAsync())
+                        return;
+                }
+
+                var profilePath = Profile.GetProfilePath(selectedConf);
+                using (var profileFile =
+                       SecureFileSystem.OpenFileForBoundedReadAndDelete(profilePath, Profile.MaxProfileSizeBytes))
+                    profileFile.Delete();
+                LoadProfiles();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, Resources.ProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                EndTunnelOperation();
+            }
+        }
+
+        private async void OnSettingsClick(object sender, EventArgs e)
+        {
+            if (!TryBeginTunnelOperation())
+                return;
+
+            var settingsOperationCompletion = new TaskCompletionSource<object>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _activeSettingsOperation = settingsOperationCompletion.Task;
+            FrmSettings form = null;
+            try
+            {
+                form = new FrmSettings();
+                _activeSettingsForm = form;
+                using (form)
+                {
+                    var previousSettings = ApplicationSettingsSnapshot.Capture();
+
+                    // set the owner of the child form to the main form instance
+                    form.Owner = this;
+
+                    if (form.ShowDialog() == DialogResult.OK)
+                    {
+                        var requestedSettings = form.RequestedSettings;
+                        var stateBeforeSettingsUpdate = _currentState;
+                        var profileBeforeSettingsUpdate = _tunnelLifecycle.ProfileName;
+                        var monitoringPaused = _currentState == ConnectionState.Connected ||
+                                               _currentState == ConnectionState.Connecting;
+                        if (monitoringPaused)
+                            CancelTunnelMonitoring();
+
+                        try
+                        {
+                            var result = await _settingsUpdateCoordinator.ApplyAsync(
+                                previousSettings,
+                                requestedSettings,
+                                _tunnelLifecycle.HasTunnelHandle,
+                                form.ApplyAutoRunChangeAsync,
+                                form.RollbackAutoRunChangeAsync,
+                                form.CommitAutoRunChangeAsync);
+
+                            if (!result.Succeeded)
+                            {
+                                RestoreRuntimeStateAfterSettingsCompensation(
+                                    result, stateBeforeSettingsUpdate, profileBeforeSettingsUpdate);
+                                ShowSettingsTransactionFailure(result);
+                                return;
+                            }
+                        }
+                        finally
+                        {
+                            if (monitoringPaused)
+                                ResumeTunnelMonitoring();
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning($"Unable to apply WireSock UI settings: {ex.Message}");
+                if (!_shutdownComplete && !IsDisposed && !Disposing)
+                    MessageBox.Show(ex.Message, Resources.TunnelErrorTitle, MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+            }
+            finally
+            {
+                if (ReferenceEquals(_activeSettingsForm, form))
+                    _activeSettingsForm = null;
+                EndTunnelOperation();
+                _activeSettingsOperation = Task.CompletedTask;
+                settingsOperationCompletion.TrySetResult(null);
+            }
+        }
+
+        private async Task<bool> ApplyLogLevelSettingAsync(string logLevel)
+        {
+            var stateBeforeUpdate = _currentState;
+            var profile = _tunnelLifecycle.ProfileName;
+            var configuredLevel = WireSockManager.ParseLogLevelSetting(logLevel);
+            var updateResult = await _tunnelLifecycle.SetLogLevelAsync(
+                configuredLevel, NativeQueryTimeoutMilliseconds);
+            updateResult = await AwaitTimedOutNativeOperationAsync(updateResult,
+                "native log-level update", profile, stateBeforeUpdate);
+            if (!updateResult.Succeeded)
+                throw new InvalidOperationException(updateResult.Diagnostic ??
+                                                    "Unable to update the native log level.");
+
+            Volatile.Write(ref _configuredLogLevel, (int)configuredLevel);
+            return true;
+        }
+
+        private void RestoreRuntimeStateAfterSettingsCompensation(
+            CompensatingTransactionResult result,
+            ConnectionState previousState,
+            string profile)
+        {
+            if (!IsNativeRecoveryRequired() || SettingsUpdateCoordinator.FailureRequiresNativeRecovery(result))
+                return;
+
+            CompleteVerifiedNativeRecovery(
+                profile, previousState, Global.NativeRecoveryMarkers.Capture());
+        }
+
+        private async Task<bool> ApplyKillSwitchSettingAsync(bool enableKillSwitch, bool shouldApplyNativeState)
+        {
+            if (!shouldApplyNativeState)
+                return true;
+
+            var stateBeforeUpdate = _currentState;
+            var profile = _tunnelLifecycle.ProfileName;
+            var result = await _tunnelLifecycle.ApplyKillSwitchAsync(enableKillSwitch,
+                NativeQueryTimeoutMilliseconds);
+            result = await AwaitTimedOutNativeOperationAsync(result, "native Kill Switch update", profile,
+                stateBeforeUpdate);
+            if (!result.Succeeded)
+                throw new InvalidOperationException(
+                    $"{Resources.TunnelKillSwitchStateError} {result.Diagnostic}".Trim());
+
+            return true;
+        }
+
+        private void ShowSettingsTransactionFailure(CompensatingTransactionResult result)
+        {
+            var diagnostic = result.Exception?.Message ??
+                             $"The {result.FailedStep} step did not complete.";
+            var message = string.Format(Resources.SettingsApplyError, result.FailedStep, diagnostic);
+            if (result.RollbackFailures.Count > 0)
+                message += Environment.NewLine + Environment.NewLine +
+                           string.Format(Resources.SettingsRollbackError,
+                               string.Join(", ", result.RollbackFailures));
+
+            Trace.TraceError(message);
+            if (SettingsUpdateCoordinator.FailureRequiresNativeRecovery(result))
+            {
+                Global.NativeRecoveryMarkers.Write("settings rollback failure", message);
+                _tunnelSession.RequireRecovery();
+                SetNativeRecoveryUi(_tunnelLifecycle.ProfileName);
+            }
+
+            if (!_shutdownComplete && !IsDisposed && !Disposing)
+                MessageBox.Show(message, Resources.TunnelErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        private async Task<NativeOperationResult<T>> AwaitTimedOutNativeOperationAsync<T>(
+            NativeOperationResult<T> result, string context, string profile, ConnectionState previousState)
+        {
+            if (!result.TimedOut)
+                return result;
+
+            BeginNativeCleanup();
+            var markerLease = Global.NativeRecoveryMarkers.Write(context, result.Diagnostic);
+            SetNativeRecoveryUi(profile);
+            if (!_shutdownComplete && !IsDisposed && !Disposing)
+                MessageBox.Show(result.Diagnostic, Resources.TunnelErrorTitle, MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+
+            NativeOperationResult<T> completedResult;
+            try
+            {
+                completedResult = await result.PendingCompletion;
+            }
+            catch (Exception ex)
+            {
+                completedResult = NativeOperationResult<T>.Failure(ex.Message);
+            }
+
+            completedResult = NativeOperationRecoveryPolicy.NormalizeCompletion(completedResult, context);
+
+            try
+            {
+                if (NativeOperationRecoveryPolicy.CanRestorePreviousState(completedResult))
+                {
+                    Global.NativeRecoveryMarkers.TryDelete(markerLease);
+                    if (!_shutdownComplete && !IsDisposed && !Disposing)
+                        UpdateState(previousState, false, profile);
+                }
+                else
+                {
+                    var diagnostic = completedResult.Diagnostic ??
+                                     "The timed-out native operation completed without a verified result.";
+                    WriteOrUpdateNativeRecoveryMarker(markerLease, context, diagnostic);
+                    _tunnelSession.RequireRecovery();
+                    SetNativeRecoveryUi(profile);
+                }
+            }
+            finally
+            {
+                await EndNativeCleanupAsync(profile);
+            }
+
+            return completedResult;
+        }
+
+        private async void OnResetKillSwitchClick(object sender, EventArgs e)
+        {
+            if ((_currentState != ConnectionState.Disconnected &&
+                 _currentState != ConnectionState.Indeterminate) || IsNativeCleanupInProgress())
+                return;
+
+            if (!_tunnelSession.TryBeginRecoveryOperation(out var blockReason))
+            {
+                var message = blockReason == TunnelOperationBlockReason.CleanupPending
+                    ? Resources.TunnelConnectCleanupPending
+                    : Resources.TunnelOperationPending;
+                ShowTunnelOperationBlockedMessage(message);
+                return;
+            }
+
+            cmiResetKillSwitch.Enabled = false;
+            var profile = _tunnelLifecycle.ProfileName;
+            var markerSnapshot = Global.NativeRecoveryMarkers.Capture();
+
+            try
+            {
+                var stateBeforeRecovery = _currentState;
+                var handleReleased = !_tunnelLifecycle.HasTunnelHandle ||
+                                     await DisconnectNativeTunnelAsync(showWarning: false);
+                if (!handleReleased && IsNativeCleanupInProgress())
+                    return;
+
+                var resetResult = await _tunnelLifecycle.ResetNetworkLockAsync(NativeQueryTimeoutMilliseconds);
+                resetResult = await AwaitTimedOutNativeOperationAsync(resetResult, "manual Kill Switch recovery",
+                    profile, stateBeforeRecovery);
+                var networkLockReset = resetResult.Succeeded;
+
+                if (!networkLockReset || !handleReleased)
+                {
+                    var failureDiagnostic = !networkLockReset
+                        ? resetResult.Diagnostic
+                        : _tunnelLifecycle.LastError ?? Resources.TunnelHandleReleaseWarning;
+                    Global.NativeRecoveryMarkers.Write("manual Kill Switch recovery", failureDiagnostic);
+                    _tunnelSession.RequireRecovery();
+                    SetNativeRecoveryUi(profile);
+
+                    var message = !networkLockReset
+                        ? $"{Resources.KillSwitchResetError}{Environment.NewLine}{Environment.NewLine}{resetResult.Diagnostic}"
+                        : Resources.TunnelHandleReleaseWarning;
+                    MessageBox.Show(message, Resources.TunnelErrorTitle, MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    return;
+                }
+
+                CompleteVerifiedNativeRecovery(
+                    profile, ConnectionState.Disconnected, markerSnapshot);
+
+                MessageBox.Show(Resources.KillSwitchResetSuccess, Resources.KillSwitchResetTitle,
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning($"Manual Kill Switch recovery failed unexpectedly: {ex.Message}");
+                Global.NativeRecoveryMarkers.Write("manual Kill Switch recovery", ex.Message);
+                _tunnelSession.RequireRecovery();
+                SetNativeRecoveryUi(profile);
+                MessageBox.Show(
+                    $"{Resources.KillSwitchResetError}{Environment.NewLine}{Environment.NewLine}{ex.Message}",
+                    Resources.TunnelErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                _tunnelSession.EndOperation();
+                if (!_shutdownComplete && !IsDisposed && !Disposing)
+                    cmiResetKillSwitch.Enabled = !IsNativeCleanupInProgress() &&
+                                                 (_currentState == ConnectionState.Disconnected ||
+                                                  _currentState == ConnectionState.Indeterminate);
+            }
+        }
+
+        private async Task ReleaseUntransferredNetworkLockAsync(string profile)
+        {
+            var resetResult = await _tunnelLifecycle.ResetNetworkLockAsync(NativeQueryTimeoutMilliseconds);
+            resetResult = await AwaitTimedOutNativeOperationAsync(resetResult,
+                "preserved network-lock rollback", profile, ConnectionState.Disconnected);
+            if (resetResult.Succeeded)
+                return;
+
+            var markerSnapshot = Global.NativeRecoveryMarkers.Capture();
+            var recovered = await TryResetNetworkLockAfterNativeCleanupFailureAsync(
+                "preserved network-lock rollback", markerSnapshot, true);
+            if (recovered)
+            {
+                CompleteVerifiedNativeRecovery(
+                    profile, ConnectionState.Disconnected, markerSnapshot);
+                return;
+            }
+
+            MarkNativeRecoveryRequired(profile,
+                resetResult.Diagnostic ?? "preserved network-lock rollback failure");
+        }
+
+        private void CompleteVerifiedNativeRecovery(
+            string profile,
+            ConnectionState restoredState,
+            NativeRecoveryMarkerSnapshot markerSnapshot)
+        {
+            if (markerSnapshot != null && !Global.NativeRecoveryMarkers.TryDelete(markerSnapshot))
+                Trace.TraceWarning(
+                    "Native state was verified, but the previous recovery marker could not be removed. It will be checked again at next startup.");
+
+            _tunnelSession.ClearRecovery();
+            if (!_shutdownComplete && !IsDisposed && !Disposing)
+                UpdateState(restoredState, false, profile);
+        }
+
+        private async void OnProfileClick(object sender, EventArgs e)
+        {
+            await ExecuteSelectedProfileCommandAsync(TunnelCommand.ActivateSelectedProfile, true);
+        }
+
+        private async void OnActivateButtonClick(object sender, EventArgs e)
+        {
+            await ExecuteSelectedProfileCommandAsync(TunnelCommand.ToggleSelectedProfile, true);
+        }
+
+        private async Task ExecuteSelectedProfileCommandAsync(TunnelCommand command, bool userInitiated)
+        {
+            if (!TryBeginTunnelOperation())
+                return;
+
+            var preservedNetworkLockPending = false;
+            string operationProfile = null;
+            try
+            {
+                // Return if no profile is selected in the list.
+                if (lstProfiles.SelectedItems.Count == 0) return;
+
+                // Get the selected profile.
+                var profile = lstProfiles.SelectedItems[0].Text;
+                operationProfile = profile;
+                var disconnectOnly = TunnelCommandPolicy.IsDisconnectOnly(_currentState, command);
+
+                Profile profileSettings = null;
+                var useAdapter = PrivilegedSettingsStore.UseAdapter;
+
+                if (!disconnectOnly)
+                {
+                    try
+                    {
+                        profileSettings = Profile.LoadProfile(profile);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(ex.Message, Resources.ProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    if (!ProfileScriptWarning.ConfirmIfProfileHasScriptHooks(this, profileSettings))
+                        return;
+
+                    if (bool.TryParse(profileSettings.VirtualAdapterMode, out var profileUseAdapter))
+                        useAdapter = profileUseAdapter;
+                }
+
+                var preserveNetworkLockForReconnect = PrivilegedSettingsStore.EnableKillSwitch && !disconnectOnly;
+
+                if (_currentState == ConnectionState.Connected || _currentState == ConnectionState.Connecting)
+                {
+                    if (!await DisconnectCurrentTunnelAsync(
+                            userInitiated,
+                            preserveNetworkLockForReconnect))
+                        return;
+
+                    preservedNetworkLockPending = preserveNetworkLockForReconnect;
+
+                    if (disconnectOnly)
+                        return;
+                }
+                else if (_tunnelLifecycle.HasTunnelHandle)
+                {
+                    if (!await DisconnectCurrentTunnelAsync(false, preserveNetworkLockForReconnect))
+                        return;
+
+                    preservedNetworkLockPending = preserveNetworkLockForReconnect;
+                }
+
+                try
+                {
+                    if (_tunnelLifecycle.HasTunnelHandle)
+                    {
+                        if (!await DisconnectNativeTunnelAsync(
+                                preserveNetworkLock: preserveNetworkLockForReconnect))
+                            return;
+
+                        preservedNetworkLockPending = preserveNetworkLockForReconnect;
+                    }
+
+                    _tunnelLifecycle.TunnelMode = useAdapter
+                        ? WireSockManager.Mode.VirtualAdapter
+                        : WireSockManager.Mode.Transparent;
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message, Resources.TunnelErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // Connect to the selected profile and update the state to connecting if successful.
+                SetActivateButtonEnabled(false);
+                try
+                {
+                    var connectGeneration = CurrentTunnelGeneration();
+                    _activeTunnelAddresses = ProfileDisplayFormatter.FormatText(profileSettings.Address);
+                    UpdateState(ConnectionState.Connecting, true, profile);
+                    var connectTask = ConnectWithTimeoutAsync(profile, connectGeneration,
+                        preservedNetworkLockPending);
+                    preservedNetworkLockPending = false;
+                    var connectResult = await connectTask;
+                    if (connectResult == null)
+                        return;
+
+                    var connected = connectResult.Connected;
+                    var connectionSequence = connectResult.ConnectionSequence;
+
+                    if (!_shutdownComplete && connectGeneration == CurrentTunnelGeneration() &&
+                        IsTunnelConnectionTimedOut(connectGeneration))
+                    {
+                        var cleanupSucceeded = !connected && !_tunnelLifecycle.HasTunnelHandle ||
+                                               await DisconnectNativeTunnelAsync(
+                                                   connected ? connectionSequence : (long?)null, false);
+
+                        if (!cleanupSucceeded)
+                        {
+                            if (!IsNativeCleanupInProgress())
+                                await HandleNativeCleanupFailureAsync(profile, "late connection-timeout cleanup",
+                                    _tunnelLifecycle.LastError);
+                            return;
+                        }
+
+                        UpdateState(ConnectionState.Disconnected, false, profile);
+                        MessageBox.Show(Resources.TunnelConnectTimeout, Resources.TunnelErrorTitle,
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    if (connectGeneration != CurrentTunnelGeneration() || _shutdownComplete)
+                    {
+                        if ((connected || _tunnelLifecycle.HasTunnelHandle) &&
+                            !await DisconnectNativeTunnelAsync(connected ? connectionSequence : (long?)null, false))
+                        {
+                            if (!IsNativeCleanupInProgress())
+                                await HandleNativeCleanupFailureAsync(profile, "stale connection cleanup",
+                                    _tunnelLifecycle.LastError);
+                        }
+
+                        return;
+                    }
+
+                    if (connected)
+                    {
+                        var queryResult = await _tunnelLifecycle.GetConnectedAsync(NativeQueryTimeoutMilliseconds);
+                        if (queryResult.Succeeded)
+                        {
+                            var verifiedState = queryResult.Value
+                                ? ConnectionState.Connected
+                                : ConnectionState.Connecting;
+                            UpdateState(verifiedState, true, profile);
+                            if (verifiedState == ConnectionState.Connecting)
+                                StartTunnelConnectionMonitor(connectTask);
+                        }
+                        else
+                        {
+                            var queryDiagnostic = queryResult.Diagnostic ??
+                                                  "Unable to query the native tunnel state.";
+                            Trace.TraceWarning($"Native tunnel state query failed after connect: {queryDiagnostic}");
+                            if (NativeOperationRecoveryPolicy.MustDeferCleanup(queryResult))
+                            {
+                                TrackTimedOutNativeOperation(queryResult, "post-connect tunnel-state query");
+                                MarkNativeRecoveryRequired(profile,
+                                    $"post-connect tunnel-state query: {queryDiagnostic}");
+                                MessageBox.Show(
+                                    $"WireSock UI could not verify the native tunnel state.{Environment.NewLine}{Environment.NewLine}{queryDiagnostic}",
+                                    Resources.TunnelErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            }
+                            else if (!await DisconnectNativeTunnelAsync(connectionSequence, false))
+                            {
+                                if (!IsNativeCleanupInProgress())
+                                    await HandleNativeCleanupFailureAsync(profile,
+                                        "post-connect verification cleanup",
+                                        _tunnelLifecycle.LastError ?? queryDiagnostic);
+                            }
+                            else
+                            {
+                                UpdateState(ConnectionState.Disconnected, false, profile);
+                                MessageBox.Show(
+                                    $"WireSock UI could not verify the native tunnel state.{Environment.NewLine}{Environment.NewLine}{queryDiagnostic}",
+                                    Resources.TunnelErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        UpdateState(ConnectionState.Disconnected, false, profile);
+                        if (connectResult.RecoveryRequired)
+                            MarkNativeRecoveryRequired(profile,
+                                connectResult.Diagnostic ?? "preserved network-lock rollback failure");
+                        else if (_tunnelLifecycle.HasTunnelHandle)
+                            await HandleNativeCleanupFailureAsync(profile, "failed connection cleanup",
+                                _tunnelLifecycle.LastError);
+                        else
+                            MessageBox.Show(connectResult.Diagnostic ?? _tunnelLifecycle.LastError ??
+                                            Resources.TunnelErrorManager,
+                                Resources.TunnelErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (_tunnelLifecycle.HasTunnelHandle)
+                        await HandleNativeCleanupFailureAsync(profile, "unexpected connection workflow failure",
+                            ex.Message);
+                    else
+                    {
+                        UpdateState(ConnectionState.Disconnected, false, profile);
+                        MessageBox.Show(ex.Message, Resources.TunnelErrorTitle, MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                    }
+                }
+                finally
+                {
+                    if (_currentState == ConnectionState.Disconnected)
+                        SetActivateButtonEnabled(true);
+                }
+            }
+            finally
+            {
+                try
+                {
+                    if (preservedNetworkLockPending)
+                        await ReleaseUntransferredNetworkLockAsync(operationProfile);
+                }
+                finally
+                {
+                    EndTunnelOperation();
+                }
+            }
+        }
+
+        private void OnWireSockLogMessage(WireSockManager.LogMessage logMessage)
+        {
+            var configuredLevel = (WgbLogLevel)Volatile.Read(ref _configuredLogLevel);
+            if (!UiLogMessagePresentation.ShouldDisplay(logMessage.Message, configuredLevel))
+                return;
+
+            var displayMessage = UiLogMessagePresentation.FormatForDisplay(logMessage.Message);
+            if (!string.Equals(displayMessage, logMessage.Message, StringComparison.Ordinal))
+            {
+                var timestamp = logMessage.Timestamp;
+                logMessage = new WireSockManager.LogMessage
+                {
+                    Message = displayMessage,
+                    Timestamp = timestamp
+                };
+            }
+
+            _uiLogBuffer.Enqueue(logMessage);
+        }
+
+        private bool TryScheduleLogDrain(Action drain)
+        {
+            if (_shutdownComplete || IsDisposed || Disposing || !IsHandleCreated)
+                return false;
+
+            try
+            {
+                BeginInvoke(drain);
+                return true;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        private void AppendWireSockLogMessages(IReadOnlyList<WireSockManager.LogMessage> logMessages)
+        {
+            if (_shutdownComplete || IsDisposed || Disposing || logMessages == null || logMessages.Count == 0)
+                return;
+
+            var updating = false;
+            var latestLogIndex = -1;
+            try
+            {
+                lstLog.BeginUpdate();
+                updating = true;
+                _visibleLogMessages.AddRange(logMessages);
+                var currentCount = _visibleLogMessages.Count;
+                btnClearLog.Enabled = currentCount > 0;
+                latestLogIndex = currentCount - 1;
+            }
+            catch (ObjectDisposedException)
+            {
+                // Late native log callbacks can arrive while the form is shutting down.
+            }
+            catch (InvalidOperationException)
+            {
+                // The logging ListView can be in handle destruction during shutdown.
+            }
+            finally
+            {
+                if (updating && !_shutdownComplete && !IsDisposed && !Disposing)
+                    try
+                    {
+                        lstLog.EndUpdate();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                    catch (InvalidOperationException)
+                    {
+                    }
+            }
+
+            if (latestLogIndex >= 0)
+            {
+                TrySynchronizeVirtualLogList(_visibleLogMessages.Count, lstLog.Visible);
+                ScrollLogToLatest(latestLogIndex);
+            }
+        }
+
+        private void OnClearLogClick(object sender, EventArgs e)
+        {
+            _uiLogBuffer.Clear();
+            _visibleLogMessages.Clear();
+            TrySynchronizeVirtualLogList(0, lstLog.Visible);
+            btnClearLog.Enabled = false;
+        }
+
+        private void OnMainTabChanged(object sender, EventArgs e)
+        {
+            // Tab pages share the same client rectangle. Repaint the selected
+            // page and its children so pixels from the other page's action row
+            // cannot remain visible after a tab switch.
+            tabControl.Refresh();
+
+            if (tabControl.SelectedTab == tabPageLog)
+                ScheduleVisibleLogRefresh();
+        }
+
+        private void ScheduleVisibleLogRefresh()
+        {
+            if (_shutdownComplete || IsDisposed || Disposing || !IsHandleCreated)
+                return;
+
+            try
+            {
+                // SelectedIndexChanged can run before the new tab page and its
+                // native children are visible. Repaint on the next UI turn so a
+                // zero-to-nonzero virtual-list transition cannot remain blank.
+                BeginInvoke((Action)(() =>
+                {
+                    if (_shutdownComplete || IsDisposed || Disposing || tabControl.SelectedTab != tabPageLog)
+                        return;
+
+                    var currentCount = _visibleLogMessages.Count;
+                    TrySynchronizeVirtualLogList(currentCount, true);
+                    btnClearLog.Enabled = currentCount > 0;
+                    if (currentCount > 0)
+                        ScrollLogToLatest(currentCount - 1);
+                }));
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+
+        private void TrySynchronizeVirtualLogList(int itemCount, bool repaintImmediately)
+        {
+            try
+            {
+                SynchronizeVirtualLogList(lstLog, itemCount, repaintImmediately);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Late native log callbacks can arrive while the form is shutting down.
+            }
+            catch (InvalidOperationException)
+            {
+                // The logging ListView can be in handle destruction during shutdown.
+            }
+        }
+
+        internal static void SynchronizeVirtualLogList(ListView logList, int itemCount,
+            bool repaintImmediately)
+        {
+            if (logList == null)
+                throw new ArgumentNullException(nameof(logList));
+            if (itemCount < 0)
+                throw new ArgumentOutOfRangeException(nameof(itemCount));
+
+            if (logList.VirtualListSize != itemCount)
+                logList.VirtualListSize = itemCount;
+
+            // VirtualListSize updates the native item count, but it does not
+            // reliably repaint a virtual ListView that has just transitioned
+            // from empty while its tab was changing visibility.
+            logList.Invalidate();
+            if (repaintImmediately && logList.IsHandleCreated && logList.Visible)
+                logList.Update();
+        }
+
+        private void ScrollLogToLatest(int latestLogIndex)
+        {
+            if (_shutdownComplete || IsDisposed || Disposing || latestLogIndex < 0)
+                return;
+
+            try
+            {
+                // EnsureVisible must run after EndUpdate. It also needs to run
+                // when the bounded ring buffer is already full and its count no
+                // longer changes as older rows are overwritten.
+                lstLog.EnsureVisible(latestLogIndex);
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+
+        private void OnRetrieveVirtualLogItem(object sender, RetrieveVirtualItemEventArgs e)
+        {
+            if (e.ItemIndex < 0 || e.ItemIndex >= _visibleLogMessages.Count)
+            {
+                e.Item = new ListViewItem();
+                return;
+            }
+
+            var logMessage = _visibleLogMessages[e.ItemIndex];
+            e.Item = new ListViewItem(new[]
+            {
+                logMessage.Timestamp.ToString(Resources.LogTimestampFormat), logMessage.Message
+            });
+        }
+
+        #region Layout
+
+        private void ClearProfileDetails()
+        {
+            gbxInterface.Visible = false;
+            gbxInterface.Text = string.Empty;
+            ClearDynamicLayout(layoutInterface);
+            layoutInterface.RowStyles.Clear();
+
+            gbxPeer.Visible = false;
+            ClearDynamicLayout(layoutPeer);
+            layoutPeer.RowStyles.Clear();
+
+            gbxState.Visible = false;
+            ClearDynamicLayout(layoutState);
+            layoutState.RowStyles.Clear();
+
+            SetProfileDetailsAvailable(false);
+        }
+
+        private void SetProfileDetailsAvailable(bool available)
+        {
+            _profileSelectionPrompt.Visible = !available;
+            pnlProfileActions.Visible = available;
+        }
+
+        private void OnProfileChange(object sender, ListViewItemSelectionChangedEventArgs e)
+        {
+            ClearProfileDetails();
+
+            if (e.IsSelected)
+            {
+                var selectedConf = lstProfiles.SelectedItems[0].Text;
+
+                try
+                {
+                    var profile = Profile.LoadProfile(selectedConf);
+
+                    // Interface Panel
+                    gbxInterface.Text = string.Format(Resources.InterfaceTitle, selectedConf);
+
+                    AddRow(layoutInterface, "Status", Resources.InterfaceStatus, Resources.InterfaceStatusInactive,
+                        false, _inactiveStatusImage);
+                    AddRow(layoutInterface, "PrivateKey", Resources.InterfacePublicKey, profile.PublicKey);
+                    AddRow(layoutInterface, "MTU", Resources.InterfaceMTU, profile.Mtu, true);
+                    AddRow(layoutInterface, "ListenPort", Resources.InterfaceListenPort, profile.ListenPort, true);
+                    AddRow(layoutInterface, "Addresses", Resources.InterfaceAddresses,
+                        ProfileDisplayFormatter.FormatText(profile.Address));
+
+                    layoutInterface.RowStyles.Add(new RowStyle(SizeType.Absolute, 10));
+                    layoutInterface.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                    layoutInterface.RowCount = layoutInterface.RowStyles.Count;
+
+                    var btnActivate = new Button
+                    {
+                        AutoSize = true,
+                        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                        Anchor = AnchorStyles.Left,
+                        Margin = new Padding(0, 2, 0, 2),
+                        Name = "btnActivate",
+                        Padding = new Padding(10, 3, 10, 3),
+                        Text = Resources.ButtonInactive
+                    };
+
+                    btnActivate.Click += OnActivateButtonClick;
+
+                    layoutInterface.Controls.Add(btnActivate, 1, layoutInterface.RowCount - 1);
+                    SetActivateButtonEnabled(true);
+
+                    gbxInterface.Visible = true;
+
+                    OnLayoutPanelResize(layoutInterface, EventArgs.Empty);
+
+                    // Peer Panel
+                    AddRow(layoutPeer, "PublicKey", Resources.PeerPublicKey, profile.PeerKey);
+                    AddRow(layoutPeer, "PresharedKey", Resources.PeerPresharedKey,
+                        !string.IsNullOrWhiteSpace(profile.PresharedKey)
+                            ? Resources.PeerPresharedKeyValue
+                            : string.Empty, true);
+                    AddRow(layoutPeer, "AllowedIPs", Resources.PeerAllowedIPs,
+                        ProfileDisplayFormatter.FormatIpAddresses(profile.AllowedIPs));
+                    AddRow(layoutPeer, "Endpoint", Resources.PeerEndpoint,
+                        ProfileDisplayFormatter.FormatText(profile.Endpoint));
+                    AddRow(layoutPeer, "PersistentKeepAlive", Resources.PeerPersistentKeepAlive,
+                        profile.PersistentKeepAlive, true);
+
+                    layoutPeer.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
+
+                    AddRow(layoutPeer, "AllowedApps", Resources.PeerAllowedApps,
+                        ProfileDisplayFormatter.FormatApplications(profile.AllowedApps), true);
+                    AddRow(layoutPeer, "DisallowedApps", Resources.PeerDisallowedApps,
+                        ProfileDisplayFormatter.FormatApplications(profile.DisallowedApps), true);
+                    AddRow(layoutPeer, "DisallowedIPs", Resources.PeerDisallowedIPs,
+                        ProfileDisplayFormatter.FormatIpAddresses(profile.DisallowedIPs), true);
+                    AddRow(layoutPeer, "Socks5Proxy", Resources.PeerSocks5Proxy,
+                        ProfileDisplayFormatter.FormatText(profile.Socks5Proxy), true);
+                    AddRow(layoutPeer, "Socks5Username", Resources.PeerSocks5Username,
+                        ProfileDisplayFormatter.FormatText(profile.Socks5ProxyUsername), true);
+                    AddRow(layoutPeer, "Socks5Password", Resources.PeerSocks5Password,
+                        !string.IsNullOrWhiteSpace(profile.Socks5ProxyPassword)
+                            ? Resources.PeerSocks5PasswordValue
+                            : string.Empty, true);
+
+                    if (!string.IsNullOrWhiteSpace(profile.AllowedApps) ||
+                        !string.IsNullOrWhiteSpace(profile.DisallowedApps) ||
+                        !string.IsNullOrWhiteSpace(profile.DisallowedIPs) ||
+                        !string.IsNullOrWhiteSpace(profile.Socks5Proxy))
+                        layoutPeer.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
+
+                    layoutPeer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                    gbxPeer.Visible = true;
+
+                    OnLayoutPanelResize(layoutPeer, EventArgs.Empty);
+
+                    // Layout state                    
+                    AddRow(layoutState, "Handshake", Resources.StateHandshake, "");
+                    AddRow(layoutState, "Transfer", Resources.StateTransfer, "");
+                    AddRow(layoutState, "RTT", Resources.StateRTT, "");
+                    AddRow(layoutState, "Loss", Resources.StateLoss, "");
+
+                    layoutState.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+                    // Selection changes repaint profile details without restarting global tunnel monitoring.
+                    if (_tunnelLifecycle != null && _currentState != ConnectionState.Disconnected)
+                        UpdateSelectedProfileState(_currentState, _tunnelLifecycle.ProfileName);
+
+                    SetProfileDetailsAvailable(true);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message, Resources.ProfileError, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+
+            mniDeleteTunnel.Enabled = e.IsSelected;
+            btnEdit.Enabled = e.IsSelected;
+            return;
+
+            void AddRow(TableLayoutPanel container, string name, string key, string value, bool isOptional = false,
+                Image icon = null)
+            {
+                if (isOptional && string.IsNullOrWhiteSpace(value)) return;
+
+                container.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                container.RowCount = container.RowStyles.Count;
+
+                var label = new Label
+                {
+                    Dock = DockStyle.Fill,
+                    Name = $"lbl{name}",
+                    Height = 18,
+                    Margin = new Padding(0, 2, 10, 2),
+                    Padding = new Padding(0),
+                    TextAlign = ContentAlignment.TopRight,
+                    Text = $@"{key}:"
+                };
+
+                container.Controls.Add(label, 0, container.RowCount - 1);
+
+                if (icon != null)
+                {
+                    var panel = new TableLayoutPanel
+                    {
+                        AutoSize = true,
+                        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                        Dock = DockStyle.Fill,
+                        Margin = new Padding(0, 2, 0, 2),
+                        Padding = new Padding(0)
+                    };
+
+                    panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
+                    panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 20));
+                    panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+                    panel.RowCount = panel.RowStyles.Count;
+                    panel.ColumnCount = panel.ColumnStyles.Count;
+
+                    panel.Controls.Add(new PictureBox
+                    {
+                        Dock = DockStyle.Fill,
+                        Height = 16,
+                        Image = icon,
+                        Margin = new Padding(0),
+                        Name = $"img{name}",
+                        Padding = new Padding(0),
+                        Width = 16
+                    }, 0, 0);
+
+                    panel.Controls.Add(new TextBox
+                    {
+                        BorderStyle = BorderStyle.None,
+                        BackColor = SystemColors.Window,
+                        Dock = DockStyle.Fill,
+                        Margin = new Padding(0),
+                        Multiline = true,
+                        Name = $"txt{name}",
+                        Padding = new Padding(0),
+                        ReadOnly = true,
+                        Text = value
+                    });
+
+                    container.Controls.Add(panel, 1, container.RowCount - 1);
+                }
+                else
+                {
+                    var textBox = new TextBox
+                    {
+                        BorderStyle = BorderStyle.None,
+                        BackColor = SystemColors.Window,
+                        Dock = DockStyle.Fill,
+                        Margin = new Padding(0, 2, 0, 2),
+                        Multiline = true,
+                        Name = $"txt{name}",
+                        Padding = new Padding(0),
+                        ReadOnly = true,
+                        Text = value
+                    };
+
+                    container.Controls.Add(textBox, 1, container.RowCount - 1);
+                }
+            }
+
+        }
+
+        private void OnLayoutPanelResize(object sender, EventArgs e)
+        {
+            var panel = sender as TableLayoutPanel;
+            if (panel != null && panel.Width > 0 && panel.ColumnStyles.Count > 1 &&
+                panel.ColumnStyles[1].SizeType == SizeType.Absolute)
+                panel.ColumnStyles[1].Width = panel.Width - panel.ColumnStyles[0].Width;
+
+            if (panel == null) return;
+            foreach (Control control in panel.Controls)
+                if (control is TextBox textBox)
+                {
+                    var textHeight = TextRenderer.MeasureText(
+                        textBox.Text,
+                        textBox.Font,
+                        new Size(
+                            Math.Max(1, textBox.ClientSize.Width),
+                            int.MaxValue),
+                        TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl).Height;
+
+                    textBox.Height = Math.Max(textBox.Font.Height + 4,
+                        textHeight + Math.Max(1, textHeight / textBox.Font.Height));
+                }
+        }
+
+        #endregion
+
+        #region LogWindow
+
+        private void OnLogWindowResize(object sender, EventArgs e)
+        {
+            // Ensure the log list rows fill the entire width, but no scrollbar appears
+            lstLog.Columns[1].Width = Math.Max(0, lstLog.ClientSize.Width - lstLog.Columns[0].Width - 4);
+        }
+
+        private void OnLogDrawHeader(object sender, DrawListViewItemEventArgs e)
+        {
+            e.DrawDefault = true;
+
+            if (e.ItemIndex % 2 == 1)
+            {
+                var color = Color.FromKnownColor(KnownColor.Window);
+
+                e.Item.BackColor = Color.FromArgb(
+                    (int)(color.R * 0.95),
+                    (int)(color.G * 0.95),
+                    (int)(color.B * 0.95));
+
+                e.Item.UseItemStyleForSubItems = true;
+            }
+        }
+
+        private void OnLogDrawColumnHeader(object sender, DrawListViewColumnHeaderEventArgs e)
+        {
+            e.DrawDefault = true;
+        }
+
+        #endregion
+    }
+}

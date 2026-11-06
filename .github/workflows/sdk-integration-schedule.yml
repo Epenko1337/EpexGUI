@@ -1,0 +1,17 @@
+name: Scheduled WireSock SDK Integration
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  sdk-integration:
+    # Load the privileged workflow from the audited immutable implementation
+    # commit rather than from a mutable branch or tag.
+    uses: wiresock/WireSockUI/.github/workflows/sdk-integration.yml@0440f3d3a42216a23ce455686ce983b88af62a3e
+    with:
+      require_sdk_validation: false
+      sdk_workflow_sha: 0440f3d3a42216a23ce455686ce983b88af62a3e

@@ -1,0 +1,522 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: resolve build version
+    runs-on: windows-latest
+    timeout-minutes: 5
+    outputs:
+      value: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Checkout complete first-parent history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve and test repository build version
+        id: version
+        shell: pwsh
+        run: |
+          ./scripts/Test-BuildVersion.Tests.ps1
+          $version = ./scripts/Resolve-BuildVersion.ps1
+          "value=$version" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Add-Content `
+            -LiteralPath $env:GITHUB_STEP_SUMMARY `
+            -Value "Build version: $version"
+
+  dependency-audit:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Verify workflow dependency and credential policy
+        shell: pwsh
+        run: |
+          ./scripts/Resolve-SdkReleaseBranch.Tests.ps1
+          ./scripts/Test-WorkflowSecurity.Tests.ps1
+          ./scripts/Test-WorkflowSecurity.ps1
+
+      - name: Test release SBOM validator
+        shell: pwsh
+        run: ./scripts/Test-ReleaseSbom.Tests.ps1
+
+      - name: Test immutable release publication
+        shell: pwsh
+        run: ./scripts/Invoke-ReleasePublication.Tests.ps1
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          global-json-file: global.json
+
+      - name: Audit all locked direct and transitive NuGet dependencies
+        shell: pwsh
+        run: |
+          dotnet restore WireSockUI.sln `
+            /p:Platform=x64 `
+            --locked-mode `
+            -p:NuGetAudit=true `
+            -p:NuGetAuditMode=all `
+            '-warnaserror:NU1901;NU1902;NU1903;NU1904' `
+            -m:1
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Application and test dependency audit failed.'
+          }
+
+          dotnet restore WireSockUI.Installer/WireSockUI.Installer.wixproj `
+            --locked-mode `
+            -p:NuGetAudit=true `
+            -p:NuGetAuditMode=all `
+            '-warnaserror:NU1901;NU1902;NU1903;NU1904'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Installer dependency audit failed.'
+          }
+
+  sdk-contract:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout WireSockUI
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Verify pinned direct SDK contract
+        shell: pwsh
+        run: ./scripts/Verify-WgboosterContract.ps1 -SdkRoot ./sdk-contract
+
+  test:
+    name: test (${{ matrix.configuration }}, ${{ matrix.platform }})
+    needs: version
+    runs-on: ${{ matrix.platform == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration:
+          - Release
+          - Release UWP
+        platform:
+          - ARM64
+          - x86
+          - x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        env:
+          TEST_PLATFORM: ${{ matrix.platform }}
+        run: dotnet restore WireSockUI.sln /p:Platform=$env:TEST_PLATFORM --locked-mode -m:1
+
+      - name: Verify formatting
+        run: dotnet format WireSockUI.sln whitespace --verify-no-changes --no-restore
+
+      - name: Run focused tests
+        env:
+          BUILD_VERSION: ${{ needs.version.outputs.value }}
+          TEST_CONFIGURATION: ${{ matrix.configuration }}
+          TEST_PLATFORM: ${{ matrix.platform }}
+        run: >
+          dotnet run --project WireSockUI.Tests/WireSockUI.Tests.csproj
+          --configuration "$env:TEST_CONFIGURATION"
+          --framework net472-windows
+          --no-restore
+          /p:Platform=$env:TEST_PLATFORM
+          /p:UseSharedCompilation=false
+          /p:Version=$env:BUILD_VERSION
+
+  sdk-integration:
+    # Never execute pull-request code on the elevated SDK runners. Pull requests use
+    # the pinned contract tests above. The privileged workflow definition is loaded
+    # from the audited immutable implementation commit rather than the candidate.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - sdk-contract
+      - test
+    uses: wiresock/WireSockUI/.github/workflows/sdk-integration.yml@0440f3d3a42216a23ce455686ce983b88af62a3e
+    with:
+      sdk_workflow_sha: 0440f3d3a42216a23ce455686ce983b88af62a3e
+
+  native-host-smoke:
+    name: native-host-smoke (${{ matrix.platform }})
+    runs-on: ${{ matrix.platform == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - ARM64
+          - x86
+          - x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          global-json-file: global.json
+
+      - name: Restore native-host project
+        env:
+          TEST_PLATFORM: ${{ matrix.platform }}
+        run: dotnet restore WireSockUI/WireSockUI.csproj /p:Platform=$env:TEST_PLATFORM --locked-mode
+
+      - name: Build Debug native CLR host
+        env:
+          TEST_PLATFORM: ${{ matrix.platform }}
+        run: >
+          dotnet build WireSockUI/WireSockUI.csproj
+          --configuration Debug
+          --framework net472-windows
+          --no-restore
+          /p:Platform=$env:TEST_PLATFORM
+          /p:UseSharedCompilation=false
+          /p:Version=0.0.0
+
+      - name: Exercise pre-CLR native security boundary
+        shell: pwsh
+        env:
+          TEST_PLATFORM: ${{ matrix.platform }}
+        run: ./scripts/Test-NativeHost.ps1 -LauncherPath "./bin/$env:TEST_PLATFORM/Debug/net472-windows/WireSockUI.exe"
+
+  msi-install-smoke:
+    name: msi-install-smoke (${{ matrix.platform }})
+    needs:
+      - publish
+    runs-on: ${{ matrix.platform == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - x86
+          - x64
+          - ARM64
+    steps:
+      - name: Checkout validation tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          global-json-file: global.json
+
+      - name: Restore locked installer toolchain
+        run: dotnet restore WireSockUI.Installer/WireSockUI.Installer.wixproj --locked-mode
+
+      - name: Download architecture-matched unsigned MSI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: 'unsigned-msi-${{ matrix.platform }}-no-uwp'
+          path: unsigned-msi
+
+      - name: Install, launch-check, repair, and uninstall MSI
+        shell: pwsh
+        env:
+          MSI_PLATFORM: ${{ matrix.platform }}
+        run: |
+          $msis = @(Get-ChildItem -LiteralPath unsigned-msi -Recurse -File -Filter '*.msi')
+          if ($msis.Count -ne 1) {
+            throw "Expected one $env:MSI_PLATFORM MSI, found $($msis.Count)."
+          }
+          $msi = $msis[0].FullName
+          ./scripts/Test-MsiInstallation.ps1 `
+            -MsiPath $msi `
+            -ValidationMetadataPath "$msi.validation.json" `
+            -EphemeralMachine
+
+  publish:
+    name: publish (${{ matrix.configuration }}, ${{ matrix.platform }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    needs:
+      - dependency-audit
+      - sdk-contract
+      - test
+      - version
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration:
+          - Release
+          - Release UWP
+        platform:
+          - ARM64
+          - x86
+          - x64
+        include:
+          - configuration: Release
+            installer_flavor: no-uwp
+          - configuration: Release UWP
+            installer_flavor: uwp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          global-json-file: global.json
+
+      - name: Restore locked installer toolchain
+        run: dotnet restore WireSockUI.Installer/WireSockUI.Installer.wixproj --locked-mode
+
+      - name: Publish WireSockUI
+        env:
+          BUILD_CONFIGURATION: ${{ matrix.configuration }}
+          BUILD_PLATFORM: ${{ matrix.platform }}
+          BUILD_VERSION: ${{ needs.version.outputs.value }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: >
+          dotnet publish WireSockUI/WireSockUI.csproj
+          --configuration "$env:BUILD_CONFIGURATION"
+          --framework net472-windows
+          --no-self-contained
+          /p:Platform="$env:BUILD_PLATFORM"
+          /p:UseSharedCompilation=false
+          /p:Version="$env:BUILD_VERSION"
+          /p:Repository="$env:SOURCE_REPOSITORY"
+          /p:RestoreLockedMode=true
+          -m:1
+
+      - name: Verify no-build publish launcher isolation
+        if: matrix.configuration == 'Release' && matrix.platform == 'x86'
+        shell: pwsh
+        env:
+          BUILD_VERSION: ${{ needs.version.outputs.value }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          $targetDirectory = Join-Path $env:GITHUB_WORKSPACE `
+            'bin/x86/Release/net472-windows'
+          $publishDirectory = Join-Path $targetDirectory 'publish'
+          Copy-Item `
+            -LiteralPath (Join-Path $publishDirectory 'WireSockUI.exe') `
+            -Destination (Join-Path $targetDirectory 'WireSockUI.exe')
+
+          dotnet publish WireSockUI/WireSockUI.csproj `
+            --configuration Release `
+            --framework net472-windows `
+            --no-build `
+            --no-restore `
+            --no-self-contained `
+            /p:Platform=x86 `
+            /p:UseSharedCompilation=false `
+            /p:Version="$env:BUILD_VERSION" `
+            /p:Repository="$env:SOURCE_REPOSITORY" `
+            /p:RestoreLockedMode=true `
+            -m:1
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The incremental no-build publish failed.'
+          }
+          if (Test-Path `
+                  -LiteralPath (Join-Path $targetDirectory 'WireSockUI.exe') `
+                  -PathType Leaf) {
+            throw 'Publish left a stale runnable launcher in TargetDir.'
+          }
+          if (-not (Test-Path `
+                  -LiteralPath (Join-Path $publishDirectory 'WireSockUI.exe') `
+                  -PathType Leaf)) {
+            throw 'Publish did not produce the validated PublishDir launcher.'
+          }
+
+      - name: Build and validate unsigned MSI
+        shell: pwsh
+        env:
+          BUILD_CONFIGURATION: ${{ matrix.configuration }}
+          BUILD_PLATFORM: ${{ matrix.platform }}
+          BUILD_VERSION: ${{ needs.version.outputs.value }}
+          INSTALLER_FLAVOR: ${{ matrix.installer_flavor }}
+        run: |
+          $output = Join-Path $env:GITHUB_WORKSPACE 'ci-msi'
+          ./scripts/Build-Msi.ps1 `
+            -Platform $env:BUILD_PLATFORM `
+            -Version $env:BUILD_VERSION `
+            -Flavor $env:INSTALLER_FLAVOR `
+            -PayloadDirectory "./bin/$env:BUILD_PLATFORM/$env:BUILD_CONFIGURATION/net472-windows/publish" `
+            -OutputDirectory $output `
+            -NoRestore
+
+      - name: Upload MSI for architecture-isolation validation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: 'unsigned-msi-${{ matrix.platform }}-${{ matrix.installer_flavor }}'
+          path: ci-msi
+          if-no-files-found: error
+          retention-days: 1
+
+  msi-architecture-isolation:
+    needs: publish
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout validation tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Download all unsigned MSI packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: unsigned-msi-*
+          path: unsigned-msis
+          merge-multiple: true
+
+      - name: Verify cross-architecture MSI identities
+        shell: pwsh
+        run: |
+          $msis = @(Get-ChildItem -LiteralPath unsigned-msis -File -Filter '*.msi')
+          if ($msis.Count -ne 6) {
+            throw "Expected six unsigned MSI packages, found $($msis.Count)."
+          }
+          ./scripts/Test-MsiArchitectureIsolation.ps1 -MsiPath $msis.FullName
+          ./scripts/Test-MsiArchitectureIsolation.Tests.ps1 -MsiPath $msis.FullName
+          ./scripts/MsiTest.AccessControl.Tests.ps1
+          ./scripts/MsiTest.Diagnostics.Tests.ps1
+          ./scripts/MsiTest.KnownFolders.Tests.ps1
+
+  msi-transition-smoke:
+    needs:
+      - publish
+      - version
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          global-json-file: global.json
+
+      - name: Restore locked application and installer toolchains
+        shell: pwsh
+        run: |
+          dotnet restore WireSockUI/WireSockUI.csproj /p:Platform=x64 --locked-mode
+          if ($LASTEXITCODE -ne 0) { throw 'Application restore failed.' }
+          dotnet restore WireSockUI.Installer/WireSockUI.Installer.wixproj --locked-mode
+          if ($LASTEXITCODE -ne 0) { throw 'Installer restore failed.' }
+
+      - name: Resolve MSI transition versions
+        shell: pwsh
+        env:
+          BASELINE_VERSION: ${{ needs.version.outputs.value }}
+        run: |
+          if ($env:BASELINE_VERSION -cnotmatch '\A(?<major>[0-9]+)\.(?<minor>[0-9]+)\.(?<patch>[0-9]+)\z') {
+            throw "Baseline version '$env:BASELINE_VERSION' is not canonical."
+          }
+          $nextPatch = [uint32]$Matches.patch + 1
+          if ($nextPatch -gt 65535) {
+            throw 'The MSI transition target exceeds the Windows Installer patch limit.'
+          }
+          $currentVersion = "$($Matches.major).$($Matches.minor).$nextPatch"
+          "BASELINE_VERSION=$env:BASELINE_VERSION" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "CURRENT_VERSION=$currentVersion" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Download baseline x64 UWP MSI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: unsigned-msi-x64-uwp
+          path: baseline-x64-uwp
+
+      - name: Download baseline x86 no-UWP MSI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: unsigned-msi-x86-no-uwp
+          path: baseline-x86-no-uwp
+
+      - name: Publish current x64 payloads
+        shell: pwsh
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          dotnet publish WireSockUI/WireSockUI.csproj `
+            --configuration Release `
+            --framework net472-windows `
+            --no-self-contained `
+            --no-restore `
+            /p:Platform=x64 `
+            /p:UseSharedCompilation=false `
+            /p:Version="$env:CURRENT_VERSION" `
+            /p:Repository="$env:SOURCE_REPOSITORY" `
+            -m:1
+          if ($LASTEXITCODE -ne 0) { throw 'Current no-UWP publish failed.' }
+
+          dotnet publish WireSockUI/WireSockUI.csproj `
+            --configuration 'Release UWP' `
+            --framework net472-windows `
+            --no-self-contained `
+            --no-restore `
+            /p:Platform=x64 `
+            /p:UseSharedCompilation=false `
+            /p:Version="$env:CURRENT_VERSION" `
+            /p:Repository="$env:SOURCE_REPOSITORY" `
+            -m:1
+          if ($LASTEXITCODE -ne 0) { throw 'Current UWP publish failed.' }
+
+      - name: Build current x64 MSIs
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:GITHUB_WORKSPACE 'current-msis'
+          ./scripts/Build-Msi.ps1 `
+            -Platform x64 `
+            -Version $env:CURRENT_VERSION `
+            -Flavor no-uwp `
+            -PayloadDirectory './bin/x64/Release/net472-windows/publish' `
+            -OutputDirectory $output `
+            -NoRestore
+
+          ./scripts/Build-Msi.ps1 `
+            -Platform x64 `
+            -Version $env:CURRENT_VERSION `
+            -Flavor uwp `
+            -PayloadDirectory './bin/x64/Release UWP/net472-windows/publish' `
+            -OutputDirectory $output `
+            -NoRestore
+
+      - name: Exercise MSI transitions and rollback
+        shell: pwsh
+        run: |
+          ./scripts/Test-MsiTransitions.ps1 `
+            -BaselineX64UwpMsiPath "./baseline-x64-uwp/WireSockUI-$env:BASELINE_VERSION-win-x64-uwp.msi" `
+            -BaselineX64UwpValidationMetadataPath "./baseline-x64-uwp/WireSockUI-$env:BASELINE_VERSION-win-x64-uwp.msi.validation.json" `
+            -CurrentX64NoUwpMsiPath "./current-msis/WireSockUI-$env:CURRENT_VERSION-win-x64-no-uwp.msi" `
+            -CurrentX64NoUwpValidationMetadataPath "./current-msis/WireSockUI-$env:CURRENT_VERSION-win-x64-no-uwp.msi.validation.json" `
+            -CurrentX64UwpMsiPath "./current-msis/WireSockUI-$env:CURRENT_VERSION-win-x64-uwp.msi" `
+            -CurrentX64UwpValidationMetadataPath "./current-msis/WireSockUI-$env:CURRENT_VERSION-win-x64-uwp.msi.validation.json" `
+            -BaselineX86NoUwpMsiPath "./baseline-x86-no-uwp/WireSockUI-$env:BASELINE_VERSION-win-x86-no-uwp.msi" `
+            -BaselineX86NoUwpValidationMetadataPath "./baseline-x86-no-uwp/WireSockUI-$env:BASELINE_VERSION-win-x86-no-uwp.msi.validation.json" `
+            -EphemeralMachine
